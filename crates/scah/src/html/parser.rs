@@ -486,6 +486,44 @@ mod tests {
     }
 
     #[test]
+    fn test_text_content_buffer_is_empty_when_queries_do_not_request_text() {
+        let html = "<div><a href='x'>Hello <b>World</b></a></div>";
+        let mut reader = Reader::new(html);
+        let queries = &[Query::all("a", Save::only_inner_html()).unwrap().build()];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        while parser.next(&mut reader) {}
+
+        let store = parser.matches();
+        let anchor = store.get("a").unwrap().next().unwrap();
+        assert_eq!(anchor.inner_html, Some("Hello <b>World</b>"));
+        assert_eq!(anchor.text_content(&store), None);
+        assert!(store.text_content.content.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_queries_keep_text_content_available_when_any_query_requests_it() {
+        let html = "<div><a href='x'>Hello <b>World</b></a></div>";
+        let mut reader = Reader::new(html);
+        let queries = &[
+            Query::all("a", Save::only_inner_html()).unwrap().build(),
+            Query::all("b", Save::only_text_content()).unwrap().build(),
+        ];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        while parser.next(&mut reader) {}
+
+        let store = parser.matches();
+        let anchor = store.get("a").unwrap().next().unwrap();
+        let bold = store.get("b").unwrap().next().unwrap();
+        assert_eq!(anchor.inner_html, Some("Hello <b>World</b>"));
+        assert_eq!(anchor.text_content(&store), None);
+        assert_eq!(bold.text_content(&store), Some("World"));
+    }
+
+    #[test]
     fn test_top_level_multi_selection() {
         let mut reader = Reader::new(BASIC_HTML);
 

@@ -368,24 +368,24 @@ fn bench_lexbor_first(html: String) {
     let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
 
     let product = doc.select(PRODUCT_SELECTOR);
-    let product = product.iter().next().unwrap();
+    let product = product.first().unwrap();
     let attrs = product.attributes();
     black_box(attrs.get("class"));
     black_box(product.inner_html());
     black_box(product.text_content());
 
     let title = doc.select(PRODUCT_TITLE_GLOBAL_SELECTOR);
-    let title = title.iter().next().unwrap();
+    let title = title.first().unwrap();
     black_box(title.inner_html());
     black_box(title.text_content());
 
     let rating = doc.select(PRODUCT_RATING_GLOBAL_SELECTOR);
-    let rating = rating.iter().next().unwrap();
+    let rating = rating.first().unwrap();
     black_box(rating.inner_html());
     black_box(rating.text_content());
 
     let description = doc.select(PRODUCT_DESCRIPTION_GLOBAL_SELECTOR);
-    let description = description.iter().next().unwrap();
+    let description = description.first().unwrap();
     black_box(description.inner_html());
     black_box(description.text_content());
 }
