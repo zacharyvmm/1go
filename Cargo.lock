@@ -1633,6 +1633,7 @@ name = "scah"
 version = "0.0.20"
 dependencies = [
  "pretty_assertions",
+ "rayon",
  "scah-macros",
  "scah-query-ir",
  "scah-reader",

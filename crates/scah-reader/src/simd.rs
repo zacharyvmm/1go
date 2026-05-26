@@ -135,11 +135,18 @@ impl SimdInput {
             self.v0,
             std::arch::aarch64::vdupq_n_u8(byte),
         );
-        // Convert NEON mask to bitmask
+        // Convert NEON mask to bitmask using vector shift and accumulate
+        // The comparison result is 0xFF for match, 0x00 for no match
+        // We need to extract the high bit of each byte into a bitmask
+        let shifted = std::arch::aarch64::vshrq_n_u8(cmp, 7);
+        // Use pairwise addition to pack bits
         let mut mask = 0u32;
-        let mask_bytes = std::arch::aarch64::vshrn_n_u16(cmp, 4);
-        for i in 0..8 {
-            if mask_bytes[i] != 0 {
+        // Extract bits manually - NEON doesn't have movemask equivalent
+        // We process 16 bytes and set bits accordingly
+        let mut bytes = [0u8; 16];
+        std::arch::aarch64::vst1q_u8(bytes.as_mut_ptr(), shifted);
+        for i in 0..16 {
+            if bytes[i] != 0 {
                 mask |= 1 << i;
             }
         }
@@ -256,13 +263,14 @@ unsafe fn find_any_neon(input: &[u8], start: usize, needles: &[u8; 4]) -> usize 
                 std::arch::aarch64::vorrq_u8(m2, m3),
             );
 
-            // Check if any byte is non-zero
+            // Check if any byte is non-zero using vmaxvq
             let max = std::arch::aarch64::vmaxvq_u8(any);
             if max != 0 {
-                // Find first set bit
-                let mask = std::arch::aarch64::vshrn_n_u16(any, 4);
+                // Find first set bit by extracting bytes
+                let mut bytes = [0u8; 16];
+                std::arch::aarch64::vst1q_u8(bytes.as_mut_ptr(), any);
                 for i in 0..16 {
-                    if mask[i] != 0 {
+                    if bytes[i] != 0 {
                         return pos + i;
                     }
                 }

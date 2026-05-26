@@ -9,7 +9,7 @@ homepage = "https://github.com/zacharyvmm/scah"
 documentation = "https://docs.rs/scah-reader"
 
 [dependencies]
-memchr = "2.7"
+memchr = { version = "2.7", default-features = false }
 
 # SIMD support
 [target.'cfg(target_arch = "x86_64")'.dependencies]
@@ -17,6 +17,10 @@ memchr = "2.7"
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 # ARM NEON intrinsics are in std::arch
+
+[features]
+default = ["std"]
+std = ["memchr/std"]
 
 [lints.clippy]
 let-and-return = "allow"

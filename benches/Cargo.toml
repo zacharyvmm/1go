@@ -83,3 +83,8 @@ harness = false
 name = "speed_bench_fused_tape"
 path = "fused_tape/speed_bench.rs"
 harness = false
+
+[[bench]]
+name = "speed_bench_parallel_fused"
+path = "parallel_fused/speed_bench.rs"
+harness = false

@@ -112,7 +112,10 @@ mod otel;
 pub use engine::multiplexer::QueryMultiplexer;
 pub use html::element::builder::XHtmlElement;
 pub use html::parser::XHtmlParser;
-pub use html::tape::{TapeParser, StructuralIndex, TapeEntry, TapeEntryKind, CompactAttrEntry, AttrFlags, FusedTapeBuilder};
+pub use html::tape::{
+    TapeParser, StructuralIndex, TapeEntry, TapeEntryKind, CompactAttrEntry, AttrFlags,
+    FusedTapeBuilder, ChunkSplitter, TapeMerger, ChunkResult, ChunkEndState, DocumentProfile,
+};
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
 pub use scah_query_ir::{
@@ -286,6 +289,210 @@ where
     };
 
     parser.parse_fused()
+}
+
+/// Parse HTML using the parallel fused tape pipeline.
+///
+/// This is the most optimized parsing path that splits the input into 64KB
+/// chunks, processes each chunk in parallel using rayon, then merges the
+/// results with boundary fixups.
+///
+/// For documents smaller than 128KB, falls back to sequential fused parsing.
+///
+/// # When to use this
+///
+/// The parallel parser is optimized for:
+/// - Large documents (>100KB) where parallelism provides significant speedup
+/// - Multi-core systems where rayon can distribute work across threads
+/// - Attribute-heavy HTML where the fused tape builder already excels
+///
+/// # Parameters
+///
+/// - `html`: The HTML source string
+/// - `queries`: A slice of compiled [`Query`] objects
+///
+/// # Returns
+///
+/// A [`Store`] containing all matched elements
+///
+/// # Example
+///
+/// ```rust
+/// use scah::{Query, Save, parse_fused_parallel};
+///
+/// let html = "<div><a href='link' class='test'>Hello</a></div>";
+/// let queries = &[Query::all("a", Save::all())
+///     .expect("valid selector")
+///     .build()];
+/// let store = parse_fused_parallel(html, queries);
+///
+/// let links: Vec<_> = store.get("a").unwrap().collect();
+/// assert_eq!(links.len(), 1);
+/// assert_eq!(links[0].name, "a");
+/// assert_eq!(links[0].attribute(&store, "href"), Some("link"));
+/// ```
+pub fn parse_fused_parallel<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    queries: &'a [Q],
+) -> Store<'html, 'query>
+where
+    Q: QuerySpec<'query>,
+{
+    let selectors = QueryMultiplexer::new(queries);
+    let parser = if selectors.requires_text_content() {
+        TapeParser::with_capacity(selectors, html.as_bytes(), html.len())
+    } else {
+        TapeParser::new(selectors, html.as_bytes())
+    };
+
+    parser.parse_fused_parallel()
+}
+
+/// Parse HTML using optimized direct parallel writing.
+///
+/// This is the most optimized parsing path that avoids merge overhead by:
+/// 1. First pass: Each chunk computes only counts (fast, no allocations)
+/// 2. Prefix scan: Compute cumulative offsets for each chunk
+/// 3. Second pass: Each chunk writes directly to the final buffer
+///
+/// For documents smaller than 1MB, falls back to sequential fused parsing.
+///
+/// # When to use this
+///
+/// This parser is optimized for:
+/// - Very large documents (>1MB) where merge overhead is significant
+/// - Multi-core systems where rayon can distribute work across threads
+/// - Scenarios where minimizing intermediate allocations is critical
+///
+/// # Parameters
+///
+/// - `html`: The HTML source string
+/// - `queries`: A slice of compiled [`Query`] objects
+///
+/// # Returns
+///
+/// A [`Store`] containing all matched elements
+///
+/// # Example
+///
+/// ```rust
+/// use scah::{Query, Save, parse_fused_parallel_direct};
+///
+/// let html = "<div><a href='link' class='test'>Hello</a></div>";
+/// let queries = &[Query::all("a", Save::all())
+///     .expect("valid selector")
+///     .build()];
+/// let store = parse_fused_parallel_direct(html, queries);
+///
+/// let links: Vec<_> = store.get("a").unwrap().collect();
+/// assert_eq!(links.len(), 1);
+/// assert_eq!(links[0].name, "a");
+/// assert_eq!(links[0].attribute(&store, "href"), Some("link"));
+/// ```
+pub fn parse_fused_parallel_direct<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    queries: &'a [Q],
+) -> Store<'html, 'query>
+where
+    Q: QuerySpec<'query>,
+{
+    let selectors = QueryMultiplexer::new(queries);
+    let parser = if selectors.requires_text_content() {
+        TapeParser::with_capacity(selectors, html.as_bytes(), html.len())
+    } else {
+        TapeParser::new(selectors, html.as_bytes())
+    };
+
+    parser.parse_fused_parallel_direct()
+}
+
+/// Parse HTML using adaptive parallel fused tape pipeline.
+///
+/// This method analyzes the document to determine optimal chunk size based on:
+/// - Document size
+/// - Tag density (tags per KB)
+/// - Attribute density (attrs per tag)
+/// - Available CPU cores
+///
+/// For documents smaller than 1MB, falls back to sequential fused parsing.
+///
+/// # When to use this
+///
+/// This parser is optimized for:
+/// - Documents where the optimal chunk size varies based on content
+/// - Mixed HTML with varying tag/attribute densities
+/// - Multi-core systems where load balancing is important
+///
+/// # Parameters
+///
+/// - `html`: The HTML source string
+/// - `queries`: A slice of compiled [`Query`] objects
+///
+/// # Returns
+///
+/// A [`Store`] containing all matched elements
+///
+/// # Example
+///
+/// ```rust
+/// use scah::{Query, Save, parse_fused_parallel_adaptive};
+///
+/// let html = "<div><a href='link' class='test'>Hello</a></div>";
+/// let queries = &[Query::all("a", Save::all())
+///     .expect("valid selector")
+///     .build()];
+/// let store = parse_fused_parallel_adaptive(html, queries);
+///
+/// let links: Vec<_> = store.get("a").unwrap().collect();
+/// assert_eq!(links.len(), 1);
+/// assert_eq!(links[0].name, "a");
+/// assert_eq!(links[0].attribute(&store, "href"), Some("link"));
+/// ```
+pub fn parse_fused_parallel_adaptive<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    queries: &'a [Q],
+) -> Store<'html, 'query>
+where
+    Q: QuerySpec<'query>,
+{
+    let selectors = QueryMultiplexer::new(queries);
+    let parser = if selectors.requires_text_content() {
+        TapeParser::with_capacity(selectors, html.as_bytes(), html.len())
+    } else {
+        TapeParser::new(selectors, html.as_bytes())
+    };
+
+    parser.parse_fused_parallel_adaptive()
+}
+
+/// Analyze document characteristics for adaptive chunk sizing.
+///
+/// This function returns a [`DocumentProfile`] containing information about
+/// the document's tag density, attribute density, and other characteristics
+/// that can be used to optimize parallel processing.
+///
+/// # Arguments
+///
+/// * `html` - The HTML source string
+///
+/// # Returns
+///
+/// A [`DocumentProfile`] with document characteristics
+///
+/// # Example
+///
+/// ```rust
+/// use scah::analyze_document;
+///
+/// let html = "<div class='test' id='main'>Hello</div>";
+/// let profile = analyze_document(html);
+///
+/// println!("Tag density: {:.1} tags/KB", profile.tag_density);
+/// println!("Attribute density: {:.1} attrs/tag", profile.attr_density);
+/// println!("Optimal chunk size: {} bytes", profile.optimal_chunk_size());
+/// ```
+pub fn analyze_document(html: &str) -> DocumentProfile {
+    DocumentProfile::analyze(html.as_bytes())
 }
 
 /// Build a structural index from HTML input using SIMD acceleration

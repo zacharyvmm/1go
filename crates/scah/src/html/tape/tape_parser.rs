@@ -169,6 +169,80 @@ where
         self.store
     }
 
+    /// Parse the HTML input using the parallel fused tape pipeline.
+    ///
+    /// This splits the input into 64KB chunks, processes each chunk
+    /// independently in parallel using rayon, then merges the results
+    /// with boundary fixups for split tags, attribute counts, and
+    /// text coalescing.
+    ///
+    /// For documents smaller than 128KB, falls back to sequential
+    /// fused parsing.
+    ///
+    /// # Returns
+    /// The `Store` containing all matched elements
+    pub fn parse_fused_parallel(mut self) -> Store<'html, 'query> {
+        // Parallel fused scan: split into chunks, process in parallel, merge
+        let (tape, compact_attrs, tag_attr_map) = FusedTapeBuilder::build_parallel(self.source);
+        self.tape = tape;
+        self.compact_attributes = compact_attrs;
+        self.tag_attr_map = tag_attr_map;
+
+        // Run DOM construction using pre-tokenized entries
+        self.run_fused_dom_construction();
+
+        self.store
+    }
+
+    /// Parse the HTML input using optimized direct parallel writing.
+    ///
+    /// This is an optimized version that avoids merge overhead by:
+    /// 1. First pass: Each chunk computes only counts (fast, no allocations)
+    /// 2. Prefix scan: Compute cumulative offsets for each chunk
+    /// 3. Second pass: Each chunk writes directly to the final buffer
+    ///
+    /// For documents smaller than 1MB, falls back to sequential fused parsing.
+    ///
+    /// # Returns
+    /// The `Store` containing all matched elements
+    pub fn parse_fused_parallel_direct(mut self) -> Store<'html, 'query> {
+        // Direct parallel writing: no merge overhead
+        let (tape, compact_attrs, tag_attr_map) = FusedTapeBuilder::build_parallel_direct(self.source);
+        self.tape = tape;
+        self.compact_attributes = compact_attrs;
+        self.tag_attr_map = tag_attr_map;
+
+        // Run DOM construction using pre-tokenized entries
+        self.run_fused_dom_construction();
+
+        self.store
+    }
+
+    /// Parse the HTML input using adaptive parallel fused tape pipeline.
+    ///
+    /// This method analyzes the document to determine optimal chunk size based on:
+    /// - Document size
+    /// - Tag density (tags per KB)
+    /// - Attribute density (attrs per tag)
+    /// - Available CPU cores
+    ///
+    /// For documents smaller than 1MB, falls back to sequential fused parsing.
+    ///
+    /// # Returns
+    /// The `Store` containing all matched elements
+    pub fn parse_fused_parallel_adaptive(mut self) -> Store<'html, 'query> {
+        // Adaptive parallel processing with optimal chunk sizing
+        let (tape, compact_attrs, tag_attr_map) = FusedTapeBuilder::build_parallel_adaptive(self.source);
+        self.tape = tape;
+        self.compact_attributes = compact_attrs;
+        self.tag_attr_map = tag_attr_map;
+
+        // Run DOM construction using pre-tokenized entries
+        self.run_fused_dom_construction();
+
+        self.store
+    }
+
     /// Build the tape from the structural index
     ///
     /// This walks through the structural positions and creates tape entries
@@ -1028,6 +1102,232 @@ mod tests {
         let html = "<div><a href='link'>Hello</a></div>";
         let queries = &[Query::all("a", Save::all()).unwrap().build()];
         let store = parse_tape(html, queries);
+
+        let anchors: Vec<_> = store.get("a").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].name, "a");
+    }
+
+    // --- Parallel fused parser tests ---
+
+    #[test]
+    fn test_parse_fused_parallel_basic() {
+        let html = b"<div><a href='link'>Hello</a></div>";
+        let queries = &[Query::all("a", Save::all()).unwrap().build()];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel();
+
+        let anchors: Vec<_> = store.get("a").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].name, "a");
+        assert_eq!(anchors[0].inner_html, Some("Hello"));
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_attributes() {
+        let html = b"<a href='https://example.com' target='_blank'>Link</a>";
+        let queries = &[Query::all("a[href]", Save::all()).unwrap().build()];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel();
+
+        let anchors: Vec<_> = store.get("a[href]").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].attribute(&store, "href"), Some("https://example.com"));
+        assert_eq!(anchors[0].attribute(&store, "target"), Some("_blank"));
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_nested() {
+        let html = b"<div><section><a href='link'>Link</a></section></div>";
+        let queries = &[
+            Query::all("div section a", Save::all()).unwrap().build(),
+        ];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel();
+
+        let anchors: Vec<_> = store.get("div section a").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_text_content() {
+        let html = b"<div><p>Hello World</p></div>";
+        let queries = &[Query::all("p", Save::only_text_content()).unwrap().build()];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel();
+
+        let paragraphs: Vec<_> = store.get("p").unwrap().collect();
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].text_content(&store), Some("Hello World"));
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_matches_sequential() {
+        // Create a large document that will trigger parallel processing
+        let mut html = String::with_capacity(200 * 1024);
+        html.push_str("<html><body>");
+        for i in 0..2000 {
+            html.push_str(&format!(
+                "<div data-index='{}'>content{}</div>",
+                i, i
+            ));
+        }
+        html.push_str("</body></html>");
+
+        let queries = &[
+            Query::all("div", Save::all()).unwrap().build(),
+        ];
+
+        // Parse with sequential fused
+        let selectors_seq = QueryMultiplexer::new(queries);
+        let parser_seq = TapeParser::new(selectors_seq, html.as_bytes());
+        let store_seq = parser_seq.parse_fused();
+
+        // Parse with parallel fused
+        let selectors_par = QueryMultiplexer::new(queries);
+        let parser_par = TapeParser::new(selectors_par, html.as_bytes());
+        let store_par = parser_par.parse_fused_parallel();
+
+        // Both should find the same elements
+        let divs_seq: Vec<_> = store_seq.get("div").unwrap().collect();
+        let divs_par: Vec<_> = store_par.get("div").unwrap().collect();
+
+        assert_eq!(divs_seq.len(), divs_par.len(), "Sequential found {} elements, parallel found {}", divs_seq.len(), divs_par.len());
+        assert_eq!(divs_seq.len(), 2000, "Expected 2000 divs, found {}", divs_seq.len());
+
+        // Check first and last elements match
+        assert_eq!(divs_seq[0].name, divs_par[0].name);
+        assert_eq!(divs_seq[0].inner_html, divs_par[0].inner_html);
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_api() {
+        use crate::parse_fused_parallel;
+
+        let html = "<div><a href='link'>Hello</a></div>";
+        let queries = &[Query::all("a", Save::all()).unwrap().build()];
+        let store = parse_fused_parallel(html, queries);
+
+        let anchors: Vec<_> = store.get("a").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].name, "a");
+    }
+
+    // --- Direct parallel writing parser tests ---
+
+    #[test]
+    fn test_parse_fused_parallel_direct_basic() {
+        let html = b"<div><a href='link'>Hello</a></div>";
+        let queries = &[Query::all("a", Save::all()).unwrap().build()];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel_direct();
+
+        let anchors: Vec<_> = store.get("a").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].name, "a");
+        assert_eq!(anchors[0].inner_html, Some("Hello"));
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_direct_attributes() {
+        let html = b"<a href='https://example.com' target='_blank'>Link</a>";
+        let queries = &[Query::all("a[href]", Save::all()).unwrap().build()];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel_direct();
+
+        let anchors: Vec<_> = store.get("a[href]").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].attribute(&store, "href"), Some("https://example.com"));
+        assert_eq!(anchors[0].attribute(&store, "target"), Some("_blank"));
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_direct_nested() {
+        let html = b"<div><section><a href='link'>Link</a></section></div>";
+        let queries = &[
+            Query::all("div section a", Save::all()).unwrap().build(),
+        ];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel_direct();
+
+        let anchors: Vec<_> = store.get("div section a").unwrap().collect();
+        assert_eq!(anchors.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_direct_text_content() {
+        let html = b"<div><p>Hello World</p></div>";
+        let queries = &[Query::all("p", Save::only_text_content()).unwrap().build()];
+        let selectors = QueryMultiplexer::new(queries);
+
+        let parser = TapeParser::new(selectors, html);
+        let store = parser.parse_fused_parallel_direct();
+
+        let paragraphs: Vec<_> = store.get("p").unwrap().collect();
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].text_content(&store), Some("Hello World"));
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_direct_matches_sequential() {
+        // Create a large document that will trigger parallel processing
+        let mut html = String::with_capacity(200 * 1024);
+        html.push_str("<html><body>");
+        for i in 0..2000 {
+            html.push_str(&format!(
+                "<div data-index='{}'>content{}</div>",
+                i, i
+            ));
+        }
+        html.push_str("</body></html>");
+
+        let queries = &[
+            Query::all("div", Save::all()).unwrap().build(),
+        ];
+
+        // Parse with sequential fused
+        let selectors_seq = QueryMultiplexer::new(queries);
+        let parser_seq = TapeParser::new(selectors_seq, html.as_bytes());
+        let store_seq = parser_seq.parse_fused();
+
+        // Parse with direct parallel
+        let selectors_dir = QueryMultiplexer::new(queries);
+        let parser_dir = TapeParser::new(selectors_dir, html.as_bytes());
+        let store_dir = parser_dir.parse_fused_parallel_direct();
+
+        // Both should find the same elements
+        let divs_seq: Vec<_> = store_seq.get("div").unwrap().collect();
+        let divs_dir: Vec<_> = store_dir.get("div").unwrap().collect();
+
+        assert_eq!(divs_seq.len(), divs_dir.len(), "Sequential found {} elements, direct parallel found {}", divs_seq.len(), divs_dir.len());
+        assert_eq!(divs_seq.len(), 2000, "Expected 2000 divs, found {}", divs_seq.len());
+
+        // Check first and last elements match
+        assert_eq!(divs_seq[0].name, divs_dir[0].name);
+        assert_eq!(divs_seq[0].inner_html, divs_dir[0].inner_html);
+    }
+
+    #[test]
+    fn test_parse_fused_parallel_direct_api() {
+        use crate::parse_fused_parallel_direct;
+
+        let html = "<div><a href='link'>Hello</a></div>";
+        let queries = &[Query::all("a", Save::all()).unwrap().build()];
+        let store = parse_fused_parallel_direct(html, queries);
 
         let anchors: Vec<_> = store.get("a").unwrap().collect();
         assert_eq!(anchors.len(), 1);

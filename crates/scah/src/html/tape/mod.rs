@@ -31,4 +31,7 @@ mod structural_scanner;
 
 pub use tape_entry::{TapeEntry, TapeEntryKind, CompactAttrEntry, AttrFlags};
 pub use tape_parser::TapeParser;
-pub use structural_scanner::{StructuralIndex, FusedTapeBuilder};
+pub use structural_scanner::{
+    StructuralIndex, FusedTapeBuilder, ChunkSplitter, TapeMerger,
+    ChunkResult, ChunkEndState, DocumentProfile,
+};
