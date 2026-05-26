@@ -154,6 +154,44 @@ impl<'a> Reader<'a> {
     pub fn scan_attributes(&self) -> simd::AttributeScanResult {
         self.scanner.scan_attributes(self.source, self.position)
     }
+
+    /// Set the reader position directly
+    ///
+    /// This is used by the tape parser to seek to specific positions
+    /// identified during structural indexing.
+    ///
+    /// # Safety
+    /// The caller must ensure `pos` is within bounds and at a valid UTF-8 boundary
+    #[inline]
+    pub fn set_position(&mut self, pos: usize) {
+        debug_assert!(pos <= self.source.len(), "Position {} out of bounds (len: {})", pos, self.source.len());
+        self.position = pos.min(self.source.len());
+    }
+
+    /// Get a reference to the source bytes
+    ///
+    /// This is used by the tape parser to access the original source
+    /// for extracting content at specific positions.
+    #[inline]
+    pub fn source_bytes(&self) -> &'a [u8] {
+        self.source
+    }
+
+    /// Create a new reader starting at a specific position
+    ///
+    /// This creates a new reader that shares the same source but starts
+    /// at the given position. Useful for the tape parser to create
+    /// readers at specific structural positions.
+    pub fn from_position(source: &'a [u8], position: usize) -> Self {
+        let cpu_features = CpuFeatures::detect();
+        let scanner = create_scanner();
+        Self {
+            source,
+            position: position.min(source.len()),
+            scanner,
+            cpu_features,
+        }
+    }
 }
 
 impl<'a> Iterator for Reader<'a> {

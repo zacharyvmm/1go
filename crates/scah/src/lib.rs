@@ -112,6 +112,7 @@ mod otel;
 pub use engine::multiplexer::QueryMultiplexer;
 pub use html::element::builder::XHtmlElement;
 pub use html::parser::XHtmlParser;
+pub use html::tape::{TapeParser, StructuralIndex, TapeEntry, TapeEntryKind};
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
 pub use scah_query_ir::{
@@ -176,4 +177,88 @@ where
     while parser.next(&mut reader) {}
 
     parser.finish()
+}
+
+/// Parse HTML using the tape-based two-stage pipeline
+///
+/// This is an alternative to [`parse`] that uses the two-stage pipeline:
+/// 1. **Stage 1 (SIMD):** Scans the entire input to build a structural index
+/// 2. **Stage 2 (Sequential):** Builds a flat tape and drives DOM construction
+///
+/// # When to use this
+///
+/// The tape-based parser is optimized for:
+/// - Large documents where SIMD scanning provides significant speedup
+/// - Documents with many structural characters (tags, attributes)
+/// - Scenarios where cache-friendly sequential access is beneficial
+///
+/// # Parameters
+///
+/// - `html`: The HTML source string
+/// - `queries`: A slice of compiled [`Query`] objects
+///
+/// # Returns
+///
+/// A [`Store`] containing all matched elements
+///
+/// # Example
+///
+/// ```rust
+/// use scah::{Query, Save, parse_tape};
+///
+/// let html = "<div><a href='link'>Hello</a></div>";
+/// let queries = &[Query::all("a", Save::all())
+///     .expect("valid selector")
+///     .build()];
+/// let store = parse_tape(html, queries);
+///
+/// let links: Vec<_> = store.get("a").unwrap().collect();
+/// assert_eq!(links.len(), 1);
+/// assert_eq!(links[0].name, "a");
+/// ```
+pub fn parse_tape<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    queries: &'a [Q],
+) -> Store<'html, 'query>
+where
+    Q: QuerySpec<'query>,
+{
+    let selectors = QueryMultiplexer::new(queries);
+    let parser = if selectors.requires_text_content() {
+        TapeParser::with_capacity(selectors, html.as_bytes(), html.len())
+    } else {
+        TapeParser::new(selectors, html.as_bytes())
+    };
+
+    parser.parse()
+}
+
+/// Build a structural index from HTML input using SIMD acceleration
+///
+/// This function exposes Stage 1 of the two-stage pipeline for testing
+/// and benchmarking purposes.
+///
+/// # Arguments
+///
+/// * `html` - The HTML source string
+///
+/// # Returns
+///
+/// A [`StructuralIndex`] containing positions of all structural characters
+///
+/// # Example
+///
+/// ```rust
+/// use scah::index_html;
+///
+/// let html = "<div class='test'>Hello</div>";
+/// let index = index_html(html);
+///
+/// println!("Found {} structural characters", index.len());
+/// for pos in index.iter() {
+///     println!("  Position {}: '{}'", pos, html.as_bytes()[pos as usize] as char);
+/// }
+/// ```
+pub fn index_html(html: &str) -> StructuralIndex {
+    StructuralIndex::build(html.as_bytes())
 }
