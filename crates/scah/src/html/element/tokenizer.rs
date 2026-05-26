@@ -1,4 +1,5 @@
 use crate::Reader;
+use scah_reader::{BoundaryHit, BoundaryKind};
 
 #[derive(Debug, PartialEq)]
 pub enum ElementAttributeToken<'a> {
@@ -13,33 +14,105 @@ const END_OF_ELEMENT: u8 = b'>';
 
 impl<'a> ElementAttributeToken<'a> {
     pub fn next(reader: &mut Reader<'a>) -> Option<Self> {
-        reader.next_while(b' ');
+        // SIMD-accelerated whitespace skip
+        reader.skip_whitespace();
 
         let start_pos = reader.get_position();
 
-        match reader.next()? {
-            DOUBLEQUOTE => {
-                let star_position = reader.get_position();
-                reader.next_until(DOUBLEQUOTE);
-                let content_inside_quotes = reader.slice(star_position..reader.get_position());
-                reader.skip();
+        let first_byte = reader.peek()?;
 
-                Some(Self::String(content_inside_quotes))
+        match first_byte {
+            DOUBLEQUOTE => {
+                reader.skip(); // skip opening quote
+                let content_start = reader.get_position();
+                // Use SIMD-accelerated search for the closing quote
+                reader.next_until(DOUBLEQUOTE);
+                let content = reader.slice(content_start..reader.get_position());
+                reader.skip(); // skip closing quote
+                Some(Self::String(content))
             }
             SINGLEQUOTE => {
-                let star_position = reader.get_position();
+                reader.skip(); // skip opening quote
+                let content_start = reader.get_position();
                 reader.next_until(SINGLEQUOTE);
-                let content_inside_quotes = reader.slice(star_position..reader.get_position());
-                reader.skip();
-
-                Some(Self::String(content_inside_quotes))
+                let content = reader.slice(content_start..reader.get_position());
+                reader.skip(); // skip closing quote
+                Some(Self::String(content))
             }
-            EQUAL => Some(Self::Equal),
-            END_OF_ELEMENT => None,
+            EQUAL => {
+                reader.skip();
+                Some(Self::Equal)
+            }
+            END_OF_ELEMENT => {
+                reader.skip(); // consume '>' so the parser doesn't re-read it
+                None
+            }
             _ => {
-                // Find end of word
-                reader.next_until_list(&[b' ', DOUBLEQUOTE, SINGLEQUOTE, EQUAL, END_OF_ELEMENT]);
-                Some(Self::String(reader.slice(start_pos..reader.get_position())))
+                // SIMD-accelerated boundary scanning for unquoted tokens.
+                // Instead of byte-at-a-time next_until_list, use the SIMD scanner
+                // to find the first boundary character (quote, '=', whitespace, '>')
+                // in 32-byte chunks.
+                Self::scan_unquoted_token(reader, start_pos)
+            }
+        }
+    }
+
+    /// Scan an unquoted attribute name or value using SIMD boundary detection.
+    /// Returns the token spanning from `start_pos` to the first boundary character.
+    #[inline]
+    fn scan_unquoted_token(reader: &mut Reader<'a>, start_pos: usize) -> Option<Self> {
+        // Use SIMD-accelerated boundary finding from the reader.
+        // This processes 32 bytes at a time via AVX2 (or falls back to scalar).
+        match reader.find_attribute_boundary() {
+            Some(hit) => {
+                let BoundaryHit { position, kind } = hit;
+                // Position the reader at the boundary character
+                reader.set_position(position);
+
+                let token = reader.slice(start_pos..position);
+
+                match kind {
+                    BoundaryKind::Gt => {
+                        // '>' terminates the element - don't consume it.
+                        // The caller (XHtmlTag/XHtmlElement) will handle it.
+                        if token.is_empty() {
+                            None
+                        } else {
+                            Some(Self::String(token))
+                        }
+                    }
+                    BoundaryKind::Equals => {
+                        // '=' is a separate token; don't consume it here.
+                        // Return the string before it, then the next call will get Equal.
+                        if token.is_empty() {
+                            // The token starts with '=', so return Equal directly
+                            reader.skip(); // consume '='
+                            Some(Self::Equal)
+                        } else {
+                            Some(Self::String(token))
+                        }
+                    }
+                    _ => {
+                        // Quote or whitespace: the token ends here.
+                        if token.is_empty() {
+                            // Boundary at current position (e.g., leading whitespace
+                            // that wasn't skipped, or a quote). Re-dispatch.
+                            Self::next(reader)
+                        } else {
+                            Some(Self::String(token))
+                        }
+                    }
+                }
+            }
+            None => {
+                // No boundary found - the rest of input is the token
+                let end = reader.source_bytes().len();
+                reader.set_position(end);
+                if start_pos >= end {
+                    None
+                } else {
+                    Some(Self::String(reader.slice(start_pos..end)))
+                }
             }
         }
     }
@@ -73,6 +146,99 @@ mod tests {
 
         next_value = next_iter.unwrap();
         assert_eq!(next_value, ElementAttributeToken::String("value"));
+    }
+
+    #[test]
+    fn unquoted_attribute_value() {
+        let mut reader = Reader::new("key=value");
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("key"))
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::Equal)
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("value"))
+        );
+    }
+
+    #[test]
+    fn multiple_unquoted_attributes() {
+        let mut reader = Reader::new("key1 val1 key2=val2");
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("key1"))
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("val1"))
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("key2"))
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::Equal)
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("val2"))
+        );
+    }
+
+    #[test]
+    fn single_quoted_attribute() {
+        let mut reader = Reader::new("key='value'");
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("key"))
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::Equal)
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("value"))
+        );
+    }
+
+    #[test]
+    fn terminates_at_gt() {
+        let mut reader = Reader::new("key>");
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("key"))
+        );
+        // Next call should return None because we're at '>'
+        assert_eq!(ElementAttributeToken::next(&mut reader), None);
+    }
+
+    #[test]
+    fn empty_at_gt() {
+        let mut reader = Reader::new(">");
+        assert_eq!(ElementAttributeToken::next(&mut reader), None);
+    }
+
+    #[test]
+    fn whitespace_separated_tokens() {
+        let mut reader = Reader::new("  key  =  \"value\"  ");
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("key"))
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::Equal)
+        );
+        assert_eq!(
+            ElementAttributeToken::next(&mut reader),
+            Some(ElementAttributeToken::String("value"))
+        );
     }
 
     // TOKENIZER / FSM attribute robustness tests

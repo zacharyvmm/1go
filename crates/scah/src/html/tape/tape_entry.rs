@@ -25,6 +25,152 @@ pub enum TapeEntryKind {
     AttributeValue,
     /// Attribute with no value (boolean attribute)
     AttributeBool,
+    /// A complete attribute entry with pre-tokenized key/value offsets
+    /// This is used in the fused tape builder to store attributes compactly
+    AttributeEntry,
+}
+
+/// Flags for compact attribute entries
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AttrFlags {
+    /// Attribute has no value (boolean attribute like `disabled`, `checked`)
+    NoValue = 0,
+    /// Attribute value is unquoted (e.g., `key=value`)
+    UnquotedValue = 1,
+    /// Attribute value is double-quoted (e.g., `key="value"`)
+    DoubleQuoted = 2,
+    /// Attribute value is single-quoted (e.g., `key='value'`)
+    SingleQuoted = 3,
+}
+
+/// A compact attribute entry for the fused tape builder.
+///
+/// This 14-byte struct stores pre-tokenized attribute information
+/// for cache-friendly access during DOM construction.
+///
+/// Layout:
+/// - key_offset (u32): byte offset of attribute key in source
+/// - key_length (u16): length of attribute key in bytes
+/// - value_offset (u32): byte offset of attribute value in source (0 if no value)
+/// - value_length (u16): length of attribute value in bytes (0 if no value)
+/// - flags (u8): AttrFlags indicating value quoting style
+/// - _padding (u8): reserved for future use
+///
+/// Total: 14 bytes per attribute for cache density (target was 16, achieved 14)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, packed)]
+pub struct CompactAttrEntry {
+    /// Byte offset of attribute key in the source HTML
+    pub key_offset: u32,
+    /// Byte offset of attribute value in the source HTML (0 if no value)
+    pub value_offset: u32,
+    /// Length of attribute key in bytes
+    pub key_length: u16,
+    /// Length of attribute value in bytes (0 if no value)
+    pub value_length: u16,
+    /// Flags indicating value quoting style
+    pub flags: u8,
+    /// Reserved for future use (alignment padding)
+    pub _padding: u8,
+}
+
+impl CompactAttrEntry {
+    /// Create a new attribute entry with no value
+    #[inline]
+    pub fn new_bool(key_offset: u32, key_length: u16) -> Self {
+        Self {
+            key_offset,
+            key_length,
+            value_offset: 0,
+            value_length: 0,
+            flags: AttrFlags::NoValue as u8,
+            _padding: 0,
+        }
+    }
+
+    /// Create a new attribute entry with an unquoted value
+    #[inline]
+    pub fn new_unquoted(key_offset: u32, key_length: u16, value_offset: u32, value_length: u16) -> Self {
+        Self {
+            key_offset,
+            key_length,
+            value_offset,
+            value_length,
+            flags: AttrFlags::UnquotedValue as u8,
+            _padding: 0,
+        }
+    }
+
+    /// Create a new attribute entry with a double-quoted value
+    #[inline]
+    pub fn new_double_quoted(key_offset: u32, key_length: u16, value_offset: u32, value_length: u16) -> Self {
+        Self {
+            key_offset,
+            key_length,
+            value_offset,
+            value_length,
+            flags: AttrFlags::DoubleQuoted as u8,
+            _padding: 0,
+        }
+    }
+
+    /// Create a new attribute entry with a single-quoted value
+    #[inline]
+    pub fn new_single_quoted(key_offset: u32, key_length: u16, value_offset: u32, value_length: u16) -> Self {
+        Self {
+            key_offset,
+            key_length,
+            value_offset,
+            value_length,
+            flags: AttrFlags::SingleQuoted as u8,
+            _padding: 0,
+        }
+    }
+
+    /// Check if this attribute has a value
+    #[inline]
+    pub fn has_value(&self) -> bool {
+        self.flags != AttrFlags::NoValue as u8
+    }
+
+    /// Get the attribute key as a string slice from the source
+    #[inline]
+    pub fn key<'a>(&self, source: &'a [u8]) -> &'a str {
+        let start = self.key_offset as usize;
+        let end = start + self.key_length as usize;
+        unsafe { std::str::from_utf8_unchecked(&source[start..end]) }
+    }
+
+    /// Get the attribute value as a string slice from the source (if it has one)
+    #[inline]
+    pub fn value<'a>(&self, source: &'a [u8]) -> Option<&'a str> {
+        if self.has_value() {
+            let start = self.value_offset as usize;
+            let end = start + self.value_length as usize;
+            Some(unsafe { std::str::from_utf8_unchecked(&source[start..end]) })
+        } else {
+            None
+        }
+    }
+
+    /// Get the byte range for the key
+    #[inline]
+    pub fn key_range(&self) -> std::ops::Range<usize> {
+        let start = self.key_offset as usize;
+        start..start + self.key_length as usize
+    }
+
+    /// Get the byte range for the value (if it has one)
+    #[inline]
+    pub fn value_range(&self) -> Option<std::ops::Range<usize>> {
+        if self.has_value() {
+            let start = self.value_offset as usize;
+            Some(start..start + self.value_length as usize)
+        } else {
+            None
+        }
+    }
 }
 
 /// A single entry in the HTML tape
@@ -120,6 +266,80 @@ impl TapeEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compact_attr_entry_size() {
+        // Verify CompactAttrEntry is 14 bytes (under the 16-byte target)
+        assert_eq!(std::mem::size_of::<CompactAttrEntry>(), 14);
+    }
+
+    #[test]
+    fn test_compact_attr_entry_bool() {
+        let entry = CompactAttrEntry::new_bool(10, 8);
+        // Copy fields to avoid issues with packed struct references
+        let key_offset = entry.key_offset;
+        let key_length = entry.key_length;
+        let value_offset = entry.value_offset;
+        let value_length = entry.value_length;
+        let flags = entry.flags;
+        assert_eq!(key_offset, 10);
+        assert_eq!(key_length, 8);
+        assert_eq!(value_offset, 0);
+        assert_eq!(value_length, 0);
+        assert_eq!(flags, AttrFlags::NoValue as u8);
+        assert!(!entry.has_value());
+    }
+
+    #[test]
+    fn test_compact_attr_entry_unquoted() {
+        let entry = CompactAttrEntry::new_unquoted(10, 5, 16, 6);
+        // Copy fields to avoid issues with packed struct references
+        let key_offset = entry.key_offset;
+        let key_length = entry.key_length;
+        let value_offset = entry.value_offset;
+        let value_length = entry.value_length;
+        let flags = entry.flags;
+        assert_eq!(key_offset, 10);
+        assert_eq!(key_length, 5);
+        assert_eq!(value_offset, 16);
+        assert_eq!(value_length, 6);
+        assert_eq!(flags, AttrFlags::UnquotedValue as u8);
+        assert!(entry.has_value());
+    }
+
+    #[test]
+    fn test_compact_attr_entry_double_quoted() {
+        let entry = CompactAttrEntry::new_double_quoted(10, 5, 17, 4);
+        let flags = entry.flags;
+        assert_eq!(flags, AttrFlags::DoubleQuoted as u8);
+        assert!(entry.has_value());
+    }
+
+    #[test]
+    fn test_compact_attr_entry_single_quoted() {
+        let entry = CompactAttrEntry::new_single_quoted(10, 5, 17, 4);
+        let flags = entry.flags;
+        assert_eq!(flags, AttrFlags::SingleQuoted as u8);
+        assert!(entry.has_value());
+    }
+
+    #[test]
+    fn test_compact_attr_entry_key_value_slices() {
+        let source = b"<div class='test' id='main'>content</div>";
+        // class key: offset=5, length=5
+        let entry = CompactAttrEntry::new_single_quoted(5, 5, 12, 4);
+        assert_eq!(entry.key(source), "class");
+        assert_eq!(entry.value(source), Some("test"));
+    }
+
+    #[test]
+    fn test_compact_attr_entry_bool_key_slice() {
+        let source = b"<input disabled checked>";
+        // disabled: offset=7, length=8
+        let entry = CompactAttrEntry::new_bool(7, 8);
+        assert_eq!(entry.key(source), "disabled");
+        assert_eq!(entry.value(source), None);
+    }
 
     #[test]
     fn test_tape_entry_creation() {

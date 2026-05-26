@@ -29,6 +29,6 @@ mod tape_entry;
 mod tape_parser;
 mod structural_scanner;
 
-pub use tape_entry::{TapeEntry, TapeEntryKind};
+pub use tape_entry::{TapeEntry, TapeEntryKind, CompactAttrEntry, AttrFlags};
 pub use tape_parser::TapeParser;
-pub use structural_scanner::StructuralIndex;
+pub use structural_scanner::{StructuralIndex, FusedTapeBuilder};

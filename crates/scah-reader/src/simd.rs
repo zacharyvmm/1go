@@ -47,6 +47,11 @@ pub trait ScannerBackend: Send + Sync {
     fn name(&self) -> &str;
     fn find_tag_open(&self, input: &[u8], start: usize) -> usize;
     fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult;
+
+    /// Scan forward from `start` and return the position and type of the first
+    /// attribute-boundary character (quote, `=`, whitespace, or `>`).
+    /// Returns `None` if no boundary is found before `input.len()`.
+    fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit>;
 }
 
 /// Result of attribute scanning
@@ -56,6 +61,24 @@ pub struct AttributeScanResult {
     pub equals: u32,
     pub whitespace: u32,
     pub gt: u32,
+}
+
+/// Boundary character type found during attribute scanning
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryKind {
+    Quote,
+    Equals,
+    Whitespace,
+    Gt,
+}
+
+/// Result of scanning for the first boundary character in a chunk
+#[derive(Debug, Clone, Copy)]
+pub struct BoundaryHit {
+    /// Absolute position in the input
+    pub position: usize,
+    /// What kind of boundary character was found
+    pub kind: BoundaryKind,
 }
 
 /// Process 32 bytes at once (AVX2) or 16 bytes (SSE2/NEON fallback)
@@ -472,11 +495,14 @@ pub fn eq_ignore_case_sw(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Fast self-closing tag check using SWAR
+///
+/// Covers all HTML void elements as per the spec:
+/// area, base, br, col, embed, hr, img, input, link, meta, param, source, track, wbr
 #[inline]
 pub fn is_self_closing_tag(name: &[u8]) -> bool {
-    // Check against known self-closing tags using SWAR
+    // Check against known self-closing tags using SWAR (4-byte-at-a-time comparison)
     match name.len() {
-        2 => eq_ignore_case_sw(name, b"br"),
+        2 => eq_ignore_case_sw(name, b"br") || eq_ignore_case_sw(name, b"hr"),
         3 => {
             eq_ignore_case_sw(name, b"img")
                 || eq_ignore_case_sw(name, b"col")
@@ -494,6 +520,7 @@ pub fn is_self_closing_tag(name: &[u8]) -> bool {
                 || eq_ignore_case_sw(name, b"param")
                 || eq_ignore_case_sw(name, b"track")
         }
+        6 => eq_ignore_case_sw(name, b"source"),
         _ => false,
     }
 }
@@ -525,22 +552,54 @@ impl ScannerBackend for Avx2Scanner {
         find_any_of_32(input, start, &[b'<', 0, 0, 0])
     }
 
-    fn scan_attributes(&self, _input: &[u8], _start: usize) -> AttributeScanResult {
+    fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
-                // SIMD implementation would go here
-                // For now, return empty result
+            if is_x86_feature_detected!("avx2") && start + 32 <= input.len() {
+                unsafe {
+                    let data = std::arch::x86_64::_mm256_loadu_si256(
+                        input[start..].as_ptr() as *const std::arch::x86_64::__m256i,
+                    );
+                    let (quotes, equals, whitespace, gt) = scan_attribute_boundaries_avx2(data);
+                    return AttributeScanResult {
+                        quotes,
+                        equals,
+                        whitespace,
+                        gt,
+                    };
+                }
             }
         }
 
-        // Fallback
-        AttributeScanResult {
+        // Fallback: scalar
+        let mut result = AttributeScanResult {
             quotes: 0,
             equals: 0,
             whitespace: 0,
             gt: 0,
+        };
+        let end = (start + 32).min(input.len());
+        for i in start..end {
+            let bit = 1u32 << (i - start);
+            match input[i] {
+                b'"' | b'\'' => result.quotes |= bit,
+                b'=' => result.equals |= bit,
+                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
+                b'>' => result.gt |= bit,
+                _ => {}
+            }
         }
+        result
+    }
+
+    fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return unsafe { find_attribute_boundary_avx2(input, start) };
+            }
+        }
+        find_attribute_boundary_scalar(input, start)
     }
 }
 
@@ -559,14 +618,30 @@ impl ScannerBackend for Sse42Scanner {
             .unwrap_or(input.len())
     }
 
-    fn scan_attributes(&self, _input: &[u8], _start: usize) -> AttributeScanResult {
+    fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
         // Scalar fallback for SSE4.2
-        AttributeScanResult {
+        let mut result = AttributeScanResult {
             quotes: 0,
             equals: 0,
             whitespace: 0,
             gt: 0,
+        };
+        let end = (start + 32).min(input.len());
+        for i in start..end {
+            let bit = 1u32 << (i - start);
+            match input[i] {
+                b'"' | b'\'' => result.quotes |= bit,
+                b'=' => result.equals |= bit,
+                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
+                b'>' => result.gt |= bit,
+                _ => {}
+            }
         }
+        result
+    }
+
+    fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
+        find_attribute_boundary_scalar(input, start)
     }
 }
 
@@ -583,14 +658,30 @@ impl ScannerBackend for NeonScanner {
         find_any_of_32(input, start, &[b'<', 0, 0, 0])
     }
 
-    fn scan_attributes(&self, _input: &[u8], _start: usize) -> AttributeScanResult {
+    fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
         // Scalar fallback for NEON
-        AttributeScanResult {
+        let mut result = AttributeScanResult {
             quotes: 0,
             equals: 0,
             whitespace: 0,
             gt: 0,
+        };
+        let end = (start + 32).min(input.len());
+        for i in start..end {
+            let bit = 1u32 << (i - start);
+            match input[i] {
+                b'"' | b'\'' => result.quotes |= bit,
+                b'=' => result.equals |= bit,
+                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
+                b'>' => result.gt |= bit,
+                _ => {}
+            }
         }
+        result
+    }
+
+    fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
+        find_attribute_boundary_scalar(input, start)
     }
 }
 
@@ -609,15 +700,91 @@ impl ScannerBackend for ScalarScanner {
             .unwrap_or(input.len())
     }
 
-    fn scan_attributes(&self, _input: &[u8], _start: usize) -> AttributeScanResult {
+    fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
         // Scalar fallback
-        AttributeScanResult {
+        let mut result = AttributeScanResult {
             quotes: 0,
             equals: 0,
             whitespace: 0,
             gt: 0,
+        };
+        let end = (start + 32).min(input.len());
+        for i in start..end {
+            let bit = 1u32 << (i - start);
+            match input[i] {
+                b'"' | b'\'' => result.quotes |= bit,
+                b'=' => result.equals |= bit,
+                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
+                b'>' => result.gt |= bit,
+                _ => {}
+            }
         }
+        result
     }
+
+    fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
+        find_attribute_boundary_scalar(input, start)
+    }
+}
+
+/// AVX2 implementation: scan 32-byte chunks to find the first attribute boundary
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<BoundaryHit> {
+    unsafe {
+        let len = input.len();
+        let mut pos = start;
+
+        while pos + 32 <= len {
+            let data = std::arch::x86_64::_mm256_loadu_si256(
+                input[pos..].as_ptr() as *const std::arch::x86_64::__m256i,
+            );
+            let (quotes, equals, whitespace, gt) = scan_attribute_boundaries_avx2(data);
+            let combined = quotes | equals | whitespace | gt;
+
+            if combined != 0 {
+                let bit = combined.trailing_zeros() as usize;
+                let abs_pos = pos + bit;
+                // Determine which category this bit belongs to (priority: gt > quote > equals > ws)
+                let mask_bit = 1u32 << bit;
+                let kind = if gt & mask_bit != 0 {
+                    BoundaryKind::Gt
+                } else if quotes & mask_bit != 0 {
+                    BoundaryKind::Quote
+                } else if equals & mask_bit != 0 {
+                    BoundaryKind::Equals
+                } else {
+                    BoundaryKind::Whitespace
+                };
+                return Some(BoundaryHit {
+                    position: abs_pos,
+                    kind,
+                });
+            }
+            pos += 32;
+        }
+
+        // Scalar tail
+        find_attribute_boundary_scalar(input, pos)
+    }
+}
+
+/// Scalar fallback for finding the first attribute boundary character
+fn find_attribute_boundary_scalar(input: &[u8], start: usize) -> Option<BoundaryHit> {
+    for i in start..input.len() {
+        let kind = match input[i] {
+            b'"' | b'\'' => BoundaryKind::Quote,
+            b'=' => BoundaryKind::Equals,
+            b' ' | b'\t' | b'\n' | b'\r' => BoundaryKind::Whitespace,
+            b'>' => BoundaryKind::Gt,
+            _ => continue,
+        };
+        return Some(BoundaryHit {
+            position: i,
+            kind,
+        });
+    }
+    None
 }
 
 #[cfg(test)]
@@ -692,5 +859,83 @@ mod tests {
         assert!(indexes.contains(&(17 as u32))); // >
         assert!(indexes.contains(&(23 as u32))); // < before /
         assert!(indexes.contains(&(28 as u32))); // > at end
+    }
+
+    #[test]
+    fn test_find_attribute_boundary_scalar() {
+        let input = b"key=value";
+        let hit = find_attribute_boundary_scalar(input, 0).unwrap();
+        assert_eq!(hit.position, 3); // '='
+        assert_eq!(hit.kind, BoundaryKind::Equals);
+
+        let input = b"key value";
+        let hit = find_attribute_boundary_scalar(input, 0).unwrap();
+        assert_eq!(hit.position, 3); // ' '
+        assert_eq!(hit.kind, BoundaryKind::Whitespace);
+
+        let input = b"key\"value";
+        let hit = find_attribute_boundary_scalar(input, 0).unwrap();
+        assert_eq!(hit.position, 3); // '"'
+        assert_eq!(hit.kind, BoundaryKind::Quote);
+
+        let input = b"key>";
+        let hit = find_attribute_boundary_scalar(input, 0).unwrap();
+        assert_eq!(hit.position, 3); // '>'
+        assert_eq!(hit.kind, BoundaryKind::Gt);
+
+        let input = b"no_boundary_here";
+        assert!(find_attribute_boundary_scalar(input, 0).is_none());
+    }
+
+    #[test]
+    fn test_find_attribute_boundary_scalar_with_offset() {
+        let input = b"skip_this =value";
+        let hit = find_attribute_boundary_scalar(input, 10).unwrap();
+        assert_eq!(hit.position, 10); // '='
+        assert_eq!(hit.kind, BoundaryKind::Equals);
+    }
+
+    #[test]
+    fn test_find_attribute_boundary_avx2_if_available() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                // Input longer than 32 bytes to exercise the SIMD loop
+                let input = b"this_is_a_long_attribute_name_that_exceeds_thirty_two_bytes=";
+                let hit = unsafe { find_attribute_boundary_avx2(input, 0) };
+                let hit = hit.unwrap();
+                assert_eq!(input[hit.position], b'=');
+                assert_eq!(hit.kind, BoundaryKind::Equals);
+
+                // Boundary in first 32 bytes
+                let input = b"short_key=value_rest_of_content_here!";
+                let hit = unsafe { find_attribute_boundary_avx2(input, 0) };
+                let hit = hit.unwrap();
+                assert_eq!(hit.position, 9); // '='
+                assert_eq!(hit.kind, BoundaryKind::Equals);
+
+                // Quote boundary
+                let input = b"some_text_with_quote\"here_and_more_padding1234";
+                let hit = unsafe { find_attribute_boundary_avx2(input, 0) };
+                let hit = hit.unwrap();
+                assert_eq!(input[hit.position], b'\"');
+                assert_eq!(hit.kind, BoundaryKind::Quote);
+            }
+        }
+    }
+
+    #[test]
+    fn test_scanner_backend_find_attribute_boundary() {
+        let scanner = create_scanner();
+
+        let input = b"class=\"test\">";
+        let hit = scanner.find_attribute_boundary(input, 0).unwrap();
+        assert_eq!(hit.position, 5); // '='
+        assert_eq!(hit.kind, BoundaryKind::Equals);
+
+        // Skip to after the =
+        let hit = scanner.find_attribute_boundary(input, 6).unwrap();
+        assert_eq!(hit.position, 6); // '"'
+        assert_eq!(hit.kind, BoundaryKind::Quote);
     }
 }

@@ -16,8 +16,8 @@
 //! - Cleaner code organization
 //! - Potential for parallel tokenization in the future
 
-use super::structural_scanner::StructuralIndex;
-use super::tape_entry::{TapeEntry, TapeEntryKind};
+use super::structural_scanner::{StructuralIndex, FusedTapeBuilder};
+use super::tape_entry::{TapeEntry, TapeEntryKind, CompactAttrEntry};
 use crate::QuerySpec;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
 use crate::html::element::builder::XHtmlElement;
@@ -34,6 +34,10 @@ pub struct TapeParser<'html, 'query, Q> {
     structural_index: StructuralIndex,
     /// The flat tape of parsed entries
     tape: Vec<TapeEntry>,
+    /// Compact attribute entries from the fused tape builder
+    compact_attributes: Vec<CompactAttrEntry>,
+    /// Maps tag index to (attr_start, attr_count)
+    tag_attr_map: Vec<(usize, usize)>,
     /// The HTML source bytes
     source: &'html [u8],
     /// Position tracking for the document
@@ -72,6 +76,8 @@ where
         Self {
             structural_index: StructuralIndex::new(),
             tape: Vec::new(),
+            compact_attributes: Vec::new(),
+            tag_attr_map: Vec::new(),
             source,
             position: DocumentPosition {
                 element_depth: 0,
@@ -100,6 +106,8 @@ where
         Self {
             structural_index: StructuralIndex::with_capacity(capacity / 16),
             tape: Vec::with_capacity(capacity / 8),
+            compact_attributes: Vec::with_capacity(capacity / 16),
+            tag_attr_map: Vec::with_capacity(capacity / 16),
             source,
             position: DocumentPosition {
                 element_depth: 0,
@@ -136,6 +144,27 @@ where
         // Stage 2: Build tape and drive DOM construction
         self.build_tape();
         self.run_dom_construction();
+
+        self.store
+    }
+
+    /// Parse the HTML input using the fused single-pass pipeline.
+    ///
+    /// This performs a single SIMD scan that builds the tape with
+    /// pre-tokenized attributes, eliminating the redundant attribute
+    /// re-scan in the current 3-stage pipeline.
+    ///
+    /// # Returns
+    /// The `Store` containing all matched elements
+    pub fn parse_fused(mut self) -> Store<'html, 'query> {
+        // Single-pass fused scan that builds tape with pre-tokenized attributes
+        let (tape, compact_attrs, tag_attr_map) = FusedTapeBuilder::build(self.source);
+        self.tape = tape;
+        self.compact_attributes = compact_attrs;
+        self.tag_attr_map = tag_attr_map;
+
+        // Run DOM construction using pre-tokenized entries
+        self.run_fused_dom_construction();
 
         self.store
     }
@@ -472,6 +501,183 @@ where
 
         // Restore tape for potential debugging
         self.tape = tape;
+
+        // Set reader position to end of source for proper EOF handling
+        reader.set_position(source_len);
+
+        // Drain open elements at EOF
+        self.drain_open_elements(&reader);
+    }
+
+    /// Run DOM construction using fused tape entries with pre-tokenized attributes.
+    ///
+    /// This method processes tape entries built by the FusedTapeBuilder and
+    /// uses the pre-tokenized compact attributes to build elements directly
+    /// without re-scanning through the Reader+tokenizer.
+    fn run_fused_dom_construction(&mut self) {
+        let tape: Vec<TapeEntry> = std::mem::take(&mut self.tape);
+        let compact_attrs: Vec<CompactAttrEntry> = std::mem::take(&mut self.compact_attributes);
+        let tag_attr_map: Vec<(usize, usize)> = std::mem::take(&mut self.tag_attr_map);
+        let source_len = self.source.len();
+        let mut reader = Reader::from_bytes(self.source);
+
+        // Track which tag we're processing in the mapping
+        let mut tag_map_idx: usize = 0;
+
+        for &entry in &tape {
+            match entry.kind {
+                TapeEntryKind::OpenTag | TapeEntryKind::SelfClosingTag => {
+                    // Push text content before this tag if we have a text_start
+                    if self.capture_text_content
+                        && self.store.text_content.text_start.is_some()
+                    {
+                        if let Some(position) = self
+                            .store
+                            .text_content
+                            .push(&reader, entry.offset as usize)
+                        {
+                            self.position.text_content_position = position;
+                        }
+                    }
+
+                    // Get attribute range from the mapping
+                    let (attr_start, attr_count) = if tag_map_idx < tag_attr_map.len() {
+                        tag_attr_map[tag_map_idx]
+                    } else {
+                        (0, 0)
+                    };
+                    tag_map_idx += 1;
+
+                    let attr_range = attr_start..attr_start + attr_count;
+
+                    // Build element from tape with pre-tokenized attributes
+                    self.element.from_tape(
+                        &entry,
+                        self.source,
+                        &compact_attrs,
+                        attr_range,
+                        &mut self.store.attributes,
+                    );
+
+                    let is_self_closing = entry.kind == TapeEntryKind::SelfClosingTag
+                        || self.element.is_self_closing();
+
+                    self.position.reader_position = entry.offset as usize;
+
+                    // Handle implied closes
+                    self.open_elements
+                        .prepare_for_open_into(self.element.name, &mut self.implied_closes);
+                    let mut implied = std::mem::take(&mut self.implied_closes);
+                    self.pop_open_elements(
+                        &mut implied,
+                        &reader,
+                        Some(crate::debug::ImpliedCloseReason::OpenTagRule),
+                        None,
+                    );
+                    self.implied_closes = implied;
+                    self.position.reader_position = entry.end() as usize;
+
+                    if is_self_closing {
+                        self.position.element_depth =
+                            self.open_elements.depth().saturating_add(1);
+                    } else {
+                        self.open_elements.push(self.element.name);
+                        self.position.element_depth = self.open_elements.depth();
+                    }
+
+                    // Set text_start before driving query multiplexer
+                    if self.capture_text_content {
+                        self.store.text_content.set_start(entry.end() as usize);
+                    }
+
+                    // Drive query multiplexer
+                    self.selectors.next_into(
+                        &self.element,
+                        &self.position,
+                        &mut self.store,
+                        &mut self.save_hits,
+                    );
+
+                    if !is_self_closing {
+                        for save_hit in &self.save_hits {
+                            self.open_elements.attach_saved(
+                                save_hit.element_id,
+                                save_hit
+                                    .save_inner_html
+                                    .then_some(self.position.reader_position),
+                                save_hit
+                                    .save_text_content
+                                    .then_some(self.position.text_content_position),
+                            );
+                        }
+                    }
+
+                    self.element.clear();
+                }
+                TapeEntryKind::CloseTag => {
+                    // Push text content before this close tag
+                    if self.capture_text_content
+                        && self.store.text_content.text_start.is_some()
+                    {
+                        if let Some(position) = self
+                            .store
+                            .text_content
+                            .push(&reader, entry.offset as usize)
+                        {
+                            self.position.text_content_position = position;
+                        }
+                    }
+
+                    // Extract tag name from the close tag
+                    let tag_slice = entry.slice(self.source);
+                    let tag_name = tag_slice
+                        .trim_start_matches("</")
+                        .trim_end_matches('>')
+                        .trim();
+
+                    self.position.reader_position = entry.offset as usize;
+
+                    self.open_elements
+                        .close_by_end_tag_into(tag_name, &mut self.closing_elements);
+                    self.pop_closing_elements(
+                        &reader,
+                        Some(crate::debug::ImpliedCloseReason::MismatchedEndTag),
+                        Some(tag_name),
+                    );
+
+                    // Set text_start after close tag for subsequent text
+                    if self.capture_text_content {
+                        self.store.text_content.set_start(entry.end() as usize);
+                    }
+                }
+                TapeEntryKind::Text => {
+                    // Handle text content
+                    if self.capture_text_content
+                        && self.store.text_content.text_start.is_some()
+                    {
+                        if let Some(position) = self
+                            .store
+                            .text_content
+                            .push(&reader, entry.end() as usize)
+                        {
+                            self.position.text_content_position = position;
+                        }
+                        self.store.text_content.set_start(entry.end() as usize);
+                    }
+                }
+                TapeEntryKind::Comment | TapeEntryKind::Doctype => {
+                    // Skip comments and doctypes
+                }
+                _ => {
+                    // Attribute entries are handled within tag parsing
+                }
+            }
+        }
+
+        // Restore tape and compact_attrs for potential debugging
+        self.tape = tape;
+        self.compact_attributes = compact_attrs;
+        self.tag_attr_map = tag_attr_map;
 
         // Set reader position to end of source for proper EOF handling
         reader.set_position(source_len);

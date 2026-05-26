@@ -2,6 +2,7 @@ use std::ops::Range;
 
 pub mod simd;
 
+pub use simd::{BoundaryHit, BoundaryKind};
 use simd::{CpuFeatures, ScannerBackend, create_scanner, find_any_of_32, skip_whitespace_simd, eof_simd, is_self_closing_tag, eq_ignore_case_4};
 
 pub struct Reader<'a> {
@@ -153,6 +154,17 @@ impl<'a> Reader<'a> {
     /// Use SIMD scanner to scan attributes
     pub fn scan_attributes(&self) -> simd::AttributeScanResult {
         self.scanner.scan_attributes(self.source, self.position)
+    }
+
+    /// Use SIMD to find the first attribute boundary character from current position.
+    /// Returns the position and type of the boundary character (quote, `=`, whitespace, or `>`).
+    pub fn find_attribute_boundary(&self) -> Option<BoundaryHit> {
+        self.scanner.find_attribute_boundary(self.source, self.position)
+    }
+
+    /// Find attribute boundary starting from a specific position
+    pub fn find_attribute_boundary_from(&self, start: usize) -> Option<BoundaryHit> {
+        self.scanner.find_attribute_boundary(self.source, start)
     }
 
     /// Set the reader position directly
@@ -331,5 +343,26 @@ mod tests {
         reader.next_until_list_simd(&[b'<', b'>', b'/', b'"']);
         assert_eq!(reader.get_position(), 12); // Position of '<'
         assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    #[test]
+    fn test_find_attribute_boundary() {
+        let html = "key=value rest";
+        let reader = Reader::new(html);
+
+        let hit = reader.find_attribute_boundary().unwrap();
+        assert_eq!(hit.position, 3); // '='
+        assert_eq!(hit.kind, crate::simd::BoundaryKind::Equals);
+    }
+
+    #[test]
+    fn test_find_attribute_boundary_from() {
+        let html = "key=value>rest";
+        let reader = Reader::new(html);
+
+        // Start after the '='
+        let hit = reader.find_attribute_boundary_from(4).unwrap();
+        assert_eq!(hit.position, 9); // '>'
+        assert_eq!(hit.kind, crate::simd::BoundaryKind::Gt);
     }
 }

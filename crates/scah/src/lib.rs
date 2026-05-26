@@ -112,7 +112,7 @@ mod otel;
 pub use engine::multiplexer::QueryMultiplexer;
 pub use html::element::builder::XHtmlElement;
 pub use html::parser::XHtmlParser;
-pub use html::tape::{TapeParser, StructuralIndex, TapeEntry, TapeEntryKind};
+pub use html::tape::{TapeParser, StructuralIndex, TapeEntry, TapeEntryKind, CompactAttrEntry, AttrFlags, FusedTapeBuilder};
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
 pub use scah_query_ir::{
@@ -231,6 +231,61 @@ where
     };
 
     parser.parse()
+}
+
+/// Parse HTML using the fused single-pass tape pipeline
+///
+/// This is the most optimized parsing path that combines SIMD structural
+/// scanning with attribute tokenization in a single pass, eliminating
+/// the redundant attribute re-scan in the current 3-stage pipeline.
+///
+/// # When to use this
+///
+/// The fused parser is optimized for:
+/// - Attribute-heavy HTML (forms, data-* attributes)
+/// - Documents where attribute parsing is a bottleneck
+/// - Maximum throughput with pre-tokenized attributes
+///
+/// # Parameters
+///
+/// - `html`: The HTML source string
+/// - `queries`: A slice of compiled [`Query`] objects
+///
+/// # Returns
+///
+/// A [`Store`] containing all matched elements
+///
+/// # Example
+///
+/// ```rust
+/// use scah::{Query, Save, parse_fused};
+///
+/// let html = "<div><a href='link' class='test'>Hello</a></div>";
+/// let queries = &[Query::all("a", Save::all())
+///     .expect("valid selector")
+///     .build()];
+/// let store = parse_fused(html, queries);
+///
+/// let links: Vec<_> = store.get("a").unwrap().collect();
+/// assert_eq!(links.len(), 1);
+/// assert_eq!(links[0].name, "a");
+/// assert_eq!(links[0].attribute(&store, "href"), Some("link"));
+/// ```
+pub fn parse_fused<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    queries: &'a [Q],
+) -> Store<'html, 'query>
+where
+    Q: QuerySpec<'query>,
+{
+    let selectors = QueryMultiplexer::new(queries);
+    let parser = if selectors.requires_text_content() {
+        TapeParser::with_capacity(selectors, html.as_bytes(), html.len())
+    } else {
+        TapeParser::new(selectors, html.as_bytes())
+    };
+
+    parser.parse_fused()
 }
 
 /// Build a structural index from HTML input using SIMD acceleration

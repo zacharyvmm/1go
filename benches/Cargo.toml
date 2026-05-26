@@ -73,3 +73,13 @@ required-features = ["linux-memory-benches"]
 name = "speed_bench_spec_all_links"
 path = "spec/speed_bench.rs"
 harness = false
+
+[[bench]]
+name = "speed_bench_attribute_heavy"
+path = "attributes/speed_bench.rs"
+harness = false
+
+[[bench]]
+name = "speed_bench_fused_tape"
+path = "fused_tape/speed_bench.rs"
+harness = false
