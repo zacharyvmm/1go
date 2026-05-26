@@ -62,10 +62,8 @@ impl<'a> Reader<'a> {
     }
 
     pub fn next_until(&mut self, character: u8) {
-        let len = self.source.len();
-        while self.position < len && self.source[self.position] != character {
-            self.position += 1;
-        }
+        let remaining = &self.source[self.position..];
+        self.position += memchr::memchr(character, remaining).unwrap_or(remaining.len());
     }
 
     pub fn skip(&mut self) {
@@ -154,5 +152,48 @@ mod tests {
         assert_eq!(reader.next(), Some(b'd'));
 
         assert_eq!(reader.slice(0..5), "Hello");
+    }
+
+    #[test]
+    fn next_until_stops_at_delimiter() {
+        let mut reader = Reader::new("abc<def");
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 3);
+        assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    #[test]
+    fn next_until_moves_to_end_when_delimiter_is_absent() {
+        let mut reader = Reader::new("abcdef");
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 6);
+        assert_eq!(reader.peek(), None);
+    }
+
+    #[test]
+    fn next_until_does_not_advance_when_delimiter_is_current() {
+        let mut reader = Reader::new("<abcdef");
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 0);
+        assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    #[test]
+    fn next_until_handles_long_spans() {
+        let mut input = "a".repeat(16 * 1024);
+        input.push('<');
+        input.push_str("tail");
+        let mut reader = Reader::new(&input);
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 16 * 1024);
+        assert_eq!(reader.peek(), Some(b'<'));
     }
 }

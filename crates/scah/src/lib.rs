@@ -165,11 +165,10 @@ where
 {
     let selectors = QueryMultiplexer::new(queries);
 
-    let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
-    let mut parser = if no_extra_allocations {
-        XHtmlParser::new(selectors)
-    } else {
+    let mut parser = if selectors.requires_text_content() {
         XHtmlParser::with_capacity(selectors, html.len())
+    } else {
+        XHtmlParser::new(selectors)
     };
 
     let mut reader = Reader::new(html);

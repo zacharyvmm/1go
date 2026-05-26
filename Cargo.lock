@@ -1695,6 +1695,9 @@ dependencies = [
 [[package]]
 name = "scah-reader"
 version = "0.0.20"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "scopeguard"
