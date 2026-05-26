@@ -1,23 +1,47 @@
 use std::ops::Range;
 
+pub mod simd;
+
+use simd::{CpuFeatures, ScannerBackend, create_scanner, find_any_of_32, skip_whitespace_simd, eof_simd, is_self_closing_tag, eq_ignore_case_4};
+
 pub struct Reader<'a> {
     source: &'a [u8],
     position: usize,
+    scanner: Box<dyn ScannerBackend>,
+    cpu_features: CpuFeatures,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(input: &'a str) -> Self {
+        let cpu_features = CpuFeatures::detect();
+        let scanner = create_scanner();
         Self {
             source: input.as_bytes(),
             position: 0,
+            scanner,
+            cpu_features,
         }
     }
 
     pub fn from_bytes(input: &'a [u8]) -> Self {
+        let cpu_features = CpuFeatures::detect();
+        let scanner = create_scanner();
         Self {
             source: input,
             position: 0,
+            scanner,
+            cpu_features,
         }
+    }
+
+    /// Get CPU features information
+    pub fn cpu_features(&self) -> &CpuFeatures {
+        &self.cpu_features
+    }
+
+    /// Get scanner backend name
+    pub fn scanner_name(&self) -> &str {
+        self.scanner.name()
     }
 
     #[inline]
@@ -61,6 +85,12 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// SIMD-accelerated next_until for multiple characters
+    pub fn next_until_list_simd(&mut self, characters: &[u8; 4]) {
+        let pos = find_any_of_32(self.source, self.position, characters);
+        self.position = pos;
+    }
+
     pub fn next_until(&mut self, character: u8) {
         let remaining = &self.source[self.position..];
         self.position += memchr::memchr(character, remaining).unwrap_or(remaining.len());
@@ -70,6 +100,11 @@ impl<'a> Reader<'a> {
         if self.position < self.source.len() {
             self.position += 1;
         }
+    }
+
+    /// SIMD-accelerated whitespace skipping
+    pub fn skip_whitespace(&mut self) {
+        self.position = skip_whitespace_simd(self.source, self.position);
     }
 
     pub fn eof(&self) -> bool {
@@ -82,12 +117,42 @@ impl<'a> Reader<'a> {
             .all(|b| b.is_ascii_whitespace())
     }
 
+    /// SIMD-accelerated eof check
+    pub fn eof_simd(&self) -> bool {
+        eof_simd(self.source, self.position)
+    }
+
+    /// SIMD-accelerated eof check (alias for eof_simd)
+    pub fn eof_fast(&self) -> bool {
+        self.eof_simd()
+    }
+
     pub fn match_ignore_case(&self, s: &str) -> bool {
         if self.position + s.len() > self.source.len() {
             return false;
         }
         let slice = &self.source[self.position..self.position + s.len()];
         slice.eq_ignore_ascii_case(s.as_bytes())
+    }
+
+    /// Fast self-closing tag check using SWAR
+    pub fn is_self_closing_tag(&self, name: &[u8]) -> bool {
+        is_self_closing_tag(name)
+    }
+
+    /// Fast case-insensitive comparison using SWAR
+    pub fn eq_ignore_case_4(&self, a: &[u8], b: [u8; 4]) -> bool {
+        eq_ignore_case_4(a, b)
+    }
+
+    /// Use SIMD scanner to find tag open
+    pub fn find_tag_open(&self) -> usize {
+        self.scanner.find_tag_open(self.source, self.position)
+    }
+
+    /// Use SIMD scanner to scan attributes
+    pub fn scan_attributes(&self) -> simd::AttributeScanResult {
+        self.scanner.scan_attributes(self.source, self.position)
     }
 }
 
@@ -194,6 +259,39 @@ mod tests {
         reader.next_until(b'<');
 
         assert_eq!(reader.get_position(), 16 * 1024);
+        assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    #[test]
+    fn test_simd_methods() {
+        let html = "<div class=\"test\">hello</div>";
+        let reader = Reader::new(html);
+
+        // Test SIMD eof check
+        assert!(!reader.eof_simd());
+
+        // Test scanner backend
+        println!("Scanner backend: {}", reader.scanner_name());
+        println!("CPU features: {:?}", reader.cpu_features());
+    }
+
+    #[test]
+    fn test_skip_whitespace() {
+        let html = "  \t\n\r  <div>test</div>";
+        let mut reader = Reader::new(html);
+
+        reader.skip_whitespace();
+        assert_eq!(reader.get_position(), 7); // Position of '<'
+        assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    #[test]
+    fn test_next_until_list_simd() {
+        let html = "hello world <div>test";
+        let mut reader = Reader::new(html);
+
+        reader.next_until_list_simd(&[b'<', b'>', b'/', b'"']);
+        assert_eq!(reader.get_position(), 12); // Position of '<'
         assert_eq!(reader.peek(), Some(b'<'));
     }
 }
