@@ -15,6 +15,9 @@ pub struct XHtmlParser<'html, 'query, Q> {
     store: Store<'html, 'query>,
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
+    closing_elements: Vec<OpenElement<'html>>,
+    save_hits: Vec<crate::engine::multiplexer::SaveHit>,
+    capture_text_content: bool,
     in_script: bool,
     eof_drained: bool,
 }
@@ -24,6 +27,7 @@ where
     Q: QuerySpec<'query>,
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
+        let capture_text_content = selectors.requires_text_content();
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -33,6 +37,9 @@ where
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
+            closing_elements: Vec::new(),
+            save_hits: Vec::new(),
+            capture_text_content,
             in_script: false,
             eof_drained: false,
             store: Store::default(),
@@ -40,6 +47,7 @@ where
     }
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
+        let capture_text_content = selectors.requires_text_content();
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -49,6 +57,9 @@ where
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
+            closing_elements: Vec::new(),
+            save_hits: Vec::new(),
+            capture_text_content,
             in_script: false,
             eof_drained: false,
             store: Store::with_capacity(capacity),
@@ -65,7 +76,8 @@ where
                 }
 
                 if reader.match_ignore_case("</script>") {
-                    if self.store.text_content.text_start.is_some()
+                    if self.capture_text_content
+                        && self.store.text_content.text_start.is_some()
                         && let Some(position) =
                             self.store.text_content.push(reader, reader.get_position())
                     {
@@ -95,7 +107,8 @@ where
                 tag = XHtmlTag::from(reader);
                 if let Some(XHtmlTag::Open) = tag {
                     self.element.from(reader, &mut self.store.attributes);
-                } else if tag.is_none()
+                } else if self.capture_text_content
+                    && tag.is_none()
                     && self.store.text_content.text_start.is_some()
                     && let Some(position) = self
                         .store
@@ -111,7 +124,8 @@ where
         };
         let tag_start_position = self.position.reader_position;
 
-        if self.store.text_content.text_start.is_some()
+        if self.capture_text_content
+            && self.store.text_content.text_start.is_some()
             && let Some(position) = self
                 .store
                 .text_content
@@ -120,7 +134,9 @@ where
             self.position.text_content_position = position;
         }
 
-        self.store.text_content.set_start(reader.get_position());
+        if self.capture_text_content {
+            self.store.text_content.set_start(reader.get_position());
+        }
 
         // TODO: register the start
         //reader.next_while(|c| c.is_whitespace());
@@ -160,11 +176,14 @@ where
                     }
                 );
 
-                let save_hits = self
-                    .selectors
-                    .next(&self.element, &self.position, &mut self.store);
+                self.selectors.next_into(
+                    &self.element,
+                    &self.position,
+                    &mut self.store,
+                    &mut self.save_hits,
+                );
                 if !is_self_closing {
-                    for save_hit in save_hits {
+                    for save_hit in &self.save_hits {
                         self.open_elements.attach_saved(
                             save_hit.element_id,
                             save_hit
@@ -189,9 +208,9 @@ where
                     }
                 );
 
-                let closing_elements = self.open_elements.close_by_end_tag(closing_tag);
-                early_exit = self.pop_open_elements(
-                    closing_elements,
+                self.open_elements
+                    .close_by_end_tag_into(closing_tag, &mut self.closing_elements);
+                early_exit = self.pop_closing_elements(
                     reader,
                     Some(ImpliedCloseReason::MismatchedEndTag),
                     Some(closing_tag),
@@ -280,6 +299,40 @@ where
         early_exit
     }
 
+    fn pop_closing_elements(
+        &mut self,
+        reader: &Reader<'html>,
+        implied_close_reason: Option<ImpliedCloseReason>,
+        expected_tag: Option<&'html str>,
+    ) -> bool {
+        let base_depth = self.open_elements.depth();
+        let mut closing_elements = std::mem::take(&mut self.closing_elements);
+        let total = closing_elements.len();
+        let mut early_exit = false;
+
+        for (index, open_element) in closing_elements.drain(..).enumerate() {
+            let close_depth =
+                base_depth.saturating_add((total - index) as crate::engine::DepthSize);
+            if implied_close_reason.is_some_and(|_| {
+                expected_tag
+                    .is_none_or(|expected| !open_element.name.eq_ignore_ascii_case(expected))
+            }) {
+                crate::scah_trace!(
+                    self.store,
+                    TraceEvent::ImpliedClose {
+                        tag: open_element.name,
+                        depth: close_depth,
+                        reason: implied_close_reason.unwrap(),
+                    }
+                );
+            }
+            early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
+        }
+
+        self.closing_elements = closing_elements;
+        early_exit
+    }
+
     fn finalize_open_element(&mut self, open_element: &OpenElement<'html>, reader: &Reader<'html>) {
         for saved in &open_element.saved {
             let inner_html = saved
@@ -311,7 +364,8 @@ where
             return;
         }
 
-        if self.store.text_content.text_start.is_some()
+        if self.capture_text_content
+            && self.store.text_content.text_start.is_some()
             && let Some(position) = self.store.text_content.push(reader, reader.get_position())
         {
             self.position.text_content_position = position;
@@ -330,7 +384,7 @@ mod tests {
     use crate::Attribute;
     use crate::engine::multiplexer::QueryMultiplexer;
     use crate::store::Element;
-    use crate::{Query, Reader, Save};
+    use crate::{Query, Reader, Save, parse};
     use pretty_assertions::assert_eq;
 
     const BASIC_HTML: &str = r#"
@@ -381,7 +435,7 @@ mod tests {
     fn test_text_content() {
         let mut reader = Reader::new(BASIC_HTML);
 
-        let queries = &[Query::all("p.indent > .bold", Save::none())
+        let queries = &[Query::all("p.indent > .bold", Save::only_text_content())
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(queries);
@@ -1086,6 +1140,30 @@ mod tests {
         let store = parser.matches();
         let div = store.get("div").unwrap().next().unwrap();
         assert_eq!(div.text_content(&store), Some("Hello"));
+    }
+
+    #[test]
+    fn save_none_does_not_accumulate_text_content() {
+        let queries = &[Query::all("a", Save::none()).unwrap().build()];
+        let store = parse("<div><a>Hello <b>World</b></a></div>", queries);
+
+        let anchor = store.get("a").unwrap().next().unwrap();
+        assert_eq!(anchor.text_content(&store), None);
+        assert_eq!(store.text_content.len(), 0);
+    }
+
+    #[test]
+    fn mixed_save_queries_keep_text_content_for_text_query() {
+        let queries = &[
+            Query::all("a", Save::none()).unwrap().build(),
+            Query::all("b", Save::only_text_content()).unwrap().build(),
+        ];
+        let store = parse("<a>Hello <b>World</b></a>", queries);
+
+        let anchor = store.get("a").unwrap().next().unwrap();
+        let bold = store.get("b").unwrap().next().unwrap();
+        assert_eq!(anchor.text_content(&store), None);
+        assert_eq!(bold.text_content(&store), Some("World"));
     }
 
     const SINGLE_PRODUCT_HTML: &str = r#"

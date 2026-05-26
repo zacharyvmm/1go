@@ -54,6 +54,12 @@ pub trait QuerySpec<'query> {
     fn queries(&self) -> &[QuerySection<'query>];
     fn exit_at_section_end(&self) -> Option<QuerySectionId>;
 
+    fn requires_text_content(&self) -> bool {
+        self.queries()
+            .iter()
+            .any(|section| section.save.text_content)
+    }
+
     fn get_transition(&self, state: TransitionId) -> &Transition<'query> {
         &self.states()[state.index()]
     }

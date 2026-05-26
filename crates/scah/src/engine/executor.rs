@@ -34,6 +34,10 @@ where
         }
     }
 
+    pub fn query(&self) -> &Q {
+        self.query
+    }
+
     pub fn save_element(
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
         tree: &Q,
