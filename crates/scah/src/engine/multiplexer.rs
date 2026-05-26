@@ -38,23 +38,29 @@ where
         }
     }
 
-    pub(crate) fn next(
+    pub(crate) fn requires_text_content(&self) -> bool {
+        self.runners
+            .iter()
+            .any(|runner| runner.query().requires_text_content())
+    }
+
+    pub(crate) fn next_into(
         &mut self,
         xhtml_element: &XHtmlElement<'html>,
         position: &DocumentPosition,
         store: &mut Store<'html, 'query>,
-    ) -> Vec<SaveHit> {
+        save_hits: &mut Vec<SaveHit>,
+    ) {
         let len = store.elements.len();
-        let mut save_hits = Vec::new();
+        save_hits.clear();
         for (runner_index, session) in self.runners.iter_mut().enumerate() {
-            session.next(runner_index, xhtml_element, position, store, &mut save_hits);
+            session.next(runner_index, xhtml_element, position, store, save_hits);
         }
         if len == store.elements.len() {
             // Element was not saved
             // Thus delete from the tape
             xhtml_element.remove_attributes(&mut store.attributes);
         }
-        save_hits
     }
 
     pub(crate) fn back(

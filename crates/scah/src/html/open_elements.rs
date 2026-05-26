@@ -92,18 +92,22 @@ impl<'html> OpenElementStack<'html> {
         popped
     }
 
+    #[cfg(test)]
     pub fn close_by_end_tag(&mut self, name: &str) -> Vec<OpenElement<'html>> {
+        let mut popped = Vec::new();
+        self.close_by_end_tag_into(name, &mut popped);
+        popped
+    }
+
+    pub fn close_by_end_tag_into(&mut self, name: &str, popped: &mut Vec<OpenElement<'html>>) {
+        popped.clear();
         let scope = close_scope(name);
         if let Some(index) = self.find_matching_index(name, scope) {
-            let mut popped = Vec::with_capacity(self.entries.len() - index);
             while self.entries.len() > index {
                 if let Some(open) = self.entries.pop() {
                     popped.push(open);
                 }
             }
-            popped
-        } else {
-            Vec::new()
         }
     }
 

@@ -73,10 +73,10 @@ impl<'html, 'query: 'html> Default for Store<'html, 'query> {
 impl<'html, 'query: 'html> Store<'html, 'query> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            elements: Arena::with_capacity(capacity / 3),
+            elements: Arena::new(),
             queries: Arena::new(),
-            text_content: TextContent::with_capacity(capacity / 3),
-            attributes: Arena::with_capacity(capacity / 3),
+            text_content: TextContent::with_capacity(capacity),
+            attributes: Arena::new(),
             #[cfg(any(debug_assertions, test))]
             trace: crate::debug::TraceStore::with_capacity(capacity.min(4096)),
         }
@@ -274,9 +274,17 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{Query, Save};
 
-    use super::*;
+    #[test]
+    fn with_capacity_does_not_reserve_object_arenas_from_input_bytes() {
+        let store = Store::with_capacity(30_000);
+
+        assert_eq!(store.elements.capacity(), 0);
+        assert_eq!(store.attributes.capacity(), 0);
+        assert_eq!(store.text_content.content.capacity(), 30_000);
+    }
 
     #[test]
     fn test_find_next_query() {
