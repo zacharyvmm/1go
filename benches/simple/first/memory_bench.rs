@@ -87,7 +87,7 @@ fn bench_lexbor(html: String) {
     let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
     let nodes = doc.select(QUERY);
 
-    let node = nodes.iter().next().unwrap();
+    let node = nodes.first().unwrap();
     black_box(node.text_content());
     black_box(node.inner_html());
     black_box(node.attributes());

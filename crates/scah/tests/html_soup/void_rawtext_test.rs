@@ -46,3 +46,30 @@ fn script_contents_do_not_emit_false_selector_matches() {
     assert_eq!(attr(&store, "a", "href"), vec![Some("ok")]);
     assert_eq!(texts(&store, "a"), vec![Some("good")]);
 }
+
+#[test]
+fn quoted_attributes_long_text_and_script_content_parse_correctly() {
+    let long_text = "x".repeat(16 * 1024);
+    let html = format!(
+        "<main><a href='https://example.com?q=<tag>&v=\"quoted\"'>{long_text}</a>\
+         <script>const fake = \"<a href='bad'>bad</a>\";</script>\
+         <a href='tail'>tail</a></main>"
+    );
+    let store = parse_with_saves(
+        &html,
+        &[("main > a", Save::all()), ("script", Save::none())],
+    );
+
+    assert_eq!(
+        attr(&store, "main > a", "href"),
+        vec![
+            Some("https://example.com?q=<tag>&v=\"quoted\""),
+            Some("tail")
+        ]
+    );
+    assert_eq!(
+        texts(&store, "main > a"),
+        vec![Some(long_text.as_str()), Some("tail")]
+    );
+    assert_eq!(elements(&store, "script").len(), 1);
+}
