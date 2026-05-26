@@ -64,32 +64,35 @@ impl<'html> OpenElementStack<'html> {
         }
     }
 
+    #[cfg(test)]
     pub fn prepare_for_open(&mut self, name: &str) -> Vec<OpenElement<'html>> {
         let mut popped = Vec::new();
+        self.prepare_for_open_into(name, &mut popped);
+        popped
+    }
+
+    pub fn prepare_for_open_into(&mut self, name: &str, popped: &mut Vec<OpenElement<'html>>) {
+        popped.clear();
 
         if closes_open_p(name) {
-            popped.extend(self.pop_matching_in_scope(&["p"], ScopeKind::Default));
+            self.pop_matching_in_scope_into(&["p"], ScopeKind::Default, popped);
         }
 
         match name {
-            "button" => popped.extend(self.pop_matching_in_scope(&["button"], ScopeKind::Button)),
-            "li" => popped.extend(self.pop_matching_in_scope(&["li"], ScopeKind::ListItem)),
+            "button" => self.pop_matching_in_scope_into(&["button"], ScopeKind::Button, popped),
+            "li" => self.pop_matching_in_scope_into(&["li"], ScopeKind::ListItem, popped),
             "dt" | "dd" => {
-                popped.extend(self.pop_matching_in_scope(&["dt", "dd"], ScopeKind::ListItem))
+                self.pop_matching_in_scope_into(&["dt", "dd"], ScopeKind::ListItem, popped)
             }
-            "option" => popped.extend(self.pop_matching_in_scope(&["option"], ScopeKind::Select)),
+            "option" => self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped),
             "optgroup" => {
-                popped.extend(self.pop_matching_in_scope(&["option"], ScopeKind::Select));
-                popped.extend(self.pop_matching_in_scope(&["optgroup"], ScopeKind::Select));
+                self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
+                self.pop_matching_in_scope_into(&["optgroup"], ScopeKind::Select, popped);
             }
-            "tr" => popped.extend(self.pop_matching_in_scope(&["tr"], ScopeKind::Table)),
-            "td" | "th" => {
-                popped.extend(self.pop_matching_in_scope(&["td", "th"], ScopeKind::Table))
-            }
+            "tr" => self.pop_matching_in_scope_into(&["tr"], ScopeKind::Table, popped),
+            "td" | "th" => self.pop_matching_in_scope_into(&["td", "th"], ScopeKind::Table, popped),
             _ => {}
         }
-
-        popped
     }
 
     #[cfg(test)]
@@ -111,25 +114,43 @@ impl<'html> OpenElementStack<'html> {
         }
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn close_all_at_eof(&mut self) -> Vec<OpenElement<'html>> {
-        self.entries.drain(..).rev().collect()
+        let mut popped = Vec::new();
+        self.close_all_at_eof_into(&mut popped);
+        popped
     }
 
+    pub fn close_all_at_eof_into(&mut self, popped: &mut Vec<OpenElement<'html>>) {
+        popped.clear();
+        popped.extend(self.entries.drain(..).rev());
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn pop_matching_in_scope(
         &mut self,
         names: &[&str],
         scope: ScopeKind,
     ) -> Vec<OpenElement<'html>> {
+        let mut popped = Vec::new();
+        self.pop_matching_in_scope_into(names, scope, &mut popped);
+        popped
+    }
+
+    fn pop_matching_in_scope_into(
+        &mut self,
+        names: &[&str],
+        scope: ScopeKind,
+        popped: &mut Vec<OpenElement<'html>>,
+    ) {
         if let Some(index) = self.find_first_of(names, scope) {
-            let mut popped = Vec::with_capacity(self.entries.len() - index);
             while self.entries.len() > index {
                 if let Some(open) = self.entries.pop() {
                     popped.push(open);
                 }
             }
-            popped
-        } else {
-            Vec::new()
         }
     }
 

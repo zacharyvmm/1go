@@ -16,6 +16,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
     closing_elements: Vec<OpenElement<'html>>,
+    implied_closes: Vec<OpenElement<'html>>,
     save_hits: Vec<crate::engine::multiplexer::SaveHit>,
     capture_text_content: bool,
     in_script: bool,
@@ -38,6 +39,7 @@ where
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
             closing_elements: Vec::new(),
+            implied_closes: Vec::new(),
             save_hits: Vec::new(),
             capture_text_content,
             in_script: false,
@@ -58,6 +60,7 @@ where
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
             closing_elements: Vec::new(),
+            implied_closes: Vec::new(),
             save_hits: Vec::new(),
             capture_text_content,
             in_script: false,
@@ -149,13 +152,16 @@ where
                 }
 
                 self.position.reader_position = tag_start_position;
-                let implied_closes = self.open_elements.prepare_for_open(self.element.name);
+                self.open_elements
+                    .prepare_for_open_into(self.element.name, &mut self.implied_closes);
+                let mut implied = std::mem::take(&mut self.implied_closes);
                 self.pop_open_elements(
-                    implied_closes,
+                    &mut implied,
                     reader,
                     Some(ImpliedCloseReason::OpenTagRule),
                     None,
                 );
+                self.implied_closes = implied;
                 self.position.reader_position = reader.get_position();
 
                 let is_self_closing = self.element.is_self_closing();
@@ -268,16 +274,17 @@ where
 
     fn pop_open_elements(
         &mut self,
-        open_elements: Vec<OpenElement<'html>>,
+        open_elements: &mut Vec<OpenElement<'html>>,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
         expected_tag: Option<&'html str>,
     ) -> bool {
         let base_depth = self.open_elements.depth();
-        let total = open_elements.len();
+        let mut elems = std::mem::take(open_elements);
+        let total = elems.len();
         let mut early_exit = false;
 
-        for (index, open_element) in open_elements.into_iter().enumerate() {
+        for (index, open_element) in elems.drain(..).enumerate() {
             let close_depth =
                 base_depth.saturating_add((total - index) as crate::engine::DepthSize);
             if implied_close_reason.is_some_and(|_| {
@@ -296,6 +303,7 @@ where
             early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
         }
 
+        *open_elements = elems;
         early_exit
     }
 
@@ -371,8 +379,16 @@ where
             self.position.text_content_position = position;
         }
         self.position.reader_position = reader.get_position();
-        let remaining = self.open_elements.close_all_at_eof();
-        self.pop_open_elements(remaining, reader, Some(ImpliedCloseReason::EofDrain), None);
+        self.open_elements
+            .close_all_at_eof_into(&mut self.implied_closes);
+        let mut implied = std::mem::take(&mut self.implied_closes);
+        self.pop_open_elements(
+            &mut implied,
+            reader,
+            Some(ImpliedCloseReason::EofDrain),
+            None,
+        );
+        self.implied_closes = implied;
         self.eof_drained = true;
     }
 }
