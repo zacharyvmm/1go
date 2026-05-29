@@ -8,26 +8,34 @@ publish = false
 scah = { path = "../crates/scah" }
 
 # Benchmarking Tools
-gungraun = { version = "0.17", features = ["cachegrind"] }
 criterion = { version = "0.8.1", features = ["html_reports"] }
 
 # Competitor libraries
-lexbor_css = { git = "https://github.com/zacharyvmm/lexbor-rust-css-selection.git" }
-lxml = { package = "rlibxml", version="0.1.1", git = "https://github.com/zacharyvmm/rlibxml.git" }
+lexbor_css = { git = "https://github.com/zacharyvmm/lexbor-rust-css-selection.git", features = ["vendor"] }
+lxml = { package = "rlibxml", version="0.1.1", git = "https://github.com/zacharyvmm/rlibxml.git", features = ["vendored"] }
 scraper = "0.25.0"
 tl = "0.7.8"
 # tl = { version = "0.7.8", features = ["simd"] }
 lol_html = "2.7.1"
 
+[features]
+default = []
+linux-memory-benches = ["dep:gungraun"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gungraun = { version = "0.17", features = ["cachegrind"], optional = true }
+
 [[bench]]
 name = "memory_bench_simple_all"
 path = "simple/all/memory_bench.rs"
 harness = false
+required-features = ["linux-memory-benches"]
 
 [[bench]]
 name = "memory_bench_simple_first"
 path = "simple/first/memory_bench.rs"
 harness = false
+required-features = ["linux-memory-benches"]
 
 [[bench]]
 name = "speed_bench_simple_all"
@@ -48,6 +56,7 @@ harness = false
 # name = "memory_bench_macro_queries"
 # path = "macro/memory_bench.rs"
 # harness = false
+# required-features = ["linux-memory-benches"]
 
 [[bench]]
 name = "speed_bench_nested_queries"
@@ -58,6 +67,7 @@ harness = false
 name = "memory_bench_nested_queries"
 path = "nested/memory_bench.rs"
 harness = false
+required-features = ["linux-memory-benches"]
 
 [[bench]]
 name = "speed_bench_spec_all_links"
