@@ -2,9 +2,9 @@ use super::cursor::{CursorMode, CursorOps, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
 #[cfg(any(debug_assertions, test))]
 use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRejectReason};
+use crate::store::ElementId;
 use crate::store::Store;
 use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
-use crate::store::ElementId;
 
 /*
  * A Selection works runs the fsm's using a unified ScopedCursor type but
@@ -195,8 +195,9 @@ where
                 let cursor = &self.scoped[i];
                 let matched = cursor.next(self.query, depth, element);
                 let position = cursor.position;
-                let section_kind =
-                    self.query.get_section_selection_kind(cursor.position.selection);
+                let section_kind = self
+                    .query
+                    .get_section_selection_kind(cursor.position.selection);
                 let is_first = matches!(section_kind, SelectionKind::First);
                 (matched, position, is_first)
             };
@@ -280,7 +281,10 @@ where
                 TraceEvent::TransitionMatched {
                     runner_index,
                     cursor: CursorTraceKind::Root,
-                    selector: self.query.get_selection(self.root.position.selection).source,
+                    selector: self
+                        .query
+                        .get_selection(self.root.position.selection)
+                        .source,
                     element: element.name,
                     depth,
                     selection: self.root.position.selection,
@@ -301,8 +305,7 @@ where
             // Intermediate states within a multi-transition section don't need
             // forks — the root cursor's advancement handles the same path.
             if is_descendant && is_section_end && (!last_save_point || is_all) {
-                self.scoped
-                    .push(self.root.anchor_clone(depth));
+                self.scoped.push(self.root.anchor_clone(depth));
                 #[cfg(any(debug_assertions, test))]
                 {
                     let created = self.scoped.last().unwrap();
@@ -350,7 +353,10 @@ where
                     TraceEvent::TransitionRejected {
                         runner_index,
                         cursor: CursorTraceKind::Root,
-                        selector: self.query.get_selection(self.root.position.selection).source,
+                        selector: self
+                            .query
+                            .get_selection(self.root.position.selection)
+                            .source,
                         element: element.name,
                         depth,
                         selection: self.root.position.selection,
@@ -424,8 +430,9 @@ where
                 // prevents further matching at the current position.
                 // For All selections: reactivate in place (clear end, don't
                 // move position) so siblings can be matched.
-                let section_kind =
-                    self.query.get_section_selection_kind(self.root.position.selection);
+                let section_kind = self
+                    .query
+                    .get_section_selection_kind(self.root.position.selection);
                 if matches!(section_kind, SelectionKind::First) {
                     // For First sections: step backward to the parent query
                     // section. The end flag persists so the parent's close
@@ -455,8 +462,7 @@ where
                 {
                     *end_flag = false;
                     match_stack.pop();
-                    self.root.last_depth =
-                        *match_stack.last().unwrap_or(&self.root.scope_depth);
+                    self.root.last_depth = *match_stack.last().unwrap_or(&self.root.scope_depth);
                 }
                 #[cfg(any(debug_assertions, test))]
                 if let Some(section) = self.query.exit_at_section_end() {
@@ -726,7 +732,10 @@ mod tests {
         // Single-transition section: the only state IS the section end.
         // Forks for All to enable nested descendant matching.
         let anchored_count = selection.scoped.iter().filter(|c| c.is_anchored()).count();
-        assert_eq!(anchored_count, 1, "Expected 1 anchored fork after div match");
+        assert_eq!(
+            anchored_count, 1,
+            "Expected 1 anchored fork after div match"
+        );
 
         let anchored = selection.scoped.iter().find(|c| c.is_anchored()).unwrap();
         assert_eq!(anchored.scope_depth, 0);
@@ -737,9 +746,7 @@ mod tests {
     fn test_child_combinator_sibling_rematching() {
         let html = "<main><section>A</section><section>B</section></main>";
         let reader = &mut Reader::new(html);
-        let query = &[Query::all("main > section", Save::all())
-            .unwrap()
-            .build()];
+        let query = &[Query::all("main > section", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
         let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
@@ -783,8 +790,7 @@ mod tests {
 
     #[test]
     fn test_then_branching_with_anchoring_model() {
-        let html =
-            r#"<section><div class="product"><h1>P1</h1><img src="p1.png" /><p>Desc</p></div></section>"#;
+        let html = r#"<section><div class="product"><h1>P1</h1><img src="p1.png" /><p>Desc</p></div></section>"#;
         let reader = &mut Reader::new(html);
         let query = &[Query::all("section .product", Save::all())
             .unwrap()
@@ -847,9 +853,7 @@ mod tests {
     fn test_multiple_nested_descendant_levels() {
         let html = "<body><div><ul><li><a href='#'>link</a></li></ul></div></body>";
         let reader = &mut Reader::new(html);
-        let query = &[Query::all("body div ul li a", Save::all())
-            .unwrap()
-            .build()];
+        let query = &[Query::all("body div ul li a", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
         let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
@@ -886,7 +890,11 @@ mod tests {
         assert_eq!(articles.len(), 1);
 
         let h1s: Vec<_> = articles[0].get(&store, "h1").unwrap().collect();
-        assert_eq!(h1s.len(), 1, "first('h1') should match only one h1, not all");
+        assert_eq!(
+            h1s.len(),
+            1,
+            "first('h1') should match only one h1, not all"
+        );
         assert_eq!(h1s[0].name, "h1");
 
         let links: Vec<_> = articles[0].get(&store, "a[href]").unwrap().collect();
@@ -971,7 +979,10 @@ mod tests {
 
         // Verify root cursor advanced to child section (p)
         assert_eq!(selection.root.position.selection, QuerySectionId(1));
-        assert!(store.get("div").is_some(), "div should be in store even with Save::none()");
+        assert!(
+            store.get("div").is_some(),
+            "div should be in store even with Save::none()"
+        );
 
         // Match first <p>
         let mut save_hits = Vec::new();
@@ -997,7 +1008,10 @@ mod tests {
         assert_eq!(save_hits[0].element_id, ElementId(1));
 
         // Root cursor should now be in end state
-        assert!(selection.root.end(), "root cursor should be at end after matching first p");
+        assert!(
+            selection.root.end(),
+            "root cursor should be at end after matching first p"
+        );
 
         // Second <p> should NOT match (end=true, First section)
         let mut save_hits2 = Vec::new();
