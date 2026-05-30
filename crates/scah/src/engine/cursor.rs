@@ -71,11 +71,13 @@ impl ScopedCursor {
     }
 
     /// Returns `true` if this cursor is in `Moving` mode.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_moving(&self) -> bool {
         matches!(self.mode, CursorMode::Moving { .. })
     }
 
     /// Returns `true` if this cursor is in `Anchored` mode.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_anchored(&self) -> bool {
         matches!(self.mode, CursorMode::Anchored)
     }
