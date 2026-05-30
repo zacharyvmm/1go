@@ -11,7 +11,9 @@ version = "0.0.17"
 description = "scah (scan HTML)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "pytest>=9.0.2",
+]
 
 [project.optional-dependencies]
 bench = [

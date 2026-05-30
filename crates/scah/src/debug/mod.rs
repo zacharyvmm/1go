@@ -146,7 +146,7 @@ pub enum TraceEvent<'html, 'query> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorTraceKind {
-    Main,
+    Root,
     Scoped { index: usize },
 }
 
@@ -423,7 +423,7 @@ mod tests {
         });
         trace.push(TraceEvent::TransitionMatched {
             runner_index: 0,
-            cursor: super::CursorTraceKind::Main,
+            cursor: super::CursorTraceKind::Root,
             selector: "a[href]",
             element: "a",
             depth: 1,
