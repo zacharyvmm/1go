@@ -6,20 +6,6 @@ use crate::store::ElementId;
 use crate::store::Store;
 use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
 
-/*
- * A Selection works runs the fsm's using a unified ScopedCursor type but
- * splits root (MOVING, mutated in place) from scoped (ANCHORED, in a vec)
- * for performance — avoiding per-element Vec reallocation.
- *
- * 1) The root MOVING cursor is mutated in place (zero allocation per element).
- * 2) ANCHORED cursors live in a Vec, iterated by index. New cursors are pushed
- *    to the end; the pre-computed len ensures they aren't reprocessed in the
- *    current call.
- *
- * Anchored cursors are pruned in back() when scope_depth >= close_depth.
- * The root cursor reactivates or steps backward on close at matching depth.
- */
-
 /// The `QueryExecutor` is an NFA execution engine optimized for streaming StAX events.
 ///
 /// Because CSS selectors like descendant (` `) are non-deterministic (a match can
@@ -36,9 +22,7 @@ use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XH
 ///    steps backward when `last_match_depth == close_depth`.
 pub struct QueryExecutor<'a, Q> {
     pub(crate) query: &'a Q,
-    /// MOVING root cursor. Mutated in-place — no Vec allocation per element.
     pub(crate) root: ScopedCursor,
-    /// ANCHORED cursors (descendant forks, sibling forks, and their clones).
     pub(crate) scoped: Vec<ScopedCursor>,
 }
 
@@ -62,15 +46,6 @@ where
         }
     }
 
-    /// Advance a cursor's position after a successful match.
-    ///
-    /// - First tries the next transition in the same query section.
-    /// - If none, tries the next child section.
-    /// - For child sections with siblings, forks ANCHORED cursors for each
-    ///   sibling so they can be tried independently.
-    /// - If neither transition nor child is available, sets `end = true`.
-    ///
-    /// Called for both the root MOVING cursor and ANCHORED cursor clones.
     fn next_position(
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
         tree: &Q,
@@ -172,11 +147,6 @@ where
         }
     }
 
-    /// Process an open-tag event.
-    ///
-    /// STEP 1: Iterate ANCHORED cursors by index. New cursors are pushed to the
-    /// end; the pre-computed len ensures they aren't reprocessed in this call.
-    /// STEP 2: Mutate the root MOVING cursor in place.
     pub fn next(
         &mut self,
         runner_index: usize,
@@ -187,10 +157,8 @@ where
     ) {
         let depth = document_position.element_depth;
 
-        // ── STEP 1: ANCHORED cursors ──
         let scoped_len = self.scoped.len();
         for i in 0..scoped_len {
-            // Check match first, collecting all needed data in a block.
             let (matched, position, is_first) = {
                 let cursor = &self.scoped[i];
                 let matched = cursor.next(self.query, depth, element);
@@ -241,9 +209,6 @@ where
                 }
             );
 
-            // ANCHORED cursor matched: clone and advance.
-            // For First selections, mark the original anchored cursor as consumed
-            // so it won't match again on subsequent elements.
             let mut advanced = self.scoped[i].clone();
 
             if is_first {
@@ -274,7 +239,6 @@ where
             self.scoped.push(advanced);
         }
 
-        // ── STEP 2: Root MOVING cursor ──
         if self.root.next(self.query, depth, element) {
             crate::scah_trace!(
                 store,
@@ -300,10 +264,6 @@ where
                 .get_section_selection_kind(self.root.position.selection);
             let is_all = matches!(section_kind, SelectionKind::All);
 
-            // Fork only at section boundaries (save points). For single-transition
-            // sections (e.g., standalone "div") the only state IS the section end.
-            // Intermediate states within a multi-transition section don't need
-            // forks — the root cursor's advancement handles the same path.
             if is_descendant && is_section_end && (!last_save_point || is_all) {
                 self.scoped.push(self.root.anchor_clone(depth));
                 #[cfg(any(debug_assertions, test))]
@@ -414,7 +374,6 @@ where
             }
         }
 
-        // Update root parent from last pruned cursor
         if let (Some(parent), Some(root_mut)) = (
             last_pruned_parent,
             (self.root.scope_depth == 0).then_some(&mut self.root),
@@ -422,22 +381,12 @@ where
             root_mut.parent = parent;
         }
 
-        // Handle MOVING root cursor: reactivate / step backward
         if self.root.last_depth == close_depth {
             if self.root.end() {
-                // For First selections: step backward (like non-end), cursor
-                // moves up the query tree to parent section. The end flag
-                // prevents further matching at the current position.
-                // For All selections: reactivate in place (clear end, don't
-                // move position) so siblings can be matched.
                 let section_kind = self
                     .query
                     .get_section_selection_kind(self.root.position.selection);
                 if matches!(section_kind, SelectionKind::First) {
-                    // For First sections: step backward to the parent query
-                    // section. The end flag persists so the parent's close
-                    // event will trigger the final step and early_exit at
-                    // the right depth (after content capture).
                     self.root.step_backward(self.query);
                     #[cfg(any(debug_assertions, test))]
                     if let Some(section) = self.query.exit_at_section_end() {
@@ -453,8 +402,6 @@ where
                     return true;
                 }
 
-                // Reactivate for siblings (All selection): clear end,
-                // pop match_stack, restore last_depth.
                 if let CursorMode::Moving {
                     ref mut match_stack,
                     end: ref mut end_flag,
@@ -477,7 +424,6 @@ where
                 }
                 return true;
             } else {
-                // Step backward: pop match_stack, call position.back
                 self.root.step_backward(self.query);
                 return true;
             }
@@ -527,9 +473,7 @@ mod tests {
 
         assert!(store.get("div a").is_none());
 
-        // Root cursor advanced past div (next_transition)
         assert_eq!(selection.root.position.state, TransitionId(1));
-        // Fork only at section boundaries; state 0 is not a section end for multi-state "div a"
         assert_eq!(selection.scoped.len(), 0);
 
         selection.next(
@@ -549,7 +493,6 @@ mod tests {
             &mut Vec::new(),
         );
 
-        // Root cursor matches a at depth 1 via descendant combinator
         assert_eq!(store.get("div a").unwrap().count(), 1);
         let children = store.get("div a").unwrap();
         let children: Vec<&Element> = children.collect();
@@ -622,7 +565,6 @@ mod tests {
             state: TransitionId(0),
         };
 
-        // Set up anchored cursors at various scope depths
         selection.scoped = vec![
             anchored_cursor(1, ElementId(10), position),
             anchored_cursor(3, ElementId(20), position),
@@ -642,7 +584,6 @@ mod tests {
             &mut store,
         );
 
-        // scope_depth >= 2 pruned: 3, 2 pruned. 1, 1, 0 kept.
         let retained = &selection.scoped;
         assert_eq!(retained.len(), 3);
         assert!(retained.iter().all(|c| c.scope_depth < 2));
@@ -654,8 +595,6 @@ mod tests {
 
     #[test]
     fn test_simple_open_close() {
-        // Use All selection so that back() reactivates the cursor for sibling matching.
-        // The anchored fork from the descendant combinator is pruned on close.
         let query = Query::all("div", Save::none()).unwrap().build();
 
         let mut store = Store::default();
@@ -679,7 +618,6 @@ mod tests {
         );
         store.text_content.set_start(4);
 
-        // After descendant match, an anchored fork is created (All + descendant)
         assert_eq!(selection.scoped.len(), 1);
         assert!(selection.root.end());
 
@@ -695,19 +633,13 @@ mod tests {
             &mut store,
         );
 
-        // Reactivated for All selection, anchored cursor pruned
         assert!(reactivated);
         assert!(!selection.root.end());
         assert!(selection.scoped.is_empty());
     }
 
-    // ─── Targeted tests (Phase 5.3) ───
-
     #[test]
     fn test_descendant_forking_with_anchoring_model() {
-        // Forks only happen at section boundaries. Single-transition sections
-        // (e.g., standalone "div") fork at their lone state. Multi-transition
-        // sections fork at the last state only.
         let query = &Query::all("div", Save::none()).unwrap().build();
         let mut store = Store::default();
         let mut selection = QueryExecutor::new(query);
@@ -729,8 +661,6 @@ mod tests {
             &mut Vec::new(),
         );
 
-        // Single-transition section: the only state IS the section end.
-        // Forks for All to enable nested descendant matching.
         let anchored_count = selection.scoped.iter().filter(|c| c.is_anchored()).count();
         assert_eq!(
             anchored_count, 1,
@@ -866,8 +796,6 @@ mod tests {
 
     #[test]
     fn test_then_first_selection_only_matches_once() {
-        // BUG: first selections in a then() callback used to act like all selections.
-        // This test ensures that .first() inside .then() only matches one element.
         let html = "<article><h1>First</h1><h1>Second</h1><a href='1'>link1</a><a href='2'>link2</a></article>";
         let reader = &mut Reader::new(html);
         let query = &[Query::all("article", Save::none())
@@ -885,7 +813,6 @@ mod tests {
         while parser.next(reader) {}
         let store = parser.matches();
 
-        // Access children through parent element
         let articles: Vec<_> = store.get("article").unwrap().collect();
         assert_eq!(articles.len(), 1);
 
@@ -903,7 +830,6 @@ mod tests {
 
     #[test]
     fn test_store_push_then_pattern() {
-        // Verify that store.push links child queries correctly through parent.
         let query = &Query::all("div", Save::none())
             .unwrap()
             .then(|div| Ok([div.first("p", Save::all())?]))
@@ -912,7 +838,6 @@ mod tests {
 
         let mut store = Store::default();
 
-        // Push the root element (div)
         let div_id = store.push(
             ElementId::default(),
             &query.queries[0],
@@ -926,7 +851,6 @@ mod tests {
         assert_eq!(div_id, ElementId(0));
         assert!(store.get("div").is_some(), "div query should exist");
 
-        // Push the child element (p) with div as parent
         let p_id = store.push(
             div_id,
             &query.queries[1],
@@ -939,7 +863,6 @@ mod tests {
         );
         assert_eq!(p_id, ElementId(1));
 
-        // Child queries are accessed through the parent element, not store.get directly
         let divs: Vec<_> = store.get("div").unwrap().collect();
         let div = divs[0];
         let ps: Vec<_> = div.get(&store, "p").unwrap().collect();
@@ -949,7 +872,6 @@ mod tests {
 
     #[test]
     fn test_then_single_first_child_direct_executor() {
-        // Direct executor test: verify that first() in then() saves elements correctly.
         let query = &Query::all("div", Save::none())
             .unwrap()
             .then(|div| Ok([div.first("p", Save::all())?]))
@@ -959,7 +881,6 @@ mod tests {
         let mut store = Store::default();
         let mut selection = QueryExecutor::new(query);
 
-        // Match <div>
         selection.next(
             0,
             &XHtmlElement {
@@ -977,14 +898,12 @@ mod tests {
             &mut Vec::new(),
         );
 
-        // Verify root cursor advanced to child section (p)
         assert_eq!(selection.root.position.selection, QuerySectionId(1));
         assert!(
             store.get("div").is_some(),
             "div should be in store even with Save::none()"
         );
 
-        // Match first <p>
         let mut save_hits = Vec::new();
         selection.next(
             0,
@@ -1003,17 +922,14 @@ mod tests {
             &mut save_hits,
         );
 
-        // p is saved as child of div; verify through save_hits and store
         assert!(!save_hits.is_empty(), "p should have save hits");
         assert_eq!(save_hits[0].element_id, ElementId(1));
 
-        // Root cursor should now be in end state
         assert!(
             selection.root.end(),
             "root cursor should be at end after matching first p"
         );
 
-        // Second <p> should NOT match (end=true, First section)
         let mut save_hits2 = Vec::new();
         selection.next(
             0,
@@ -1034,7 +950,6 @@ mod tests {
 
         assert!(save_hits2.is_empty(), "Second p should NOT be saved");
 
-        // Access children through parent element (after all mutations)
         let divs: Vec<_> = store.get("div").unwrap().collect();
         let div = divs[0];
         let ps: Vec<_> = div.get(&store, "p").unwrap().collect();
@@ -1043,7 +958,6 @@ mod tests {
 
     #[test]
     fn test_then_single_first_child_no_descendant() {
-        // Full parser test: one first() child inside then() with nested HTML
         let html = "<div><p>A</p><p>B</p></div>";
         let reader = &mut Reader::new(html);
         let query = &[Query::all("div", Save::none())
@@ -1056,7 +970,6 @@ mod tests {
         while parser.next(reader) {}
         let store = parser.matches();
 
-        // Child queries are accessed through parent element
         let divs: Vec<_> = store.get("div").unwrap().collect();
         assert_eq!(divs.len(), 1, "Should match one div");
         let ps: Vec<_> = divs[0].get(&store, "p").unwrap().collect();
@@ -1065,7 +978,6 @@ mod tests {
 
     #[test]
     fn test_then_multiple_product_cards_first_h1() {
-        // Multiple product cards, each with an h1. first() should match one h1 per card.
         let html = r#"<div>
             <div class="product"><h1>P1</h1><p>Desc1</p></div>
             <div class="product"><h1>P2</h1><p>Desc2</p></div>
