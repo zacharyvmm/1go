@@ -10,7 +10,9 @@ use crate::store::ElementId;
 /// - **Moving**: Actively advances its position on each match.
 ///   Uses a match stack to track nesting depths (like the old `Cursor`).
 /// - **Anchored**: Fixed at a specific `scope_depth`. Never advances position;
-///   only spawns anchored clones when it matches a transition.
+///   only spawns moving clones when it matches a transition.
+///   The `end` flag is used to mark the cursor as consumed (e.g., after first
+///   match for a `SelectionKind::First` section).
 #[derive(PartialEq, Clone, Debug)]
 pub enum CursorMode {
     Moving {
@@ -19,7 +21,11 @@ pub enum CursorMode {
         match_stack: SmallVec<[super::DepthSize; 10]>,
         end: bool,
     },
-    Anchored,
+    Anchored {
+        /// When `true`, this anchored cursor has been consumed (e.g., matched
+        /// for a `First` selection) and should not match again.
+        end: bool,
+    },
 }
 
 /// A single unified cursor that replaces the old `Cursor` + `ScopedCursor` split.
@@ -36,6 +42,11 @@ pub struct ScopedCursor {
     pub parent: ElementId,
     pub position: Position,
     pub mode: CursorMode,
+    /// Cached effective last depth for combinator evaluation.
+    /// Avoids enum match + Option unwrap in the hot `next()` path.
+    /// - Moving: `match_stack.last().unwrap_or(scope_depth)`
+    /// - Anchored: `scope_depth` (never changes)
+    pub last_depth: super::DepthSize,
 }
 
 impl ScopedCursor {
@@ -53,6 +64,7 @@ impl ScopedCursor {
                 match_stack: SmallVec::new(),
                 end: false,
             },
+            last_depth: scope_depth,
         }
     }
 
@@ -66,7 +78,8 @@ impl ScopedCursor {
             scope_depth,
             parent,
             position,
-            mode: CursorMode::Anchored,
+            mode: CursorMode::Anchored { end: false },
+            last_depth: scope_depth,
         }
     }
 
@@ -79,29 +92,20 @@ impl ScopedCursor {
     /// Returns `true` if this cursor is in `Anchored` mode.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_anchored(&self) -> bool {
-        matches!(self.mode, CursorMode::Anchored)
+        matches!(self.mode, CursorMode::Anchored { .. })
     }
 
     /// Returns the effective `last_depth` used for combinator evaluation.
-    ///
-    /// - Moving: returns the last element of `match_stack`, or `scope_depth` if empty.
-    /// - Anchored: returns `scope_depth`.
+    /// Uses the cached `last_depth` field — zero-overhead in hot path.
     pub fn effective_last_depth(&self) -> super::DepthSize {
-        match &self.mode {
-            CursorMode::Moving { match_stack, .. } => {
-                *match_stack.last().unwrap_or(&self.scope_depth)
-            }
-            CursorMode::Anchored => self.scope_depth,
-        }
+        self.last_depth
     }
 
-    /// For Moving cursors: returns the `end` flag.
-    /// For Anchored cursors: always returns `false`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Returns the `end` flag for both Moving and Anchored cursors.
     pub fn end(&self) -> bool {
         match &self.mode {
             CursorMode::Moving { end, .. } => *end,
-            CursorMode::Anchored => false,
+            CursorMode::Anchored { end } => *end,
         }
     }
 
@@ -109,12 +113,7 @@ impl ScopedCursor {
     /// For Anchored cursors: returns `scope_depth`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn last_match_depth(&self) -> super::DepthSize {
-        match &self.mode {
-            CursorMode::Moving { match_stack, .. } => {
-                *match_stack.last().unwrap_or(&self.scope_depth)
-            }
-            CursorMode::Anchored => self.scope_depth,
-        }
+        self.last_depth
     }
 
     /// Clone this cursor, converting an Anchored cursor into a Moving cursor.
@@ -131,6 +130,7 @@ impl ScopedCursor {
                 match_stack: SmallVec::new(),
                 end: false,
             },
+            last_depth: current_depth,
         }
     }
 
@@ -143,7 +143,8 @@ impl ScopedCursor {
             scope_depth: depth,
             parent: self.parent,
             position: self.position,
-            mode: CursorMode::Anchored,
+            mode: CursorMode::Anchored { end: false },
+            last_depth: depth,
         }
     }
 }
@@ -184,9 +185,11 @@ impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
         depth: super::DepthSize,
         element: &XHtmlElement,
     ) -> bool {
+        if self.end() {
+            return false;
+        }
         let fsm = tree.get_transition(self.position.state);
-        let last_depth = self.effective_last_depth();
-        fsm.next(element, depth, last_depth)
+        fsm.next(element, depth, self.last_depth)
     }
 
     fn step_backward<Q: QuerySpec<'query>>(&mut self, tree: &Q) {
@@ -196,6 +199,7 @@ impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
         } = self.mode
         {
             match_stack.pop();
+            self.last_depth = *match_stack.last().unwrap_or(&self.scope_depth);
             self.position.back(tree);
         }
     }
@@ -221,8 +225,9 @@ impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
     }
 
     fn set_end(&mut self, end: bool) {
-        if let CursorMode::Moving { end: ref mut e, .. } = self.mode {
-            *e = end;
+        match &mut self.mode {
+            CursorMode::Moving { end: e, .. } => *e = end,
+            CursorMode::Anchored { end: e } => *e = end,
         }
     }
 
@@ -233,6 +238,7 @@ impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
         } = self.mode
         {
             match_stack.push(depth);
+            self.last_depth = depth;
         }
     }
 }
@@ -333,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anchored_cursor_set_end_is_noop() {
+    fn test_anchored_cursor_set_end() {
         let mut cursor = ScopedCursor::new_anchored(
             0,
             NULL_PARENT,
@@ -344,8 +350,8 @@ mod tests {
         );
         assert!(!cursor.end());
         cursor.set_end(true);
-        // Anchored cursors always return false for end()
-        assert!(!cursor.end());
+        // Anchored cursors now support the end flag (used to consume First selections)
+        assert!(cursor.end());
     }
 
     #[test]

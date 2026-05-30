@@ -8,9 +8,11 @@ fn implied_p_close_splits_content_correctly() {
     assert_eq!(elements(&store, "p").len(), 1);
     assert_eq!(texts(&store, "p"), vec![Some("Hello")]);
     assert_eq!(inner_htmls(&store, "p"), vec![Some("Hello")]);
+    // With the end-guard fix, end=true cursors no longer match, eliminating
+    // a spurious duplicate div match from the root cursor at inner <div>.
     assert_eq!(
         texts(&store, "div"),
-        vec![Some("Hello World"), Some("World"), Some("World")]
+        vec![Some("Hello World"), Some("World")]
     );
     assert_eq!(elements(&store, "div > p").len(), 1);
     assert_eq!(elements(&store, "div > div").len(), 1);

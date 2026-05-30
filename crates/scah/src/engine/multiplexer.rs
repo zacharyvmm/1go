@@ -68,9 +68,13 @@ where
         for (index, session) in self.runners.iter_mut().enumerate() {
             let early_exit_previous = session.early_exit();
             let back = session.back(index, xhtml_element, position, store);
-            let early_exit_current = session.early_exit();
 
-            if back && (early_exit_previous || early_exit_current) {
+            // Only trigger early_exit if the cursor was already at the
+            // exit section *before* back(). This prevents premature runner
+            // removal when step_backward moves the cursor into the exit
+            // section from a child section (the parent's content hasn't
+            // been captured yet).
+            if back && early_exit_previous {
                 remove_indices.push(index);
             }
         }
