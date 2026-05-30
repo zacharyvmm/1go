@@ -1155,9 +1155,6 @@ wheels = [
 name = "scah"
 version = "0.0.17"
 source = { editable = "." }
-dependencies = [
-    { name = "pytest" },
-]
 
 [package.optional-dependencies]
 bench = [
@@ -1179,7 +1176,6 @@ requires-dist = [
     { name = "lxml", marker = "extra == 'bench'" },
     { name = "parsel", marker = "extra == 'bench'" },
     { name = "poethepoet", marker = "extra == 'bench'" },
-    { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest", marker = "extra == 'bench'" },
     { name = "pytest-benchmark", extras = ["histogram"], marker = "extra == 'bench'" },
     { name = "scah", marker = "extra == 'bench'", editable = "." },

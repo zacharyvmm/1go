@@ -1,4 +1,4 @@
-use super::cursor::{CursorMode, CursorOps, ScopedCursor};
+use super::cursor::{CursorMode, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
 #[cfg(any(debug_assertions, test))]
 use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRejectReason};

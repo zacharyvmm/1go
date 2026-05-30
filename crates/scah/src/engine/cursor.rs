@@ -149,41 +149,13 @@ impl ScopedCursor {
     }
 }
 
-/// Cursor operations used by the executor.
-pub trait CursorOps<'query, 'html> {
+impl ScopedCursor {
     /// Evaluate the transition at the cursor's current position against `element`.
-    fn next<Q: QuerySpec<'query>>(
+    pub fn next<'query, 'html, Q: QuerySpec<'query>>(
         &self,
         tree: &Q,
         depth: super::DepthSize,
         element: &XHtmlElement<'html>,
-    ) -> bool;
-
-    /// Step backward: for Moving cursors, rewinds position and pops match_stack.
-    /// For Anchored cursors, this is a no-op.
-    fn step_backward<Q: QuerySpec<'query>>(&mut self, tree: &Q);
-
-    fn get_position(&self) -> &Position;
-    fn set_position(&mut self, value: Position);
-    fn set_state(&mut self, value: TransitionId);
-
-    fn get_parent(&self) -> ElementId;
-    fn set_parent(&mut self, value: ElementId);
-
-    /// Set the `end` flag on Moving cursors. No-op for Anchored.
-    fn set_end(&mut self, end: bool);
-
-    /// Record a depth match. For Moving cursors, pushes onto match_stack.
-    /// For Anchored cursors, this is a no-op.
-    fn add_depth(&mut self, depth: super::DepthSize);
-}
-
-impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
-    fn next<Q: QuerySpec<'query>>(
-        &self,
-        tree: &Q,
-        depth: super::DepthSize,
-        element: &XHtmlElement,
     ) -> bool {
         if self.end() {
             return false;
@@ -192,7 +164,9 @@ impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
         fsm.next(element, depth, self.last_depth)
     }
 
-    fn step_backward<Q: QuerySpec<'query>>(&mut self, tree: &Q) {
+    /// Step backward: for Moving cursors, rewinds position and pops match_stack.
+    /// For Anchored cursors, this is a no-op.
+    pub fn step_backward<'query, Q: QuerySpec<'query>>(&mut self, tree: &Q) {
         if let CursorMode::Moving {
             ref mut match_stack,
             ..
@@ -204,34 +178,37 @@ impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
         }
     }
 
-    fn get_position(&self) -> &Position {
+    pub fn get_position(&self) -> &Position {
         &self.position
     }
 
-    fn set_position(&mut self, value: Position) {
+    pub fn set_position(&mut self, value: Position) {
         self.position = value;
     }
 
-    fn set_state(&mut self, value: TransitionId) {
+    pub fn set_state(&mut self, value: TransitionId) {
         self.position.state = value;
     }
 
-    fn get_parent(&self) -> ElementId {
+    pub fn get_parent(&self) -> ElementId {
         self.parent
     }
 
-    fn set_parent(&mut self, value: ElementId) {
+    pub fn set_parent(&mut self, value: ElementId) {
         self.parent = value;
     }
 
-    fn set_end(&mut self, end: bool) {
+    /// Set the `end` flag on Moving cursors. No-op for Anchored.
+    pub fn set_end(&mut self, end: bool) {
         match &mut self.mode {
             CursorMode::Moving { end: e, .. } => *e = end,
             CursorMode::Anchored { end: e } => *e = end,
         }
     }
 
-    fn add_depth(&mut self, depth: super::DepthSize) {
+    /// Record a depth match. For Moving cursors, pushes onto match_stack.
+    /// For Anchored cursors, this is a no-op.
+    pub fn add_depth(&mut self, depth: super::DepthSize) {
         if let CursorMode::Moving {
             ref mut match_stack,
             ..
@@ -245,7 +222,7 @@ impl<'query, 'html> CursorOps<'query, 'html> for ScopedCursor {
 
 #[cfg(test)]
 mod tests {
-    use super::{CursorMode, CursorOps, ScopedCursor};
+    use super::{CursorMode, ScopedCursor};
     use crate::html::element::builder::XHtmlElement;
     use crate::store::ElementId;
     use crate::{Position, Query, QuerySectionId, Save, TransitionId};
