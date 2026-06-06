@@ -145,11 +145,11 @@ Control what data is captured per selector:
 > Full API documentation: [docs.rs/scah](https://docs.rs/scah)
 
 #### Benchmarks
-![Criterion Nested](https://raw.githubusercontent.com/zacharyvmm/scah/main/benches/images/criterion_nested.png)
+![Criterion Nested](https://raw.githubusercontent.com/zacharyvmm/scah/main/benches/images/nested_all_selection_10000.png)
 
-![Criterion Simple](https://raw.githubusercontent.com/zacharyvmm/scah/main/benches/images/criterion_simple.png)
+![Criterion Simple](https://raw.githubusercontent.com/zacharyvmm/scah/main/benches/images/simple_all_selection_10000.png)
 
-![Criterion WhatWg HTML Spec](https://raw.githubusercontent.com/zacharyvmm/scah/main/benches/images/criterion_whatwg_html_spec_all_links.png)
+![Criterion WhatWg HTML Spec](https://raw.githubusercontent.com/zacharyvmm/scah/main/benches/images/whatwg_html_spec_all_links.png)
 
 The repository includes two Rust benchmark tracks:
 
