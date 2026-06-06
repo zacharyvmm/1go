@@ -1,6 +1,6 @@
 [package]
 name = "scah-query-ir"
-version = "0.0.19"
+version = "0.0.20"
 edition = "2024"
 license = "MIT"
 description = "Internal query IR used by the scah selector and macro crates."
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/scah-query-ir"
 
 [dependencies]
 smallvec = "1.15.1"
-scah-reader = { version = "0.0.19", path = "../scah-reader" }
+scah-reader = { version = "0.0.20", path = "../scah-reader" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

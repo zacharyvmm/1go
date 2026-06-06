@@ -1,6 +1,6 @@
 [package]
 name = "scah"
-version = "0.0.19"
+version = "0.0.20"
 edition = "2024"
 license = "MIT"
 description = "CSS selectors meet streaming XML/HTML parsing. Filter StAX events and build targeted DOMs without loading the entire document."
@@ -17,9 +17,9 @@ path = "src/lib.rs"
 
 [dependencies]
 smallvec = "1.15.1"
-scah-reader = { version = "0.0.19", path = "../scah-reader" }
-scah-query-ir = { version = "0.0.19", path = "../scah-query-ir" }
-scah-macros = { version = "0.0.19", path = "../scah-macros" }
+scah-reader = { version = "0.0.20", path = "../scah-reader" }
+scah-query-ir = { version = "0.0.20", path = "../scah-query-ir" }
+scah-macros = { version = "0.0.20", path = "../scah-macros" }
 tracing = { version = "0.1", optional = true }
 
 [features]

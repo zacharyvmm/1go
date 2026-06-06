@@ -3,7 +3,7 @@
 authors = ["Zachary McSween Manickchand <contact@zacharymm.com>"]
 edition = "2024"
 name    = "scah-nodejs"
-version = "0.0.19"
+version = "0.0.20"
 
 [lib]
 crate-type = ["cdylib"]
