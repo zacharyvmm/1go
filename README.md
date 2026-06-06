@@ -21,7 +21,7 @@
 ```toml
 # Cargo.toml
 [dependencies]
-scah = "0.0.18"
+scah = "0.0.19"
 ```
 
 #### Basic usage

@@ -1,6 +1,6 @@
 [package]
 name = "scah-python"
-version = "0.0.18"
+version = "0.0.19"
 edition = "2024"
 
 [lib]

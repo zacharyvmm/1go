@@ -1,6 +1,6 @@
 [package]
 name = "scah-macros"
-version = "0.0.18"
+version = "0.0.19"
 edition = "2024"
 license = "MIT"
 description = "Procedural macros for the scah selector and streaming parser crates."
@@ -15,4 +15,4 @@ proc-macro = true
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
-scah-query-ir = { version = "0.0.18", path = "../scah-query-ir" }
+scah-query-ir = { version = "0.0.19", path = "../scah-query-ir" }
