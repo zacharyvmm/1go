@@ -140,11 +140,7 @@ impl ScopedCursor {
     /// Spawn a new MOVING cursor continuing from `next_position`.
     /// `at_depth` is the depth of the element that triggered the spawn.
     #[cfg(test)]
-    pub fn spawn_moving(
-        &self,
-        at_depth: super::DepthSize,
-        next_position: Position,
-    ) -> Self {
+    pub fn spawn_moving(&self, at_depth: super::DepthSize, next_position: Position) -> Self {
         Self {
             scope_depth: at_depth,
             parent: self.parent,
@@ -205,8 +201,7 @@ impl<'query> ScopedCursor {
     /// Called when a Moving cursor successfully matches an element at the given depth.
     pub fn set_last_match_depth(&mut self, depth: super::DepthSize) {
         if let CursorMode::Moving {
-            last_match_depth,
-            ..
+            last_match_depth, ..
         } = &mut self.mode
         {
             *last_match_depth = depth;
@@ -243,7 +238,7 @@ impl<'query> ScopedCursor {
 
 #[cfg(test)]
 mod tests {
-    use super::{CursorMode, ScopedCursor, SENTINEL_SCOPE};
+    use super::{CursorMode, SENTINEL_SCOPE, ScopedCursor};
     use crate::html::element::builder::XHtmlElement;
     use crate::store::ElementId;
     use crate::{Position, Query, QuerySectionId, Save, TransitionId};
@@ -385,12 +380,7 @@ mod tests {
     fn test_next_positions_then_children() {
         let query = Query::all("div", Save::none())
             .unwrap()
-            .then(|div| {
-                Ok([
-                    div.first("h1", Save::all())?,
-                    div.all("p", Save::all())?,
-                ])
-            })
+            .then(|div| Ok([div.first("h1", Save::all())?, div.all("p", Save::all())?]))
             .unwrap()
             .build();
 
@@ -405,8 +395,14 @@ mod tests {
 
         // Should have positions for h1 (section 1) and p (section 2)
         let selections: Vec<_> = positions.iter().map(|p| p.selection).collect();
-        assert!(selections.contains(&QuerySectionId(1)), "Should include h1 section");
-        assert!(selections.contains(&QuerySectionId(2)), "Should include p section");
+        assert!(
+            selections.contains(&QuerySectionId(1)),
+            "Should include h1 section"
+        );
+        assert!(
+            selections.contains(&QuerySectionId(2)),
+            "Should include p section"
+        );
     }
 
     #[test]
@@ -452,18 +448,21 @@ mod tests {
     #[test]
     fn test_new_moving_with_last() {
         let cursor = ScopedCursor::new_moving_with_last(
-            5,    // scope_depth
+            5, // scope_depth
             NULL_PARENT,
             Position {
                 selection: QuerySectionId(1),
                 state: TransitionId(3),
             },
-            2,    // last_match_depth (different from scope)
+            2, // last_match_depth (different from scope)
         );
         assert!(cursor.is_moving());
         assert_eq!(cursor.scope_depth, 5);
         match &cursor.mode {
-            CursorMode::Moving { last_match_depth, end } => {
+            CursorMode::Moving {
+                last_match_depth,
+                end,
+            } => {
                 assert_eq!(*last_match_depth, 2);
                 assert!(!end);
             }

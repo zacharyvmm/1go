@@ -1,4 +1,4 @@
-use super::cursor::{ScopedCursor, SENTINEL_SCOPE};
+use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
 #[cfg(any(debug_assertions, test))]
 use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRejectReason};
@@ -138,11 +138,7 @@ where
                             selection: position.selection,
                             state: position.state,
                             reason: Self::transition_reject_reason(
-                                self.query,
-                                &position,
-                                depth,
-                                last_depth,
-                                element,
+                                self.query, &position, depth, last_depth, element,
                             ),
                         }
                     );
@@ -166,9 +162,7 @@ where
             let is_descendant = self.query.is_descendant(position.state);
             let is_save_point = self.query.is_save_point(&position);
             let is_section_end = is_save_point;
-            let section_kind = self
-                .query
-                .get_section_selection_kind(position.selection);
+            let section_kind = self.query.get_section_selection_kind(position.selection);
             let is_first = matches!(section_kind, SelectionKind::First);
             // Whether the element is self-closing (no interior, no close event)
             let self_closing = element.is_self_closing();
@@ -267,11 +261,8 @@ where
                     // Spawn continuations
                     spawned_positions = self.cursors[i].next_positions(self.query);
                     for pos in &spawned_positions {
-                        self.cursors.push(ScopedCursor::new_moving(
-                            depth,
-                            saved_parent,
-                            *pos,
-                        ));
+                        self.cursors
+                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
@@ -325,16 +316,12 @@ where
                     }
 
                     for pos in &spawned_positions {
-                        self.cursors.push(ScopedCursor::new_moving(
-                            depth,
-                            saved_parent,
-                            *pos,
-                        ));
+                        self.cursors
+                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
                     }
                 }
             }
         }
-
     }
 
     pub fn early_exit(&self) -> bool {
@@ -417,9 +404,7 @@ where
                         state: pruned.position.state,
                     }
                 );
-            } else if cur.is_moving()
-                && cur.effective_last_depth() == close_depth
-            {
+            } else if cur.is_moving() && cur.effective_last_depth() == close_depth {
                 // Non-SENTINEL Moving cursor: its match depth matches the close.
                 // Reset last_match_depth to scope_depth (unwind the match stack)
                 // and handle end/reactivation.
@@ -620,10 +605,14 @@ mod tests {
         // Cursors with scope < 2 should be retained, plus the SENTINEL root
         let retained = &selection.cursors;
         assert_eq!(retained.len(), 4, "Should retain root + 3 scoped < 2");
-        assert!(retained[0].scope_depth == SENTINEL_SCOPE, "Root should be kept");
+        assert!(
+            retained[0].scope_depth == SENTINEL_SCOPE,
+            "Root should be kept"
+        );
         assert!(retained[1..].iter().all(|c| c.scope_depth < 2));
 
-        let mut retained_parents: Vec<usize> = retained[1..].iter().map(|c| c.parent.index()).collect();
+        let mut retained_parents: Vec<usize> =
+            retained[1..].iter().map(|c| c.parent.index()).collect();
         retained_parents.sort_unstable();
         assert_eq!(retained_parents, vec![10, 30, 50]);
     }
@@ -700,11 +689,7 @@ mod tests {
             &mut Vec::new(),
         );
 
-        let anchored_count = selection
-            .cursors
-            .iter()
-            .filter(|c| c.is_anchored())
-            .count();
+        let anchored_count = selection.cursors.iter().filter(|c| c.is_anchored()).count();
         assert_eq!(
             anchored_count, 1,
             "Expected 1 anchored fork after div match"
@@ -942,10 +927,7 @@ mod tests {
         );
 
         // Root cursor stays at section 0
-        assert_eq!(
-            selection.cursors[0].position.selection,
-            QuerySectionId(0)
-        );
+        assert_eq!(selection.cursors[0].position.selection, QuerySectionId(0));
         assert!(
             store.get("div").is_some(),
             "div should be in store even with Save::none()"
@@ -957,7 +939,10 @@ mod tests {
             .iter()
             .filter(|c| c.position.selection == QuerySectionId(1))
             .collect();
-        assert!(!p_cursors.is_empty(), "Should have spawned cursor for p section");
+        assert!(
+            !p_cursors.is_empty(),
+            "Should have spawned cursor for p section"
+        );
 
         let mut save_hits = Vec::new();
         selection.next(
@@ -986,7 +971,10 @@ mod tests {
             .iter()
             .find(|c| c.position.selection == QuerySectionId(1) && c.is_moving())
             .unwrap();
-        assert!(p_cursor.end(), "First p cursor should be at end after match");
+        assert!(
+            p_cursor.end(),
+            "First p cursor should be at end after match"
+        );
 
         let mut save_hits2 = Vec::new();
         selection.next(
@@ -1136,11 +1124,7 @@ mod tests {
         let store = parser.matches();
 
         let spans: Vec<_> = store.get("div span").unwrap().collect();
-        assert_eq!(
-            spans.len(),
-            1,
-            "First selection should match only 1 span"
-        );
+        assert_eq!(spans.len(), 1, "First selection should match only 1 span");
     }
 
     #[test]
@@ -1173,8 +1157,7 @@ mod tests {
 
         assert_eq!(selection.cursors.len(), 1, "Only root should remain");
         assert_eq!(
-            selection.cursors[0].scope_depth,
-            SENTINEL_SCOPE,
+            selection.cursors[0].scope_depth, SENTINEL_SCOPE,
             "Root cursor must not be pruned"
         );
     }
@@ -1273,9 +1256,15 @@ mod tests {
         );
 
         let selections: Vec<_> = spawned.iter().map(|c| c.position.selection).collect();
-        assert!(selections.contains(&QuerySectionId(1)), "h1 section missing");
+        assert!(
+            selections.contains(&QuerySectionId(1)),
+            "h1 section missing"
+        );
         assert!(selections.contains(&QuerySectionId(2)), "p section missing");
-        assert!(selections.contains(&QuerySectionId(3)), "span section missing");
+        assert!(
+            selections.contains(&QuerySectionId(3)),
+            "span section missing"
+        );
     }
 
     #[test]
