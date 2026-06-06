@@ -81,24 +81,27 @@ bump new_version:
     just bump-python "{{new_version}}"
     cargo check
 bump-rust new_version:
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-reader/Cargo.toml
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-query-ir/Cargo.toml
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-macros/Cargo.toml
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah/Cargo.toml
-    sed -Ei 's/^(scah-reader = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah-query-ir/Cargo.toml
-    sed -Ei 's/^(scah-query-ir = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah-macros/Cargo.toml
-    sed -Ei 's/^(scah-reader = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
-    sed -Ei 's/^(scah-query-ir = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
-    sed -Ei 's/^(scah-macros = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' benches/Cargo.toml
-    sed -i 's/^scah = "[^"]*"/scah = "{{new_version}}"/' README.md
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-reader/Cargo.toml
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-query-ir/Cargo.toml
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-macros/Cargo.toml
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah/Cargo.toml
+    sed -E -i.bak 's/^(scah-reader = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah-query-ir/Cargo.toml
+    sed -E -i.bak 's/^(scah-query-ir = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah-macros/Cargo.toml
+    sed -E -i.bak 's/^(scah-reader = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
+    sed -E -i.bak 's/^(scah-query-ir = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
+    sed -E -i.bak 's/^(scah-macros = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' benches/Cargo.toml
+    sed -i.bak 's/^scah = "[^"]*"/scah = "{{new_version}}"/' README.md
+    rm -f crates/scah-reader/Cargo.toml.bak crates/scah-query-ir/Cargo.toml.bak crates/scah-macros/Cargo.toml.bak crates/scah/Cargo.toml.bak benches/Cargo.toml.bak README.md.bak
 bump-node new_version:
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/bindings/scah-node/Cargo.toml
-    sed -i 's/^  "version": "[^"]*",/  "version": "{{new_version}}",/' crates/bindings/scah-node/package.json
-    sed -Ei '/^  "optionalDependencies": \{/,/^  \}/ s/^    ("@zacharymm\/scah-[^"]+": )"[^"]+"(,?)$/    \1"{{new_version}}"\2/' crates/bindings/scah-node/package.json
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/bindings/scah-node/Cargo.toml
+    sed -i.bak 's/^  "version": "[^"]*",/  "version": "{{new_version}}",/' crates/bindings/scah-node/package.json
+    sed -E -i.bak '/^  "optionalDependencies": \{/,/^  \}/ s/^    ("@zacharymm\/scah-[^"]+": )"[^"]+"(,?)$/    \1"{{new_version}}"\2/' crates/bindings/scah-node/package.json
+    rm -f crates/bindings/scah-node/Cargo.toml.bak crates/bindings/scah-node/package.json.bak
 bump-python new_version:
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/bindings/scah-python/Cargo.toml
-    sed -i 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/bindings/scah-python/pyproject.toml
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/bindings/scah-python/Cargo.toml
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/bindings/scah-python/pyproject.toml
+    rm -f crates/bindings/scah-python/Cargo.toml.bak crates/bindings/scah-python/pyproject.toml.bak
 trigger-release new_version:
     git tag -a v{{new_version}} -m "Version {{new_version}} release"
     git push origin v{{new_version}}
