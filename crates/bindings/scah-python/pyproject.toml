@@ -11,7 +11,6 @@ version = "0.0.17"
 description = "scah (scan HTML)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
 
 [project.optional-dependencies]
 bench = [

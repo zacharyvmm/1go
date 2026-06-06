@@ -50,8 +50,6 @@ where
             session.next(runner_index, xhtml_element, position, store, &mut save_hits);
         }
         if len == store.elements.len() {
-            // Element was not saved
-            // Thus delete from the tape
             xhtml_element.remove_attributes(&mut store.attributes);
         }
         save_hits
@@ -68,9 +66,11 @@ where
         for (index, session) in self.runners.iter_mut().enumerate() {
             let early_exit_previous = session.early_exit();
             let back = session.back(index, xhtml_element, position, store);
-            let early_exit_current = session.early_exit();
 
-            if back && (early_exit_previous || early_exit_current) {
+            // Remove a first-match runner only when it had already completed
+            // before close handling; `back()` can move a child section into
+            // the exit section while parent content still needs to be saved.
+            if back && early_exit_previous {
                 remove_indices.push(index);
             }
         }

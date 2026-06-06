@@ -6,42 +6,29 @@ npm install scah@npm:@zacharymm/scah
 
 ## Benchmark
 
-### Simple Html BenchMark (select all `a` tags):
+### Synthetic Html BenchMark (select all `a` tags):
 
-![Simple Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-node/benchmark/images/synthetic.png)
+![Synthetic Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-node/benchmark/images/synthetic.png)
 
-| Library          | Mean (ms)      | stdev     | multiplier |
-| :--------------- | :------------- | :-------- | :--------- |
-| scah             | **13.871424**  | 1.577820  | 1x         |
-| linkedom         | **83.437088**  | 13.218471 | 6.02x      |
-| cheerio          | **93.475415**  | 9.873812  | 6.74x      |
-| happy-dom        | **269.044447** | 24.372608 | 19.4x      |
-| jsdom            | **343.614964** | 38.366862 | 24.77x     |
-| node-html-parser | **470.989438** | 24.691218 | 33.95x     |
-
-### Simple First Html BenchMark (find first `a` tag):
-
-![Simple First Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-node/benchmark/images/synthetic_first.png)
-
-| Library          | Mean (ms)      | stdev     | multiplier |
-| :--------------- | :------------- | :-------- | :--------- |
-| scah             | **0.247321**   | 0.017258  | 1x         |
-| node-html-parser | **64.092075**  | 9.236343  | 259.14x    |
-| cheerio          | **68.177594**  | 5.570901  | 275.66x    |
-| linkedom         | **146.949830** | 20.281012 | 594.17x    |
-| happy-dom        | **251.732231** | 31.785607 | 1017.83x   |
-| jsdom            | **291.487428** | 33.279401 | 1178.58x   |
+| Library          | Mean (ms)      | stdev    | multiplier |
+| :--------------- | :------------- | :------- | :--------- |
+| scah             | **5.302260**   | 0.907064 | 1x         |
+| linkedom         | **24.410154**  | 3.157122 | 4.6x       |
+| cheerio          | **30.391315**  | 1.222545 | 5.73x      |
+| happy-dom        | **78.305500**  | 7.789133 | 14.77x     |
+| node-html-parser | **103.388125** | 4.417629 | 19.5x      |
+| jsdom            | **109.433788** | 8.876794 | 20.64x     |
 
 ### WHATWG Html BenchMark (find all `a` tags):
 
 ![WHATWG Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-node/benchmark/images/whatwg.png)
 
-| Library          | Mean (ms)        | stdev      | multiplier |
-| :--------------- | :--------------- | :--------- | :--------- |
-| scah             | **125.980227**   | 12.241186  | 1x         |
-| linkedom         | **1,255.033456** | 512.454055 | 9.96x      |
-| cheerio          | **1,336.089538** | 53.096898  | 10.61x     |
-| node-html-parser | **1,953.938280** | 43.960253  | 15.51x     |
+| Library          | Mean (ms)      | stdev      | multiplier |
+| :--------------- | :------------- | :--------- | :--------- |
+| scah             | **57.891190**  | 3.669321   | 1x         |
+| linkedom         | **420.146805** | 177.607558 | 7.26x      |
+| cheerio          | **540.674035** | 29.571992  | 9.34x      |
+| node-html-parser | **707.293309** | 28.933410  | 12.22x     |
 
 ### Nested Html BenchMark (find all products)
 
@@ -49,8 +36,8 @@ npm install scah@npm:@zacharymm/scah
 
 | Library          | Mean (ms)      | stdev     | multiplier |
 | :--------------- | :------------- | :-------- | :--------- |
-| scah             | **71.643558**  | 6.181472  | 1x         |
-| linkedom         | **153.298287** | 16.085323 | 2.14x      |
-| cheerio          | **265.930798** | 12.760859 | 3.71x      |
-| node-html-parser | **389.224348** | 95.301039 | 5.43x      |
-| jsdom            | **878.792820** | 97.970828 | 12.27x     |
+| scah             | **27.346216**  | 3.100238  | 1x         |
+| linkedom         | **76.700628**  | 8.804752  | 2.8x       |
+| cheerio          | **96.956129**  | 5.551734  | 3.55x      |
+| node-html-parser | **129.333271** | 19.915217 | 4.73x      |
+| jsdom            | **362.924202** | 88.057259 | 13.27x     |

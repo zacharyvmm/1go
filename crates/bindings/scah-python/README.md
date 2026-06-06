@@ -6,45 +6,32 @@
 
 | Library | Mean (ms) | stdev | multiplier |
 | :--- | :--- | :--- | :--- |
-| Scah | **100.453112** | 5.285644 | 1x |
-| Selectolax | **666.531062** | 770.046444 | 6.64x |
-| lxml | **786.899222** | 6.664833 | 7.83x |
-| Parsel | **1,742.625470** | 10.651475 | 17.35x |
-| Gazpacho | **4,326.287304** | 112.214583 | 43.07x |
-| BS4 (lxml) | **5,836.098065** | 730.163386 | 58.1x |
+| Scah | **52.203939** | 3.757941 | 1x |
+| Selectolax | **143.023167** | 2.674209 | 2.74x |
+| lxml | **359.881425** | 5.821705 | 6.89x |
+| Parsel | **673.563508** | 5.502256 | 12.9x |
+| Gazpacho | **1,637.216892** | 6.151786 | 31.36x |
+| BS4 (lxml) | **2,516.724850** | 389.778034 | 48.21x |
 
 ### Synthetic Html BenchMark (select all `a` tags):
 ![Synthetic Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-python/benches/images/synthetic.png)
 
 | Library | Mean (ms) | stdev | multiplier |
 | :--- | :--- | :--- | :--- |
-| Scah | **7.391444** | 0.474385 | 1x |
-| Selectolax | **18.758350** | 2.495796 | 2.54x |
-| lxml | **59.707865** | 0.993740 | 8.08x |
-| Parsel | **205.402533** | 0.454010 | 27.79x |
-| BS4 (lxml) | **271.418740** | 4.907597 | 36.72x |
-| Gazpacho | **325.898600** | 1.559744 | 44.09x |
-
-
-### First Html BenchMark (find first `a` tag):
-![First Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-python/benches/images/synthetic_first.png)
-
-| Library | Mean (ms) | stdev | multiplier |
-| :--- | :--- | :--- | :--- |
-| Scah | **0.042838** | 0.011730 | 1x |
-| Selectolax | **8.624247** | 0.053230 | 201.32x |
-| lxml | **14.992198** | 0.138058 | 349.98x |
-| Parsel | **23.812899** | 1.931582 | 555.89x |
-| Gazpacho | **144.887551** | 0.549365 | 3382.26x |
-| BS4 (lxml) | **224.398618** | 2.581323 | 5238.37x |
+| Scah | **3.728561** | 0.406445 | 1x |
+| Selectolax | **8.066475** | 0.512855 | 2.16x |
+| lxml | **24.794239** | 0.229981 | 6.65x |
+| Parsel | **76.960953** | 3.008175 | 20.64x |
+| BS4 (lxml) | **112.812908** | 2.160341 | 30.26x |
+| Gazpacho | **128.430065** | 0.549837 | 34.44x |
 
 ### Nested Html BenchMark (select all `Products`):
 ![Nested Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-python/benches/images/nested.png)
 
 | Library | Mean (ms) | stdev | multiplier |
 | :--- | :--- | :--- | :--- |
-| Scah | **24.552884** | 0.192680 | 1x |
-| Selectolax | **140.404934** | 0.426443 | 5.72x |
-| Parsel | **807.709630** | 183.818712 | 32.9x |
-| lxml | **899.849129** | 3.819371 | 36.65x |
-| BS4 (lxml) | **2,397.357205** | 328.807222 | 97.64x |
+| Scah | **12.470755** | 0.596550 | 1x |
+| Selectolax | **66.938622** | 0.498506 | 5.37x |
+| Parsel | **301.365925** | 24.076119 | 24.17x |
+| lxml | **316.272791** | 2.477959 | 25.36x |
+| BS4 (lxml) | **839.663017** | 63.421209 | 67.33x |
