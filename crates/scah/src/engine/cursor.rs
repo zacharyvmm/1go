@@ -5,23 +5,21 @@ use smallvec::SmallVec;
 
 use crate::store::ElementId;
 
-/// Sentinel scope depth for root cursors that must never be pruned.
-/// Root cursors use `DepthSize::MAX` so the pruning condition
-/// `scope_depth >= close_depth` never fires for them.
+/// Scope depth reserved for the root cursor, which is handled separately from
+/// depth-scoped cursor pruning.
 pub const SENTINEL_SCOPE: super::DepthSize = super::DepthSize::MAX;
 
 /// The operational mode of a [`ScopedCursor`].
 ///
-/// In the spawn model, a cursor never advances through more than one state
-/// transition. State advancement is expressed by spawning new MOVING cursors.
+/// Moving cursors represent query progress. Anchored cursors stay at a
+/// descendant-search scope and can spawn moving continuations when they match.
 #[derive(PartialEq, Clone, Debug)]
 pub enum CursorMode {
     Moving {
-        /// Depth of the single match that created this cursor.
-        /// Immutable after construction.
+        /// Depth of the last match this cursor must unwind on close.
         last_match_depth: super::DepthSize,
-        /// True when this cursor has completed its match and should
-        /// not evaluate further transitions (e.g. First selection).
+        /// Prevents a completed cursor from matching again until close handling
+        /// either reactivates it or steps it back.
         end: bool,
     },
     Anchored {
@@ -32,7 +30,7 @@ pub enum CursorMode {
 /// A cursor that either advances through matches or remains anchored at a scope.
 #[derive(PartialEq, Clone, Debug)]
 pub struct ScopedCursor {
-    /// Depth at which this cursor was spawned (or SENTINEL_SCOPE for root).
+    /// Scope that bounds this cursor's lifetime; `SENTINEL_SCOPE` marks root.
     pub scope_depth: super::DepthSize,
     pub parent: ElementId,
     pub position: Position,
@@ -40,7 +38,6 @@ pub struct ScopedCursor {
 }
 
 impl ScopedCursor {
-    /// Create a new MOVING cursor with an explicit last_match_depth.
     pub fn new_moving(
         scope_depth: super::DepthSize,
         parent: ElementId,
@@ -57,7 +54,6 @@ impl ScopedCursor {
         }
     }
 
-    /// Create a new MOVING cursor with explicit last_match_depth.
     #[cfg(test)]
     pub fn new_moving_with_last(
         scope_depth: super::DepthSize,
@@ -76,7 +72,6 @@ impl ScopedCursor {
         }
     }
 
-    /// Create the root MOVING cursor (sentinel scope, never pruned).
     pub fn new_root(parent: ElementId, position: Position) -> Self {
         Self {
             scope_depth: SENTINEL_SCOPE,
@@ -113,9 +108,7 @@ impl ScopedCursor {
         matches!(self.mode, CursorMode::Anchored { .. })
     }
 
-    /// Effective `last_depth` for combinator evaluation.
-    /// - Moving: returns `last_match_depth`
-    /// - Anchored: returns `scope_depth`
+    /// Depth used by combinators when deciding whether this cursor may match.
     pub fn effective_last_depth(&self) -> super::DepthSize {
         match &self.mode {
             CursorMode::Moving {
@@ -137,8 +130,6 @@ impl ScopedCursor {
         self.effective_last_depth()
     }
 
-    /// Spawn a new MOVING cursor continuing from `next_position`.
-    /// `at_depth` is the depth of the element that triggered the spawn.
     #[cfg(test)]
     pub fn spawn_moving(&self, at_depth: super::DepthSize, next_position: Position) -> Self {
         Self {
@@ -152,7 +143,6 @@ impl ScopedCursor {
         }
     }
 
-    /// Spawn an ANCHORED fork at the current position (descendant combinator).
     pub fn anchor_clone(&self, depth: super::DepthSize) -> Self {
         Self {
             scope_depth: depth,
@@ -164,7 +154,6 @@ impl ScopedCursor {
 }
 
 impl<'query> ScopedCursor {
-    /// Evaluate whether the transition at this cursor's state matches the element.
     pub fn next<'html, Q: QuerySpec<'query>>(
         &self,
         tree: &Q,
@@ -197,8 +186,6 @@ impl<'query> ScopedCursor {
         }
     }
 
-    /// Update the last_match_depth (Moving mode only).
-    /// Called when a Moving cursor successfully matches an element at the given depth.
     pub fn set_last_match_depth(&mut self, depth: super::DepthSize) {
         if let CursorMode::Moving {
             last_match_depth, ..
@@ -208,12 +195,7 @@ impl<'query> ScopedCursor {
         }
     }
 
-    /// The set of positions that should be explored after a match at `self.position`.
-    /// Returns 0–N positions:
-    /// - 1 if there is a next transition within the same section
-    /// - N if the cursor is at the end of a section with `.then()` children
-    ///   (one position per child section, including siblings)
-    /// - 0 if end of path (no next transition and no child sections)
+    /// Continuations to spawn after matching at the current position.
     pub fn next_positions<Q: QuerySpec<'query> + ?Sized>(
         &self,
         tree: &Q,
@@ -225,7 +207,6 @@ impl<'query> ScopedCursor {
                 selection: self.position.selection,
             });
         } else {
-            // End of section — check for child sections (.then())
             let mut child = self.position.next_child(tree);
             while let Some(c) = child {
                 positions.push(c);
@@ -272,7 +253,6 @@ mod tests {
         );
         assert!(matched);
 
-        // advance to next transition
         let position = state.position.next_transition(&query);
         state.position.state = position.unwrap();
 
@@ -353,7 +333,7 @@ mod tests {
     #[test]
     fn test_next_positions_single_transition() {
         let query = Query::all("div a", Save::none()).unwrap().build();
-        let cursor = root_cursor(); // state 0 in a 2-state section
+        let cursor = root_cursor();
 
         let positions = cursor.next_positions(&query);
         assert_eq!(positions.len(), 1);
@@ -368,9 +348,8 @@ mod tests {
 
     #[test]
     fn test_next_positions_end_of_path() {
-        // Single-state query: all("div")
         let query = Query::all("div", Save::none()).unwrap().build();
-        let cursor = root_cursor(); // state 0, section end
+        let cursor = root_cursor();
 
         let positions = cursor.next_positions(&query);
         assert!(positions.is_empty());
@@ -384,16 +363,12 @@ mod tests {
             .unwrap()
             .build();
 
-        // Cursor at state 0 (end of section 0, which has .then() children)
         let mut cursor = root_cursor();
         cursor.position.state = TransitionId(0);
 
-        // Advance cursor to the end of section 0 (section 0 has 1 state)
-        // state 0 is already the save point for section 0
         let positions = cursor.next_positions(&query);
         assert_eq!(positions.len(), 2, "Should have two .then() children");
 
-        // Should have positions for h1 (section 1) and p (section 2)
         let selections: Vec<_> = positions.iter().map(|p| p.selection).collect();
         assert!(
             selections.contains(&QuerySectionId(1)),
@@ -427,7 +402,7 @@ mod tests {
                 selection: QuerySectionId(0),
                 state: TransitionId(0),
             },
-            7, // explicit last_match_depth
+            7,
         );
         assert_eq!(cursor.effective_last_depth(), 7);
     }
@@ -442,19 +417,19 @@ mod tests {
                 state: TransitionId(0),
             },
         );
-        assert_eq!(cursor.effective_last_depth(), 3); // uses scope_depth
+        assert_eq!(cursor.effective_last_depth(), 3);
     }
 
     #[test]
     fn test_new_moving_with_last() {
         let cursor = ScopedCursor::new_moving_with_last(
-            5, // scope_depth
+            5,
             NULL_PARENT,
             Position {
                 selection: QuerySectionId(1),
                 state: TransitionId(3),
             },
-            2, // last_match_depth (different from scope)
+            2,
         );
         assert!(cursor.is_moving());
         assert_eq!(cursor.scope_depth, 5);
