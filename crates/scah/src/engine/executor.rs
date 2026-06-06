@@ -1,4 +1,4 @@
-use super::cursor::{CursorMode, ScopedCursor};
+use super::cursor::{ScopedCursor, SENTINEL_SCOPE};
 use super::multiplexer::{DocumentPosition, SaveHit};
 #[cfg(any(debug_assertions, test))]
 use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRejectReason};
@@ -8,22 +8,21 @@ use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XH
 
 /// The `QueryExecutor` is an NFA execution engine optimized for streaming StAX events.
 ///
-/// Because CSS selectors like descendant (` `) are non-deterministic (a match can
-/// occur at the current depth or any arbitrary depth below it), a single cursor
-/// isn't enough.
-///
-/// ## Execution Model
-/// 1. **ROOT MOVING cursor**: Tracks position through the query tree, mutated in
-///    place on each match. Forks ANCHORED cursors on Descendant combinator matches.
-/// 2. **ANCHORED cursors**: Fixed at a `scope_depth`. When they match, they produce
-///    an ANCHORED clone that advances via `next_position` (add_depth is a no-op).
-/// 3. **Pruning**: Anchored cursors are pruned in `back()` when their
-///    `scope_depth >= close_depth`. The root MOVING cursor reactivates or
-///    steps backward when `last_match_depth == close_depth`.
+/// ## Spawn Model
+/// A single unified `cursors` vec replaces the old root+scoped split.
+/// - The cursor at index 0 is the **root** (SENTINEL scope, never pruned).
+///   It never advances its own position — state advancement is expressed by
+///   spawning new MOVING cursors.
+/// - **MOVING** cursors: own one `last_match_depth` (immutable). They evaluate
+///   transitions and spawn children for each next position.
+/// - **ANCHORED** cursors: fixed at a scope depth. When they match, they spawn
+///   MOVING cursors that advance the query. The anchored cursor stays.
+/// - **Pruning** in `back()`: non-SENTINEL cursors are pruned when
+///   `scope_depth >= close_depth`. SENTINEL cursors react when
+///   `effective_last_depth() == close_depth`.
 pub struct QueryExecutor<'a, Q> {
     pub(crate) query: &'a Q,
-    pub(crate) root: ScopedCursor,
-    pub(crate) scoped: Vec<ScopedCursor>,
+    pub(crate) cursors: Vec<ScopedCursor>,
 }
 
 impl<'a, 'html, 'query: 'html, Q> QueryExecutor<'a, Q>
@@ -31,8 +30,7 @@ where
     Q: QuerySpec<'query>,
 {
     pub fn new(query: &'a Q) -> Self {
-        let root = ScopedCursor::new_moving(
-            0,
+        let root = ScopedCursor::new_root(
             ElementId::default(),
             Position {
                 selection: QuerySectionId(0),
@@ -41,59 +39,7 @@ where
         );
         Self {
             query,
-            root,
-            scoped: Vec::new(),
-        }
-    }
-
-    fn next_position(
-        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
-        tree: &Q,
-        scoped: &mut Vec<ScopedCursor>,
-        depth: super::DepthSize,
-        cursor: &mut ScopedCursor,
-        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
-            'html,
-            'query,
-        >,
-    ) {
-        cursor.add_depth(depth);
-        if let Some(next_transition) = cursor.get_position().next_transition(tree) {
-            cursor.set_state(next_transition);
-            cursor.set_end(false);
-        } else if let Some(child) = cursor.get_position().next_child(tree) {
-            cursor.set_position(child);
-            cursor.set_end(false);
-
-            let mut has_sibling = cursor.get_position().next_sibling(tree);
-            while let Some(sibling) = has_sibling {
-                scoped.push(ScopedCursor::new_anchored(
-                    depth,
-                    cursor.get_parent(),
-                    *cursor.get_position(),
-                ));
-                #[cfg(any(debug_assertions, test))]
-                {
-                    let created = scoped.last().unwrap();
-                    crate::scah_trace!(
-                        store,
-                        TraceEvent::ScopedCursorCreated {
-                            runner_index,
-                            depth,
-                            scope_depth: created.scope_depth,
-                            parent: created.parent,
-                            selection: created.position.selection,
-                            state: created.position.state,
-                            reason: ScopedCursorReason::BranchSibling,
-                        }
-                    );
-                }
-
-                cursor.set_position(sibling);
-                has_sibling = sibling.next_sibling(tree);
-            }
-        } else {
-            cursor.set_end(true);
+            cursors: vec![root],
         }
     }
 
@@ -147,6 +93,17 @@ where
         }
     }
 
+    /// Produce a `CursorTraceKind` for the cursor at the given index.
+    /// Index 0 with SENTINEL scope is `Root`; all others are `Scoped`.
+    #[cfg(any(debug_assertions, test))]
+    fn trace_kind(&self, index: usize) -> CursorTraceKind {
+        if index == 0 && self.cursors[0].scope_depth == SENTINEL_SCOPE {
+            CursorTraceKind::Root
+        } else {
+            CursorTraceKind::Scoped { index }
+        }
+    }
+
     pub fn next(
         &mut self,
         runner_index: usize,
@@ -156,28 +113,25 @@ where
         save_hits: &mut Vec<SaveHit>,
     ) {
         let depth = document_position.element_depth;
+        let snapshot_len = self.cursors.len();
 
-        let scoped_len = self.scoped.len();
-        for i in 0..scoped_len {
-            let (matched, position, is_first) = {
-                let cursor = &self.scoped[i];
-                let matched = cursor.next(self.query, depth, element);
-                let position = cursor.position;
-                let section_kind = self
-                    .query
-                    .get_section_selection_kind(cursor.position.selection);
-                let is_first = matches!(section_kind, SelectionKind::First);
-                (matched, position, is_first)
-            };
+        for i in 0..snapshot_len {
+            if self.cursors[i].end() {
+                continue;
+            }
+
+            let position = self.cursors[i].position;
+            let matched = self.cursors[i].next(self.query, depth, element);
 
             if !matched {
                 #[cfg(any(debug_assertions, test))]
                 {
+                    let last_depth = self.cursors[i].effective_last_depth();
                     crate::scah_trace!(
                         store,
                         TraceEvent::TransitionRejected {
                             runner_index,
-                            cursor: CursorTraceKind::Scoped { index: i },
+                            cursor: self.trace_kind(i),
                             selector: self.query.get_selection(position.selection).source,
                             element: element.name,
                             depth,
@@ -187,7 +141,7 @@ where
                                 self.query,
                                 &position,
                                 depth,
-                                self.scoped[i].effective_last_depth(),
+                                last_depth,
                                 element,
                             ),
                         }
@@ -200,7 +154,7 @@ where
                 store,
                 TraceEvent::TransitionMatched {
                     runner_index,
-                    cursor: CursorTraceKind::Scoped { index: i },
+                    cursor: self.trace_kind(i),
                     selector: self.query.get_selection(position.selection).source,
                     element: element.name,
                     depth,
@@ -209,136 +163,191 @@ where
                 }
             );
 
-            let mut advanced = self.scoped[i].clone();
-
-            if is_first {
-                self.scoped[i].set_end(true);
-            }
-
-            if self.query.is_save_point(&advanced.position) {
-                save_hits.push(Self::save_element(
-                    runner_index,
-                    self.query,
-                    store,
-                    element.clone(),
-                    &mut advanced,
-                ));
-            }
-
-            if !element.is_self_closing() {
-                Self::next_position(
-                    runner_index,
-                    self.query,
-                    &mut self.scoped,
-                    depth,
-                    &mut advanced,
-                    store,
-                );
-            }
-
-            self.scoped.push(advanced);
-        }
-
-        if self.root.next(self.query, depth, element) {
-            crate::scah_trace!(
-                store,
-                TraceEvent::TransitionMatched {
-                    runner_index,
-                    cursor: CursorTraceKind::Root,
-                    selector: self
-                        .query
-                        .get_selection(self.root.position.selection)
-                        .source,
-                    element: element.name,
-                    depth,
-                    selection: self.root.position.selection,
-                    state: self.root.position.state,
-                }
-            );
-
-            let is_descendant = self.query.is_descendant(self.root.position.state);
-            let last_save_point = self.query.is_last_save_point(&self.root.position);
-            let is_section_end = self.query.is_save_point(&self.root.position);
+            let is_descendant = self.query.is_descendant(position.state);
+            let is_save_point = self.query.is_save_point(&position);
+            let is_section_end = is_save_point;
             let section_kind = self
                 .query
-                .get_section_selection_kind(self.root.position.selection);
-            let is_all = matches!(section_kind, SelectionKind::All);
+                .get_section_selection_kind(position.selection);
+            let is_first = matches!(section_kind, SelectionKind::First);
+            // Whether the element is self-closing (no interior, no close event)
+            let self_closing = element.is_self_closing();
+            let terminal_all = is_section_end
+                && matches!(section_kind, SelectionKind::All)
+                && position.next_child(self.query).is_none();
 
-            if is_descendant && is_section_end && (!last_save_point || is_all) {
-                self.scoped.push(self.root.anchor_clone(depth));
-                #[cfg(any(debug_assertions, test))]
-                {
-                    let created = self.scoped.last().unwrap();
-                    crate::scah_trace!(
-                        store,
-                        TraceEvent::ScopedCursorCreated {
-                            runner_index,
-                            depth,
-                            scope_depth: created.scope_depth,
-                            parent: created.parent,
-                            selection: created.position.selection,
-                            state: created.position.state,
-                            reason: ScopedCursorReason::DescendantFork,
+            // Compute next positions lazily — only needed for non-self-closing
+            // elements where we actually spawn children.
+            let spawned_positions;
+
+            match &self.cursors[i].mode {
+                super::cursor::CursorMode::Moving { .. } => {
+                    // Capture the original parent before save (save_element may mutate it).
+                    // We restore it after spawning so that the cursor can re-match
+                    // future elements with the correct parent.
+                    let original_parent = self.cursors[i].parent;
+
+                    // Descendant combinator → anchor fork
+                    // (created BEFORE save so the fork captures the original parent)
+                    if is_descendant && !terminal_all {
+                        let do_fork = if is_section_end {
+                            let is_all = matches!(section_kind, SelectionKind::All);
+                            let last_save_point = self.query.is_last_save_point(&position);
+                            !last_save_point || is_all
+                        } else {
+                            true
+                        };
+                        if do_fork {
+                            let anchor = self.cursors[i].anchor_clone(depth);
+                            #[cfg(any(debug_assertions, test))]
+                            {
+                                crate::scah_trace!(
+                                    store,
+                                    TraceEvent::ScopedCursorCreated {
+                                        runner_index,
+                                        depth,
+                                        scope_depth: anchor.scope_depth,
+                                        parent: anchor.parent,
+                                        selection: anchor.position.selection,
+                                        state: anchor.position.state,
+                                        reason: ScopedCursorReason::DescendantFork,
+                                    }
+                                );
+                            }
+                            self.cursors.push(anchor);
                         }
-                    );
+                    }
+
+                    // Save point — may update the cursor's parent
+                    let saved_parent = if is_save_point {
+                        save_hits.push(Self::save_element(
+                            runner_index,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut self.cursors[i],
+                        ));
+                        let sp = self.cursors[i].parent;
+                        // Restore the original parent so future matches use the correct one
+                        self.cursors[i].parent = original_parent;
+                        sp
+                    } else {
+                        original_parent
+                    };
+
+                    if self_closing {
+                        // Self-closing: no depth update, no end set, no spawn.
+                        // The cursor can re-match subsequent elements at the same depth.
+                        continue;
+                    }
+
+                    if terminal_all {
+                        // End-state `All` cursors have no continuation to spawn.
+                        // Keep the cursor fixed at its existing scope so it can
+                        // match later siblings/descendants without creating an
+                        // anchored cursor that would only be pruned on close.
+                        continue;
+                    }
+
+                    // Update last_match_depth for back() detection
+                    self.cursors[i].set_last_match_depth(depth);
+
+                    // End logic:
+                    // - Descendant combinator: the anchored fork handles deeper
+                    //   re-matching, so deactivate this cursor now (end=true).
+                    //   back() reactivates it for sibling re-matching (All) or
+                    //   steps backward for early exit (First).
+                    // - Non-descendant (Child/NextSibling): only deactivate at
+                    //   section end; the cursor must stay active for sibling
+                    //   re-matching at the same depth.
+                    if is_descendant || is_section_end {
+                        self.cursors[i].set_end(true);
+                    }
+
+                    // Spawn continuations
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+                    for pos in &spawned_positions {
+                        self.cursors.push(ScopedCursor::new_moving(
+                            depth,
+                            saved_parent,
+                            *pos,
+                        ));
+                    }
+                }
+                super::cursor::CursorMode::Anchored { .. } => {
+                    if self_closing {
+                        // Self-closing: save if at save point, but no spawn.
+                        if is_save_point {
+                            let mut base = ScopedCursor::new_moving(
+                                depth,
+                                self.cursors[i].parent,
+                                self.cursors[i].position,
+                            );
+                            save_hits.push(Self::save_element(
+                                runner_index,
+                                self.query,
+                                store,
+                                element.clone(),
+                                &mut base,
+                            ));
+                            // base is not pushed (self-closing → no children)
+                        }
+                        continue;
+                    }
+
+                    // Anchored cursor matched. Compute next positions for spawning
+                    // MOVING children.
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+
+                    // Save if at save point, tracking the saved parent for children
+                    let saved_parent = if is_save_point {
+                        let mut base = ScopedCursor::new_moving(
+                            depth,
+                            self.cursors[i].parent,
+                            self.cursors[i].position,
+                        );
+                        save_hits.push(Self::save_element(
+                            runner_index,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut base,
+                        ));
+                        base.parent
+                    } else {
+                        self.cursors[i].parent
+                    };
+
+                    // First selection at section end → stop the anchored cursor
+                    // from matching again at deeper depths.
+                    if is_first && is_section_end {
+                        self.cursors[i].set_end(true);
+                    }
+
+                    for pos in &spawned_positions {
+                        self.cursors.push(ScopedCursor::new_moving(
+                            depth,
+                            saved_parent,
+                            *pos,
+                        ));
+                    }
                 }
             }
-
-            if self.query.is_save_point(&self.root.position) {
-                save_hits.push(Self::save_element(
-                    runner_index,
-                    self.query,
-                    store,
-                    element.clone(),
-                    &mut self.root,
-                ));
-            }
-
-            if !element.is_self_closing() {
-                Self::next_position(
-                    runner_index,
-                    self.query,
-                    &mut self.scoped,
-                    depth,
-                    &mut self.root,
-                    store,
-                );
-            }
-        } else {
-            #[cfg(any(debug_assertions, test))]
-            {
-                let last_depth = self.root.effective_last_depth();
-                crate::scah_trace!(
-                    store,
-                    TraceEvent::TransitionRejected {
-                        runner_index,
-                        cursor: CursorTraceKind::Root,
-                        selector: self
-                            .query
-                            .get_selection(self.root.position.selection)
-                            .source,
-                        element: element.name,
-                        depth,
-                        selection: self.root.position.selection,
-                        state: self.root.position.state,
-                        reason: Self::transition_reject_reason(
-                            self.query,
-                            &self.root.position,
-                            depth,
-                            last_depth,
-                            element,
-                        ),
-                    }
-                );
-            }
         }
+
     }
 
     pub fn early_exit(&self) -> bool {
-        if let Some(early_exit_section) = self.query.exit_at_section_end() {
-            return early_exit_section == self.root.position.selection;
+        if let Some(exit_section) = self.query.exit_at_section_end() {
+            // The SENTINEL cursor must be at the exit section with end=true,
+            // AND all other cursors must also be at end=true (meaning all
+            // .then() children have completed and stepped back).
+            let root = &self.cursors[0];
+            if root.position.selection != exit_section || !root.end() {
+                return false;
+            }
+            return self.cursors[1..].iter().all(|c| c.end());
         }
-
         false
     }
 
@@ -351,15 +360,52 @@ where
     ) -> bool {
         let close_depth = document_position.element_depth;
         let mut last_pruned_parent = None;
+        let mut siginificant_close = false;
 
         // Walk backwards so swap_remove only moves already-visited retained cursors.
-        let mut i = self.scoped.len();
+        let mut i = self.cursors.len();
         while i > 0 {
             i -= 1;
+            let cur = &self.cursors[i];
 
-            if self.scoped[i].scope_depth >= close_depth {
-                let pruned = self.scoped.swap_remove(i);
+            if cur.scope_depth == SENTINEL_SCOPE {
+                // Root (SENTINEL) cursor — never prune, but may need to react
+                if cur.effective_last_depth() == close_depth {
+                    if cur.end() {
+                        let section_kind = self
+                            .query
+                            .get_section_selection_kind(cur.position.selection);
+                        if matches!(section_kind, SelectionKind::First) {
+                            self.cursors[i].position.back(self.query);
+                            #[cfg(any(debug_assertions, test))]
+                            if let Some(section) = self.query.exit_at_section_end() {
+                                crate::scah_trace!(
+                                    store,
+                                    TraceEvent::EarlyExit {
+                                        runner_index,
+                                        selector: self.query.get_selection(section).source,
+                                        section,
+                                    }
+                                );
+                            }
+                        } else {
+                            // All selection with end: reactivate and reset depth
+                            self.cursors[i].set_end(false);
+                            // Reset last_match_depth to 0 (initial sentinel depth)
+                            self.cursors[i].set_last_match_depth(0);
+                        }
+                    } else {
+                        self.cursors[i].position.back(self.query);
+                        // Reset last_match_depth for the step backward
+                        self.cursors[i].set_last_match_depth(0);
+                    }
+                    siginificant_close = true;
+                }
+            } else if cur.scope_depth >= close_depth {
+                let pruned = self.cursors.swap_remove(i);
                 last_pruned_parent = Some(pruned.parent);
+                siginificant_close = true;
+
                 crate::scah_trace!(
                     store,
                     TraceEvent::ScopedCursorPruned {
@@ -371,65 +417,41 @@ where
                         state: pruned.position.state,
                     }
                 );
-            }
-        }
-
-        if let (Some(parent), Some(root_mut)) = (
-            last_pruned_parent,
-            (self.root.scope_depth == 0).then_some(&mut self.root),
-        ) {
-            root_mut.parent = parent;
-        }
-
-        if self.root.last_depth == close_depth {
-            if self.root.end() {
-                let section_kind = self
-                    .query
-                    .get_section_selection_kind(self.root.position.selection);
-                if matches!(section_kind, SelectionKind::First) {
-                    self.root.step_backward(self.query);
-                    #[cfg(any(debug_assertions, test))]
-                    if let Some(section) = self.query.exit_at_section_end() {
-                        crate::scah_trace!(
-                            store,
-                            TraceEvent::EarlyExit {
-                                runner_index,
-                                selector: self.query.get_selection(section).source,
-                                section,
-                            }
-                        );
+            } else if cur.is_moving()
+                && cur.effective_last_depth() == close_depth
+            {
+                // Non-SENTINEL Moving cursor: its match depth matches the close.
+                // Reset last_match_depth to scope_depth (unwind the match stack)
+                // and handle end/reactivation.
+                let sd = self.cursors[i].scope_depth;
+                if cur.end() {
+                    let section_kind = self
+                        .query
+                        .get_section_selection_kind(cur.position.selection);
+                    if matches!(section_kind, SelectionKind::First) {
+                        // For First selection, step backward so early_exit can detect
+                        self.cursors[i].position.back(self.query);
+                    } else {
+                        // All: reactivate for next match
+                        self.cursors[i].set_end(false);
                     }
-                    return true;
                 }
-
-                if let CursorMode::Moving {
-                    ref mut match_stack,
-                    end: ref mut end_flag,
-                } = self.root.mode
-                {
-                    *end_flag = false;
-                    match_stack.pop();
-                    self.root.last_depth = *match_stack.last().unwrap_or(&self.root.scope_depth);
-                }
-                #[cfg(any(debug_assertions, test))]
-                if let Some(section) = self.query.exit_at_section_end() {
-                    crate::scah_trace!(
-                        store,
-                        TraceEvent::EarlyExit {
-                            runner_index,
-                            selector: self.query.get_selection(section).source,
-                            section,
-                        }
-                    );
-                }
-                return true;
-            } else {
-                self.root.step_backward(self.query);
-                return true;
+                // Always reset last_match_depth (pop the match stack)
+                self.cursors[i].set_last_match_depth(sd);
+                siginificant_close = true;
             }
         }
 
-        false
+        // Parent restoration: set the root (SENTINEL) cursor's parent to the
+        // last pruned cursor's parent.
+        if let Some(parent) = last_pruned_parent
+            && let Some(root) = self.cursors.first_mut()
+            && root.scope_depth == SENTINEL_SCOPE
+        {
+            root.parent = parent;
+        }
+
+        siginificant_close
     }
 }
 
@@ -473,8 +495,16 @@ mod tests {
 
         assert!(store.get("div a").is_none());
 
-        assert_eq!(selection.root.position.state, TransitionId(1));
-        assert_eq!(selection.scoped.len(), 0);
+        // Root cursor at index 0 stays at state 0
+        assert_eq!(selection.cursors[0].position.state, TransitionId(0));
+        // Cursors: root (SENTINEL), anchored fork at state 0, spawned MOVING at state 1
+        assert_eq!(selection.cursors.len(), 3);
+        let spawned = selection
+            .cursors
+            .iter()
+            .find(|c| c.is_moving() && c.position.state == TransitionId(1))
+            .expect("Should have spawned MOVING cursor at state 1");
+        assert_eq!(spawned.scope_depth, 0);
 
         selection.next(
             0,
@@ -565,7 +595,10 @@ mod tests {
             state: TransitionId(0),
         };
 
-        selection.scoped = vec![
+        // Build a cursors vec with mixed scope depths
+        selection.cursors = vec![
+            // Root (SENTINEL) at index 0
+            ScopedCursor::new_root(ElementId(0), position),
             anchored_cursor(1, ElementId(10), position),
             anchored_cursor(3, ElementId(20), position),
             anchored_cursor(1, ElementId(30), position),
@@ -584,11 +617,13 @@ mod tests {
             &mut store,
         );
 
-        let retained = &selection.scoped;
-        assert_eq!(retained.len(), 3);
-        assert!(retained.iter().all(|c| c.scope_depth < 2));
+        // Cursors with scope < 2 should be retained, plus the SENTINEL root
+        let retained = &selection.cursors;
+        assert_eq!(retained.len(), 4, "Should retain root + 3 scoped < 2");
+        assert!(retained[0].scope_depth == SENTINEL_SCOPE, "Root should be kept");
+        assert!(retained[1..].iter().all(|c| c.scope_depth < 2));
 
-        let mut retained_parents: Vec<usize> = retained.iter().map(|c| c.parent.index()).collect();
+        let mut retained_parents: Vec<usize> = retained[1..].iter().map(|c| c.parent.index()).collect();
         retained_parents.sort_unstable();
         assert_eq!(retained_parents, vec![10, 30, 50]);
     }
@@ -618,8 +653,11 @@ mod tests {
         );
         store.text_content.set_start(4);
 
-        assert_eq!(selection.scoped.len(), 1);
-        assert!(selection.root.end());
+        // Root is still at state 0 (doesn't advance). It should have end=false
+        // for All selection.
+        assert_eq!(selection.cursors[0].position.state, TransitionId(0));
+        // Spawned cursor exists
+        assert!(!selection.cursors.is_empty());
 
         store.text_content.push(&Reader::new("<div></div>"), 4);
         let reactivated = selection.back(
@@ -634,13 +672,14 @@ mod tests {
         );
 
         assert!(reactivated);
-        assert!(!selection.root.end());
-        assert!(selection.scoped.is_empty());
+        // Root cursor should be reactivated (end cleared if it was set)
+        assert!(!selection.cursors[0].end());
+        // Non-sentinel cursors with scope >= 0 are pruned
     }
 
     #[test]
     fn test_descendant_forking_with_anchoring_model() {
-        let query = &Query::all("div", Save::none()).unwrap().build();
+        let query = &Query::all("div a", Save::none()).unwrap().build();
         let mut store = Store::default();
         let mut selection = QueryExecutor::new(query);
 
@@ -661,13 +700,17 @@ mod tests {
             &mut Vec::new(),
         );
 
-        let anchored_count = selection.scoped.iter().filter(|c| c.is_anchored()).count();
+        let anchored_count = selection
+            .cursors
+            .iter()
+            .filter(|c| c.is_anchored())
+            .count();
         assert_eq!(
             anchored_count, 1,
             "Expected 1 anchored fork after div match"
         );
 
-        let anchored = selection.scoped.iter().find(|c| c.is_anchored()).unwrap();
+        let anchored = selection.cursors.iter().find(|c| c.is_anchored()).unwrap();
         assert_eq!(anchored.scope_depth, 0);
         assert_eq!(anchored.position.state, TransitionId(0));
     }
@@ -898,11 +941,23 @@ mod tests {
             &mut Vec::new(),
         );
 
-        assert_eq!(selection.root.position.selection, QuerySectionId(1));
+        // Root cursor stays at section 0
+        assert_eq!(
+            selection.cursors[0].position.selection,
+            QuerySectionId(0)
+        );
         assert!(
             store.get("div").is_some(),
             "div should be in store even with Save::none()"
         );
+
+        // Should have spawned cursors for .then() children (one for first("p"))
+        let p_cursors: Vec<_> = selection
+            .cursors
+            .iter()
+            .filter(|c| c.position.selection == QuerySectionId(1))
+            .collect();
+        assert!(!p_cursors.is_empty(), "Should have spawned cursor for p section");
 
         let mut save_hits = Vec::new();
         selection.next(
@@ -925,10 +980,13 @@ mod tests {
         assert!(!save_hits.is_empty(), "p should have save hits");
         assert_eq!(save_hits[0].element_id, ElementId(1));
 
-        assert!(
-            selection.root.end(),
-            "root cursor should be at end after matching first p"
-        );
+        // The p cursor (First) should now have end=true
+        let p_cursor = selection
+            .cursors
+            .iter()
+            .find(|c| c.position.selection == QuerySectionId(1) && c.is_moving())
+            .unwrap();
+        assert!(p_cursor.end(), "First p cursor should be at end after match");
 
         let mut save_hits2 = Vec::new();
         selection.next(
@@ -1007,5 +1065,263 @@ mod tests {
             let ps: Vec<_> = product.get(&store, "p").unwrap().collect();
             assert_eq!(ps.len(), 1, "Each product should have exactly 1 p");
         }
+    }
+
+    // --- New spawn-model-specific tests ---
+
+    #[test]
+    fn test_spawn_model_root_stays_after_match() {
+        let query = &Query::all("div a", Save::none()).unwrap().build();
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+
+        selection.next(
+            0,
+            &XHtmlElement {
+                name: "div",
+                id: None,
+                class: None,
+                attributes: &[],
+            },
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+            },
+            &mut store,
+            &mut Vec::new(),
+        );
+
+        // Root cursor (index 0) must NOT advance position.
+        // The transition at state 0 is Descendant, so the root cursor
+        // deactivates (end=true) after spawning — the anchored fork handles
+        // deeper re-matching. back() reactivates it for sibling matching.
+        let root = &selection.cursors[0];
+        assert_eq!(root.position.state, TransitionId(0));
+        assert_eq!(
+            root.position.selection,
+            QuerySectionId(0),
+            "Root cursor should stay at initial section"
+        );
+        assert!(
+            root.end(),
+            "Root should deactivate after descendant match (anchored fork handles deeper matches)"
+        );
+    }
+
+    #[test]
+    fn test_spawn_model_all_rematches_after_close() {
+        // Tests that All selection can match multiple elements
+        let html = "<div><p>A</p><p>B</p></div>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::all("div p", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+
+        let ps: Vec<_> = store.get("div p").unwrap().collect();
+        assert_eq!(ps.len(), 2, "Should match all p elements");
+    }
+
+    #[test]
+    fn test_spawn_model_first_does_not_rematch() {
+        // Tests that First selection sets end=true and stops matching
+        let html = "<div><span>A</span><span>B</span></div>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::first("div span", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+
+        let spans: Vec<_> = store.get("div span").unwrap().collect();
+        assert_eq!(
+            spans.len(),
+            1,
+            "First selection should match only 1 span"
+        );
+    }
+
+    #[test]
+    fn test_spawn_model_sentinel_never_pruned() {
+        let query = Query::all("div", Save::none()).unwrap().build();
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(&query);
+
+        let position = Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(0),
+        };
+
+        selection.cursors = vec![
+            ScopedCursor::new_root(ElementId(0), position),
+            anchored_cursor(1, ElementId(10), position),
+        ];
+
+        // Close at depth 0 — non-sentinel should be pruned, sentinel stays
+        let _ = selection.back(
+            0,
+            "div",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+            },
+            &mut store,
+        );
+
+        assert_eq!(selection.cursors.len(), 1, "Only root should remain");
+        assert_eq!(
+            selection.cursors[0].scope_depth,
+            SENTINEL_SCOPE,
+            "Root cursor must not be pruned"
+        );
+    }
+
+    #[test]
+    fn test_spawn_model_early_exit_first_selection() {
+        let query = &Query::first("div", Save::all()).unwrap().build();
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+
+        // Match div — root (SENTINEL) cursor should set end=true for First
+        selection.next(
+            0,
+            &XHtmlElement {
+                name: "div",
+                id: None,
+                class: None,
+                attributes: &[],
+            },
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+            },
+            &mut store,
+            &mut Vec::new(),
+        );
+
+        // After matching, early_exit should be true (root at exit section with end=true)
+        assert!(
+            selection.early_exit(),
+            "early_exit should be true after First match completes"
+        );
+
+        // On close, back() should return true (SENTINEL reacts)
+        store.text_content.set_start(4);
+        store.text_content.push(&Reader::new("<div></div>"), 4);
+        let reactivated = selection.back(
+            0,
+            "div",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+            },
+            &mut store,
+        );
+
+        assert!(reactivated, "back() should return true on first close");
+    }
+
+    #[test]
+    fn test_spawn_model_multiple_siblings_from_then() {
+        let query = &Query::all("div", Save::none())
+            .unwrap()
+            .then(|div| {
+                Ok([
+                    div.first("h1", Save::all())?,
+                    div.all("p", Save::all())?,
+                    div.all("span", Save::all())?,
+                ])
+            })
+            .unwrap()
+            .build();
+
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+
+        selection.next(
+            0,
+            &XHtmlElement {
+                name: "div",
+                id: None,
+                class: None,
+                attributes: &[],
+            },
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+            },
+            &mut store,
+            &mut Vec::new(),
+        );
+
+        // Should have spawned 3 MOVING cursors (one per sibling)
+        let spawned: Vec<_> = selection
+            .cursors
+            .iter()
+            .filter(|c| c.is_moving() && c.position.selection != QuerySectionId(0))
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            3,
+            "Should spawn one MOVING cursor per .then() child"
+        );
+
+        let selections: Vec<_> = spawned.iter().map(|c| c.position.selection).collect();
+        assert!(selections.contains(&QuerySectionId(1)), "h1 section missing");
+        assert!(selections.contains(&QuerySectionId(2)), "p section missing");
+        assert!(selections.contains(&QuerySectionId(3)), "span section missing");
+    }
+
+    #[test]
+    fn test_spawn_model_pruning_at_scope_depth() {
+        let query = Query::all("div", Save::none()).unwrap().build();
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(&query);
+
+        let position = Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(0),
+        };
+
+        // Create cursors with various scope depths
+        selection.cursors = vec![
+            ScopedCursor::new_root(ElementId(0), position),
+            anchored_cursor(1, ElementId(10), position),
+            anchored_cursor(2, ElementId(20), position),
+            anchored_cursor(3, ElementId(30), position),
+            anchored_cursor(0, ElementId(40), position),
+        ];
+
+        // Close at depth 2 — cursors with scope >= 2 should be pruned
+        let _ = selection.back(
+            0,
+            "div",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 2,
+            },
+            &mut store,
+        );
+
+        let remaining_scopes: Vec<_> = selection
+            .cursors
+            .iter()
+            .filter(|c| c.scope_depth != SENTINEL_SCOPE)
+            .map(|c| c.scope_depth)
+            .collect();
+
+        // scope 0 and 1 remain; scope 2 and 3 are pruned
+        assert_eq!(remaining_scopes.len(), 2);
+        assert!(remaining_scopes.contains(&0));
+        assert!(remaining_scopes.contains(&1));
+        assert!(!remaining_scopes.contains(&2));
+        assert!(!remaining_scopes.contains(&3));
     }
 }
