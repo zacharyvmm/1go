@@ -59,7 +59,8 @@ impl<'a> Reader<'a> {
 
     /// Whether this reader has the AVX2 attribute-boundary scanner enabled.
     pub fn has_simd_attribute_boundary(&self) -> bool {
-        self.scanner.is_some() && self.cpu_features().has_avx2
+        let features = self.cpu_features();
+        self.scanner.is_some() && (features.has_avx2 || features.has_neon)
     }
 
     #[inline]
@@ -132,7 +133,8 @@ impl<'a> Reader<'a> {
 
     /// SIMD-accelerated whitespace skipping for SIMD-aware parsing paths.
     pub fn skip_whitespace_simd(&mut self) {
-        if self.scanner.is_some() && self.cpu_features().has_avx2 {
+        let features = self.cpu_features();
+        if self.scanner.is_some() && (features.has_avx2 || features.has_neon) {
             self.position = skip_whitespace_simd_impl(self.source, self.position);
         } else {
             self.skip_whitespace();
@@ -368,6 +370,26 @@ mod tests {
         // Test scanner backend
         println!("Scanner backend: {}", reader.scanner_name());
         println!("CPU features: {:?}", reader.cpu_features());
+    }
+
+    #[test]
+    fn test_simd_reader_selects_platform_backend() {
+        let reader = Reader::new_with_simd("<div class=\"test\">hello</div>");
+        let features = reader.cpu_features();
+
+        if features.has_avx2 {
+            assert_eq!(reader.scanner_name(), "avx2");
+            assert!(reader.has_simd_attribute_boundary());
+        } else if features.has_sse42 {
+            assert_eq!(reader.scanner_name(), "sse42");
+            assert!(!reader.has_simd_attribute_boundary());
+        } else if features.has_neon {
+            assert_eq!(reader.scanner_name(), "neon");
+            assert!(reader.has_simd_attribute_boundary());
+        } else {
+            assert_eq!(reader.scanner_name(), "scalar");
+            assert!(!reader.has_simd_attribute_boundary());
+        }
     }
 
     #[test]

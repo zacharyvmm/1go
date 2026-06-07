@@ -41,6 +41,8 @@ bench-first: bench-rust-first bench-node-first bench-python-first
 bench-whatwg: bench-rust-whatwg bench-node-whatwg bench-python-whatwg
 bench-nested: bench-rust-nested bench-node-nested bench-python-nested
 bench-rust: bench-rust-simple-all bench-rust-whatwg bench-rust-nested
+bench-rust-simd:
+    cargo bench -p scah-benches --bench speed_bench_simd
 bench-rust-simple-all:
     cargo bench -p scah-benches --bench speed_bench_simple_all
 bench-rust-first:

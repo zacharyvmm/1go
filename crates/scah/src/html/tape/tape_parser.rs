@@ -253,10 +253,15 @@ where
         let input = self.source;
         let mut pos: u32 = 0;
         let len = input.len() as u32;
+        let positions = &self.structural_index.positions;
+        let mut structural_idx = 0;
 
         while pos < len {
-            // Find the next structural character
-            if let Some(struct_pos) = self.structural_index.next_position_after(pos) {
+            while structural_idx < positions.len() && positions[structural_idx] < pos {
+                structural_idx += 1;
+            }
+
+            if let Some(&struct_pos) = positions.get(structural_idx) {
                 // Add text entry for content before the structural character
                 if struct_pos > pos {
                     self.tape

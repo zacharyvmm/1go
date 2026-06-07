@@ -114,6 +114,21 @@ impl StructuralIndex {
             }
         }
 
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                while pos + 16 <= len {
+                    unsafe {
+                        let chunk = SimdInput::load(input[pos..].as_ptr());
+                        let mask =
+                            chunk.eq(b'<') | chunk.eq(b'>') | chunk.eq(b'"') | chunk.eq(b'\'');
+                        bitmask_to_indexes(mask, pos as u32, &mut self.positions);
+                    }
+                    pos += 16;
+                }
+            }
+        }
+
         // Scalar tail: handle remaining bytes
         while pos < len {
             if matches!(input[pos], b'<' | b'>' | b'"' | b'\'') {
@@ -307,6 +322,213 @@ impl FusedTapeBuilder {
         // Text content tracking
         let mut text_start: usize = 0;
 
+        macro_rules! process_simd_mask {
+            (
+                $base:expr,
+                $lt_mask:expr,
+                $gt_mask:expr,
+                $quote_mask:expr,
+                $eq_mask:expr,
+                $ws_mask:expr,
+                $slash_mask:expr,
+                $excl_mask:expr
+            ) => {{
+                let base = $base;
+                let lt_mask = $lt_mask;
+                let gt_mask = $gt_mask;
+                let quote_mask = $quote_mask;
+                let eq_mask = $eq_mask;
+                let ws_mask = $ws_mask;
+                let slash_mask = $slash_mask;
+                let excl_mask = $excl_mask;
+                let combined =
+                    lt_mask | gt_mask | quote_mask | eq_mask | ws_mask | slash_mask | excl_mask;
+                let mut mask = combined;
+
+                while mask != 0 {
+                    let tz = mask.trailing_zeros() as usize;
+                    let abs_pos = base + tz;
+                    let ch = input[abs_pos];
+                    let bit = 1u32 << tz;
+
+                    match state {
+                        FusedState::Text => {
+                            if lt_mask & bit != 0 {
+                                if abs_pos > text_start {
+                                    self.tape.push(TapeEntry::new(
+                                        TapeEntryKind::Text,
+                                        text_start as u32,
+                                        (abs_pos - text_start) as u32,
+                                    ));
+                                }
+                                tag_start = abs_pos;
+                                state = FusedState::TagName;
+                                tag_name_start = 0;
+                                tag_name_end = 0;
+                                in_self_closing = false;
+                            }
+                        }
+                        FusedState::TagName => {
+                            if excl_mask & bit != 0 && abs_pos == tag_start + 1 {
+                                state = FusedState::Comment;
+                                _comment_start = tag_start;
+                            } else if slash_mask & bit != 0 && abs_pos == tag_start + 1 {
+                                tag_name_start = abs_pos + 1;
+                            } else if ws_mask & bit != 0
+                                || gt_mask & bit != 0
+                                || slash_mask & bit != 0
+                            {
+                                if tag_name_start == 0 {
+                                    tag_name_start = tag_start + 1;
+                                }
+                                if tag_name_end == 0 {
+                                    tag_name_end = abs_pos;
+                                }
+                                state = FusedState::AttrName;
+                                attr_key_start = abs_pos + 1;
+
+                                if gt_mask & bit != 0 {
+                                    self.finish_tag(
+                                        input,
+                                        tag_start,
+                                        tag_name_start,
+                                        tag_name_end,
+                                        false,
+                                        abs_pos,
+                                    );
+                                    text_start = abs_pos + 1;
+                                    state = FusedState::Text;
+                                } else if slash_mask & bit != 0 {
+                                    in_self_closing = true;
+                                }
+                            }
+                        }
+                        FusedState::AttrName => {
+                            if gt_mask & bit != 0 {
+                                self.finish_tag(
+                                    input,
+                                    tag_start,
+                                    tag_name_start,
+                                    tag_name_end,
+                                    in_self_closing,
+                                    abs_pos,
+                                );
+                                text_start = abs_pos + 1;
+                                state = FusedState::Text;
+                            } else if eq_mask & bit != 0 {
+                                attr_key_end = abs_pos;
+                                state = FusedState::AttrValue;
+                                attr_value_start = 0;
+                            } else if ws_mask & bit != 0 {
+                                if attr_key_start < abs_pos {
+                                    self.attributes.push(CompactAttrEntry::new_bool(
+                                        attr_key_start as u32,
+                                        (abs_pos - attr_key_start) as u16,
+                                    ));
+                                }
+                                attr_key_start = abs_pos + 1;
+                            } else if slash_mask & bit != 0 {
+                                in_self_closing = true;
+                                if attr_key_start < abs_pos {
+                                    self.attributes.push(CompactAttrEntry::new_bool(
+                                        attr_key_start as u32,
+                                        (abs_pos - attr_key_start) as u16,
+                                    ));
+                                }
+                            } else if quote_mask & bit != 0 {
+                                attr_key_end = abs_pos;
+                            }
+                        }
+                        FusedState::AttrValue => {
+                            if attr_value_start == 0 {
+                                if quote_mask & bit != 0 {
+                                    attr_value_start = abs_pos + 1;
+                                    attr_quote_char = ch;
+                                    attr_in_quotes = true;
+                                } else if !ws_mask & bit == 0 {
+                                } else {
+                                    attr_value_start = abs_pos;
+                                    attr_in_quotes = false;
+                                }
+                            } else if attr_in_quotes {
+                                if quote_mask & bit != 0 && ch == attr_quote_char {
+                                    let attr = if attr_quote_char == b'"' {
+                                        CompactAttrEntry::new_double_quoted(
+                                            attr_key_start as u32,
+                                            (attr_key_end - attr_key_start) as u16,
+                                            attr_value_start as u32,
+                                            (abs_pos - attr_value_start) as u16,
+                                        )
+                                    } else {
+                                        CompactAttrEntry::new_single_quoted(
+                                            attr_key_start as u32,
+                                            (attr_key_end - attr_key_start) as u16,
+                                            attr_value_start as u32,
+                                            (abs_pos - attr_value_start) as u16,
+                                        )
+                                    };
+                                    self.attributes.push(attr);
+                                    state = FusedState::AttrName;
+                                    attr_key_start = abs_pos + 1;
+                                    attr_in_quotes = false;
+                                }
+                            } else if ws_mask & bit != 0 || gt_mask & bit != 0 {
+                                let attr = CompactAttrEntry::new_unquoted(
+                                    attr_key_start as u32,
+                                    (attr_key_end - attr_key_start) as u16,
+                                    attr_value_start as u32,
+                                    (abs_pos - attr_value_start) as u16,
+                                );
+                                self.attributes.push(attr);
+                                state = FusedState::AttrName;
+                                attr_key_start = abs_pos + 1;
+
+                                if gt_mask & bit != 0 {
+                                    self.finish_tag(
+                                        input,
+                                        tag_start,
+                                        tag_name_start,
+                                        tag_name_end,
+                                        in_self_closing,
+                                        abs_pos,
+                                    );
+                                    text_start = abs_pos + 1;
+                                    state = FusedState::Text;
+                                }
+                            }
+                        }
+                        FusedState::Comment => {
+                            if gt_mask & bit != 0 {
+                                if abs_pos >= 2
+                                    && input[abs_pos - 1] == b'-'
+                                    && input[abs_pos - 2] == b'-'
+                                {
+                                    self.tape.push(TapeEntry::new(
+                                        TapeEntryKind::Comment,
+                                        tag_start as u32,
+                                        (abs_pos - tag_start + 1) as u32,
+                                    ));
+                                    text_start = abs_pos + 1;
+                                    state = FusedState::Text;
+                                } else if tag_start + 2 < abs_pos {
+                                    self.tape.push(TapeEntry::new(
+                                        TapeEntryKind::Doctype,
+                                        tag_start as u32,
+                                        (abs_pos - tag_start + 1) as u32,
+                                    ));
+                                    text_start = abs_pos + 1;
+                                    state = FusedState::Text;
+                                }
+                            }
+                        }
+                        FusedState::Doctype => {}
+                    }
+
+                    mask &= mask.wrapping_sub(1);
+                }
+            }};
+        }
+
         // SIMD path: process 32 bytes at a time
         #[cfg(target_arch = "x86_64")]
         {
@@ -321,229 +543,36 @@ impl FusedTapeBuilder {
                         let ws_mask = self.classify_whitespace(&chunk);
                         let slash_mask = chunk.eq(b'/');
                         let excl_mask = chunk.eq(b'!');
-                        let _dash_mask = chunk.eq(b'-');
-
-                        // Process each set bit in the combined mask
-                        let combined = lt_mask
-                            | gt_mask
-                            | quote_mask
-                            | eq_mask
-                            | ws_mask
-                            | slash_mask
-                            | excl_mask;
-                        let mut mask = combined;
-
-                        while mask != 0 {
-                            let tz = mask.trailing_zeros() as usize;
-                            let abs_pos = pos + tz;
-                            let ch = input[abs_pos];
-                            let bit = 1u32 << tz;
-
-                            match state {
-                                FusedState::Text => {
-                                    if lt_mask & bit != 0 {
-                                        // Flush text before the tag
-                                        if abs_pos > text_start {
-                                            self.tape.push(TapeEntry::new(
-                                                TapeEntryKind::Text,
-                                                text_start as u32,
-                                                (abs_pos - text_start) as u32,
-                                            ));
-                                        }
-                                        tag_start = abs_pos;
-                                        state = FusedState::TagName;
-                                        tag_name_start = 0;
-                                        tag_name_end = 0;
-                                        in_self_closing = false;
-                                    }
-                                }
-                                FusedState::TagName => {
-                                    if excl_mask & bit != 0 && abs_pos == tag_start + 1 {
-                                        // Comment or doctype: <!...>
-                                        state = FusedState::Comment;
-                                        _comment_start = tag_start;
-                                    } else if slash_mask & bit != 0 && abs_pos == tag_start + 1 {
-                                        // Closing tag: </...>
-                                        tag_name_start = abs_pos + 1;
-                                    } else if ws_mask & bit != 0
-                                        || gt_mask & bit != 0
-                                        || slash_mask & bit != 0
-                                    {
-                                        // End of tag name
-                                        if tag_name_start == 0 {
-                                            tag_name_start = tag_start + 1;
-                                        }
-                                        if tag_name_end == 0 {
-                                            tag_name_end = abs_pos;
-                                        }
-                                        state = FusedState::AttrName;
-                                        attr_key_start = abs_pos + 1;
-
-                                        if gt_mask & bit != 0 {
-                                            // Tag ends immediately after name
-                                            self.finish_tag(
-                                                input,
-                                                tag_start,
-                                                tag_name_start,
-                                                tag_name_end,
-                                                false,
-                                                abs_pos,
-                                            );
-                                            text_start = abs_pos + 1;
-                                            state = FusedState::Text;
-                                        } else if slash_mask & bit != 0 {
-                                            in_self_closing = true;
-                                        }
-                                    }
-                                }
-                                FusedState::AttrName => {
-                                    if gt_mask & bit != 0 {
-                                        // End of tag
-                                        let _is_close =
-                                            input.get(tag_start + 1).copied() == Some(b'/');
-                                        self.finish_tag(
-                                            input,
-                                            tag_start,
-                                            tag_name_start,
-                                            tag_name_end,
-                                            in_self_closing,
-                                            abs_pos,
-                                        );
-                                        text_start = abs_pos + 1;
-                                        state = FusedState::Text;
-                                    } else if eq_mask & bit != 0 {
-                                        // Attribute has a value
-                                        attr_key_end = abs_pos;
-                                        state = FusedState::AttrValue;
-                                        attr_value_start = 0;
-                                    } else if ws_mask & bit != 0 {
-                                        // Boolean attribute or end of attribute name
-                                        if attr_key_start < abs_pos {
-                                            // Boolean attribute
-                                            self.attributes.push(CompactAttrEntry::new_bool(
-                                                attr_key_start as u32,
-                                                (abs_pos - attr_key_start) as u16,
-                                            ));
-                                        }
-                                        attr_key_start = abs_pos + 1;
-                                    } else if slash_mask & bit != 0 {
-                                        in_self_closing = true;
-                                        // Boolean attribute before slash
-                                        if attr_key_start < abs_pos {
-                                            self.attributes.push(CompactAttrEntry::new_bool(
-                                                attr_key_start as u32,
-                                                (abs_pos - attr_key_start) as u16,
-                                            ));
-                                        }
-                                    } else if quote_mask & bit != 0 {
-                                        // Quote in attribute name - unusual but handle
-                                        attr_key_end = abs_pos;
-                                    }
-                                }
-                                FusedState::AttrValue => {
-                                    if attr_value_start == 0 {
-                                        // Looking for value start
-                                        if quote_mask & bit != 0 {
-                                            attr_value_start = abs_pos + 1;
-                                            attr_quote_char = ch;
-                                            attr_in_quotes = true;
-                                        } else if !ws_mask & bit == 0 {
-                                            // Skip whitespace before value
-                                        } else {
-                                            // Unquoted value
-                                            attr_value_start = abs_pos;
-                                            attr_in_quotes = false;
-                                        }
-                                    } else if attr_in_quotes {
-                                        // Inside quoted value - look for matching quote
-                                        if quote_mask & bit != 0 && ch == attr_quote_char {
-                                            // End of quoted value
-                                            let attr = if attr_quote_char == b'"' {
-                                                CompactAttrEntry::new_double_quoted(
-                                                    attr_key_start as u32,
-                                                    (attr_key_end - attr_key_start) as u16,
-                                                    attr_value_start as u32,
-                                                    (abs_pos - attr_value_start) as u16,
-                                                )
-                                            } else {
-                                                CompactAttrEntry::new_single_quoted(
-                                                    attr_key_start as u32,
-                                                    (attr_key_end - attr_key_start) as u16,
-                                                    attr_value_start as u32,
-                                                    (abs_pos - attr_value_start) as u16,
-                                                )
-                                            };
-                                            self.attributes.push(attr);
-                                            state = FusedState::AttrName;
-                                            attr_key_start = abs_pos + 1;
-                                            attr_in_quotes = false;
-                                        }
-                                    } else {
-                                        // Unquoted value - end at whitespace or '>'
-                                        if ws_mask & bit != 0 || gt_mask & bit != 0 {
-                                            let attr = CompactAttrEntry::new_unquoted(
-                                                attr_key_start as u32,
-                                                (attr_key_end - attr_key_start) as u16,
-                                                attr_value_start as u32,
-                                                (abs_pos - attr_value_start) as u16,
-                                            );
-                                            self.attributes.push(attr);
-                                            state = FusedState::AttrName;
-                                            attr_key_start = abs_pos + 1;
-
-                                            if gt_mask & bit != 0 {
-                                                // End of tag
-                                                self.finish_tag(
-                                                    input,
-                                                    tag_start,
-                                                    tag_name_start,
-                                                    tag_name_end,
-                                                    in_self_closing,
-                                                    abs_pos,
-                                                );
-                                                text_start = abs_pos + 1;
-                                                state = FusedState::Text;
-                                            }
-                                        }
-                                    }
-                                }
-                                FusedState::Comment => {
-                                    // Look for --> to end comment
-                                    if gt_mask & bit != 0 {
-                                        // Check if this is the end of comment -->
-                                        if abs_pos >= 2
-                                            && input[abs_pos - 1] == b'-'
-                                            && input[abs_pos - 2] == b'-'
-                                        {
-                                            self.tape.push(TapeEntry::new(
-                                                TapeEntryKind::Comment,
-                                                tag_start as u32,
-                                                (abs_pos - tag_start + 1) as u32,
-                                            ));
-                                            text_start = abs_pos + 1;
-                                            state = FusedState::Text;
-                                        } else if tag_start + 2 < abs_pos {
-                                            // Doctype or other <!...>
-                                            self.tape.push(TapeEntry::new(
-                                                TapeEntryKind::Doctype,
-                                                tag_start as u32,
-                                                (abs_pos - tag_start + 1) as u32,
-                                            ));
-                                            text_start = abs_pos + 1;
-                                            state = FusedState::Text;
-                                        }
-                                    }
-                                }
-                                FusedState::Doctype => {
-                                    // Doctype is handled in Comment state
-                                }
-                            }
-
-                            // Clear the processed bit
-                            mask &= mask.wrapping_sub(1);
-                        }
+                        process_simd_mask!(
+                            pos, lt_mask, gt_mask, quote_mask, eq_mask, ws_mask, slash_mask,
+                            excl_mask
+                        );
                     }
                     pos += 32;
+                }
+            }
+        }
+
+        // SIMD path: process 16 bytes at a time on Apple Silicon / ARM64.
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                while pos + 16 <= len {
+                    unsafe {
+                        let chunk = SimdInput::load(input[pos..].as_ptr());
+                        let lt_mask = chunk.eq(b'<');
+                        let gt_mask = chunk.eq(b'>');
+                        let quote_mask = chunk.eq(b'"') | chunk.eq(b'\'');
+                        let eq_mask = chunk.eq(b'=');
+                        let ws_mask = self.classify_whitespace(&chunk);
+                        let slash_mask = chunk.eq(b'/');
+                        let excl_mask = chunk.eq(b'!');
+                        process_simd_mask!(
+                            pos, lt_mask, gt_mask, quote_mask, eq_mask, ws_mask, slash_mask,
+                            excl_mask
+                        );
+                    }
+                    pos += 16;
                 }
             }
         }
@@ -801,6 +830,13 @@ impl FusedTapeBuilder {
             // Space (0x20), Tab (0x09), LF (0x0A), CR (0x0D)
             input.eq(b' ') | input.eq(b'\t') | input.eq(b'\n') | input.eq(b'\r')
         }
+    }
+
+    /// Classify whitespace using SIMD (NEON)
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn classify_whitespace(&self, input: &SimdInput) -> u32 {
+        unsafe { input.eq(b' ') | input.eq(b'\t') | input.eq(b'\n') | input.eq(b'\r') }
     }
 }
 
@@ -1138,6 +1174,16 @@ impl ChunkSplitter {
             }
         }
 
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") && end >= 16 {
+                unsafe {
+                    Self::scan_context_simd(input, end, in_tag, in_quotes, quote_char);
+                    return;
+                }
+            }
+        }
+
         // Scalar fallback
         for i in 0..end {
             let ch = input[i];
@@ -1159,6 +1205,82 @@ impl ChunkSplitter {
                     *in_tag = true;
                 }
             }
+        }
+    }
+
+    /// SIMD-accelerated context scanning for determining tag/quote state.
+    ///
+    /// Scans 16 bytes at a time using NEON to find `<`, `>`, `"`, `'`
+    /// and updates the context tracking state.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn scan_context_simd(
+        input: &[u8],
+        up_to: usize,
+        in_tag: &mut bool,
+        in_quotes: &mut bool,
+        quote_char: &mut u8,
+    ) {
+        let mut pos = 0;
+
+        while pos + 16 <= up_to {
+            unsafe {
+                let chunk = SimdInput::load(input[pos..].as_ptr());
+                let lt_mask = chunk.eq(b'<');
+                let gt_mask = chunk.eq(b'>');
+                let dq_mask = chunk.eq(b'"');
+                let sq_mask = chunk.eq(b'\'');
+
+                let combined = lt_mask | gt_mask | dq_mask | sq_mask;
+                let mut mask = combined;
+
+                while mask != 0 {
+                    let tz = mask.trailing_zeros() as usize;
+                    let abs_pos = pos + tz;
+                    let ch = input[abs_pos];
+                    let bit = 1u32 << tz;
+
+                    if *in_quotes {
+                        if ch == *quote_char {
+                            *in_quotes = false;
+                        }
+                    } else if *in_tag {
+                        if gt_mask & bit != 0 {
+                            *in_tag = false;
+                        } else if (dq_mask | sq_mask) & bit != 0 {
+                            *in_quotes = true;
+                            *quote_char = ch;
+                        }
+                    } else if lt_mask & bit != 0 {
+                        *in_tag = true;
+                    }
+
+                    mask &= mask.wrapping_sub(1);
+                }
+            }
+            pos += 16;
+        }
+
+        // Scalar tail
+        while pos < up_to {
+            let ch = input[pos];
+            if *in_quotes {
+                if ch == *quote_char {
+                    *in_quotes = false;
+                }
+            } else if *in_tag {
+                match ch {
+                    b'>' => *in_tag = false,
+                    b'"' | b'\'' => {
+                        *in_quotes = true;
+                        *quote_char = ch;
+                    }
+                    _ => {}
+                }
+            } else if ch == b'<' {
+                *in_tag = true;
+            }
+            pos += 1;
         }
     }
 
@@ -2051,17 +2173,12 @@ impl FusedTapeBuilder {
     /// which is faster than the scalar `count_chunk` method for large chunks.
     fn count_chunk_simd(input: &[u8]) -> ChunkCounts {
         let len = input.len();
-        let mut tape_count = 0usize;
-        let mut attr_count = 0usize;
-        let mut tag_map_count = 0usize;
 
         // First, use SIMD to count structural characters
         let mut pos = 0;
         let mut lt_count = 0u32;
         let mut gt_count = 0u32;
         let mut eq_count = 0u32;
-        let mut dq_count = 0u32;
-        let mut sq_count = 0u32;
 
         #[cfg(target_arch = "x86_64")]
         {
@@ -2077,10 +2194,6 @@ impl FusedTapeBuilder {
                         gt_count += in1.eq(b'>').count_ones();
                         eq_count += in0.eq(b'=').count_ones();
                         eq_count += in1.eq(b'=').count_ones();
-                        dq_count += in0.eq(b'"').count_ones();
-                        dq_count += in1.eq(b'"').count_ones();
-                        sq_count += in0.eq(b'\'').count_ones();
-                        sq_count += in1.eq(b'\'').count_ones();
                     }
                     pos += 64;
                 }
@@ -2091,10 +2204,23 @@ impl FusedTapeBuilder {
                         lt_count += in0.eq(b'<').count_ones();
                         gt_count += in0.eq(b'>').count_ones();
                         eq_count += in0.eq(b'=').count_ones();
-                        dq_count += in0.eq(b'"').count_ones();
-                        sq_count += in0.eq(b'\'').count_ones();
                     }
                     pos += 32;
+                }
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                while pos + 16 <= len {
+                    unsafe {
+                        let chunk = SimdInput::load(input[pos..].as_ptr());
+                        lt_count += chunk.eq(b'<').count_ones();
+                        gt_count += chunk.eq(b'>').count_ones();
+                        eq_count += chunk.eq(b'=').count_ones();
+                    }
+                    pos += 16;
                 }
             }
         }
@@ -2105,8 +2231,6 @@ impl FusedTapeBuilder {
                 b'<' => lt_count += 1,
                 b'>' => gt_count += 1,
                 b'=' => eq_count += 1,
-                b'"' => dq_count += 1,
-                b'\'' => sq_count += 1,
                 _ => {}
             }
             pos += 1;
@@ -2119,9 +2243,9 @@ impl FusedTapeBuilder {
 
         // Rough estimate: tape_count = tags + text_segments
         // tag_map_count = number of complete tags (min of lt, gt)
-        tag_map_count = lt_count.min(gt_count) as usize;
-        tape_count = tag_map_count * 2; // Each tag + potential text before it
-        attr_count = eq_count as usize + tag_map_count; // Attributes with values + boolean attributes
+        let tag_map_count = lt_count.min(gt_count) as usize;
+        let mut tape_count = tag_map_count * 2; // Each tag + potential text before it
+        let mut attr_count = eq_count as usize + tag_map_count; // Attributes with values + boolean attributes
 
         // Add margin for safety
         tape_count += tag_map_count / 4;
@@ -3076,7 +3200,7 @@ mod tests {
         let input = b"<div class='test' id='main'>Hello World</div>";
 
         // Both methods should produce similar estimates
-        let scalar = FusedTapeBuilder::count_chunk(input);
+        let _scalar = FusedTapeBuilder::count_chunk(input);
         let simd = FusedTapeBuilder::count_chunk_simd(input);
 
         // SIMD estimates may be slightly different but should be in the same ballpark

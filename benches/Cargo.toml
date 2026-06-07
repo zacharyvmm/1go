@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 scah = { path = "../crates/scah" }
+scah-reader = { path = "../crates/scah-reader" }
 
 # Benchmarking Tools
 criterion = { version = "0.8.1", features = ["html_reports"] }
@@ -77,6 +78,11 @@ harness = false
 [[bench]]
 name = "speed_bench_attribute_heavy"
 path = "attributes/speed_bench.rs"
+harness = false
+
+[[bench]]
+name = "speed_bench_simd"
+path = "simd/speed_bench.rs"
 harness = false
 
 [[bench]]

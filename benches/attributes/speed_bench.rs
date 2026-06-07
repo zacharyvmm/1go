@@ -5,7 +5,7 @@
 //! Phase 3 optimizations target.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use scah::{Query, Save, parse};
+use scah::{Query, Save, parse, parse_fused};
 use std::hint::black_box;
 
 /// Generate a form-heavy HTML document with many attributes per element.
@@ -78,6 +78,17 @@ fn bench_attribute_heavy(c: &mut Criterion) {
             },
         );
 
+        group.bench_with_input(
+            BenchmarkId::new("scah_fused_form_save_none", size),
+            &content,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused(black_box(html), black_box(none_queries));
+                    black_box(store);
+                })
+            },
+        );
+
         // Benchmark: parse with save_all (full extraction)
         let all_queries = &[Query::all("input", Save::all()).unwrap().build()];
         group.bench_with_input(
@@ -91,6 +102,17 @@ fn bench_attribute_heavy(c: &mut Criterion) {
             },
         );
 
+        group.bench_with_input(
+            BenchmarkId::new("scah_fused_form_save_all", size),
+            &content,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused(black_box(html), black_box(all_queries));
+                    consume_results(black_box(&store), "input");
+                })
+            },
+        );
+
         // Benchmark: query all form-groups with attribute access
         let group_queries = &[Query::all("div.form-group", Save::all()).unwrap().build()];
         group.bench_with_input(
@@ -99,6 +121,17 @@ fn bench_attribute_heavy(c: &mut Criterion) {
             |b, html| {
                 b.iter(|| {
                     let store = parse(black_box(html), black_box(group_queries));
+                    consume_results(black_box(&store), "div.form-group");
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("scah_fused_form_groups_save_all", size),
+            &content,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused(black_box(html), black_box(group_queries));
                     consume_results(black_box(&store), "div.form-group");
                 })
             },
@@ -128,6 +161,17 @@ fn bench_data_attributes(c: &mut Criterion) {
             },
         );
 
+        group.bench_with_input(
+            BenchmarkId::new("scah_fused_data_attr_save_none", size),
+            &content,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused(black_box(html), black_box(none_queries));
+                    black_box(store);
+                })
+            },
+        );
+
         // Benchmark: parse with save_all
         let all_queries = &[Query::all("a.link", Save::all()).unwrap().build()];
         group.bench_with_input(
@@ -141,6 +185,17 @@ fn bench_data_attributes(c: &mut Criterion) {
             },
         );
 
+        group.bench_with_input(
+            BenchmarkId::new("scah_fused_data_attr_save_all", size),
+            &content,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused(black_box(html), black_box(all_queries));
+                    consume_results(black_box(&store), "a.link");
+                })
+            },
+        );
+
         // Benchmark: query all component divs
         let comp_queries = &[Query::all("div.component", Save::all()).unwrap().build()];
         group.bench_with_input(
@@ -149,6 +204,17 @@ fn bench_data_attributes(c: &mut Criterion) {
             |b, html| {
                 b.iter(|| {
                     let store = parse(black_box(html), black_box(comp_queries));
+                    consume_results(black_box(&store), "div.component");
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("scah_fused_data_attr_components", size),
+            &content,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused(black_box(html), black_box(comp_queries));
                     consume_results(black_box(&store), "div.component");
                 })
             },
@@ -175,6 +241,14 @@ fn bench_attribute_tokenizer_micro(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("scah_fused_heavy_attrs_element_parse", |b| {
+        b.iter(|| {
+            let html = format!("<{}>", heavy_attrs);
+            let store = parse_fused(black_box(&html), black_box(&div_queries));
+            black_box(store);
+        })
+    });
+
     // Micro-benchmark: single element with no attributes
     group.bench_function("scah_no_attrs_element_parse", |b| {
         b.iter(|| {
@@ -183,10 +257,27 @@ fn bench_attribute_tokenizer_micro(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("scah_fused_no_attrs_element_parse", |b| {
+        b.iter(|| {
+            let store = parse_fused(black_box("<div>text</div>"), black_box(&div_queries));
+            black_box(store);
+        })
+    });
+
     // Micro-benchmark: single element with few attributes
     group.bench_function("scah_few_attrs_element_parse", |b| {
         b.iter(|| {
             let store = parse(
+                black_box(r#"<div class="test" id="main">text</div>"#),
+                black_box(&div_queries),
+            );
+            black_box(store);
+        })
+    });
+
+    group.bench_function("scah_fused_few_attrs_element_parse", |b| {
+        b.iter(|| {
+            let store = parse_fused(
                 black_box(r#"<div class="test" id="main">text</div>"#),
                 black_box(&div_queries),
             );

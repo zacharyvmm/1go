@@ -1651,6 +1651,7 @@ dependencies = [
  "lol_html",
  "rlibxml",
  "scah",
+ "scah-reader",
  "scraper",
  "tl",
 ]

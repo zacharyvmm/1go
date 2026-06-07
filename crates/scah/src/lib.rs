@@ -226,6 +226,10 @@ pub fn parse_tape<'a: 'query, 'html: 'query, 'query: 'html, Q>(
 where
     Q: QuerySpec<'query>,
 {
+    if let Some(store) = html::simple_tag_parser::parse_if_simple_tag(html, queries) {
+        return store;
+    }
+
     let selectors = QueryMultiplexer::new(queries);
     let parser = if selectors.requires_text_content() {
         TapeParser::with_capacity(selectors, html.as_bytes(), html.len())

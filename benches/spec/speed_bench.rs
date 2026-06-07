@@ -6,7 +6,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use lexbor_css::HtmlDocument;
 use lol_html::{HtmlRewriter, Settings, element};
 use lxml::HtmlDocument as LxmlDocument;
-use scah::{Query, Save, parse};
+use scah::{Query, Save, parse, parse_fused, parse_fused_parallel};
 use scraper::{Html, Selector};
 use std::hint::black_box;
 use tl::ParserOptions;
@@ -48,12 +48,26 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("scah_fused_parse_prebuilt_save_none", |b| {
+        b.iter(|| {
+            let store = parse_fused(black_box(&content), black_box(save_none_queries));
+            black_box(store);
+        })
+    });
+
     let save_inner_html_queries = &[Query::all(QUERY, Save::only_inner_html())
         .expect("spec selector should parse")
         .build()];
     group.bench_function("scah_parse_prebuilt_save_inner_html", |b| {
         b.iter(|| {
             let store = parse(black_box(&content), black_box(save_inner_html_queries));
+            black_box(store);
+        })
+    });
+
+    group.bench_function("scah_fused_parse_prebuilt_save_inner_html", |b| {
+        b.iter(|| {
+            let store = parse_fused(black_box(&content), black_box(save_inner_html_queries));
             black_box(store);
         })
     });
@@ -68,6 +82,13 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("scah_fused_parse_prebuilt_save_text", |b| {
+        b.iter(|| {
+            let store = parse_fused(black_box(&content), black_box(save_text_queries));
+            consume_scah_results(black_box(&store));
+        })
+    });
+
     let save_all_queries = &[Query::all(QUERY, Save::all())
         .expect("spec selector should parse")
         .build()];
@@ -78,12 +99,49 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("scah_fused_parse_prebuilt_save_all", |b| {
+        b.iter(|| {
+            let store = parse_fused(black_box(&content), black_box(save_all_queries));
+            consume_scah_results(black_box(&store));
+        })
+    });
+
     group.bench_function("scah", |b| {
         b.iter(|| {
             let queries = &[Query::all(QUERY, Save::all())
                 .expect("spec selector should parse")
                 .build()];
             let store = parse(&content, queries);
+
+            for element in store.get(QUERY).unwrap() {
+                black_box(&element.attributes(&store));
+                black_box(&element.inner_html);
+                black_box(&element.text_content(&store));
+            }
+        })
+    });
+
+    group.bench_function("scah_fused", |b| {
+        b.iter(|| {
+            let queries = &[Query::all(QUERY, Save::all())
+                .expect("spec selector should parse")
+                .build()];
+            let store = parse_fused(&content, queries);
+
+            for element in store.get(QUERY).unwrap() {
+                black_box(&element.attributes(&store));
+                black_box(&element.inner_html);
+                black_box(&element.text_content(&store));
+            }
+        })
+    });
+
+    group.bench_function("scah_fused_parallel", |b| {
+        b.iter(|| {
+            let queries = &[Query::all(QUERY, Save::all())
+                .expect("spec selector should parse")
+                .build()];
+            let store = parse_fused_parallel(&content, queries);
 
             for element in store.get(QUERY).unwrap() {
                 black_box(&element.attributes(&store));

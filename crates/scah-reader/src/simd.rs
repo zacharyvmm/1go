@@ -6,6 +6,23 @@
 
 use std::sync::OnceLock;
 
+#[cfg(target_arch = "aarch64")]
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn neon_movemask_u8(mask: std::arch::aarch64::uint8x16_t) -> u32 {
+    unsafe {
+        let shifted = std::arch::aarch64::vshrq_n_u8(mask, 7);
+        let mut bytes = [0u8; 16];
+        std::arch::aarch64::vst1q_u8(bytes.as_mut_ptr(), shifted);
+
+        let mut bits = 0u32;
+        for (i, byte) in bytes.iter().enumerate() {
+            bits |= (*byte as u32) << i;
+        }
+        bits
+    }
+}
+
 /// Runtime CPU feature detection
 #[derive(Debug, Clone, Copy)]
 pub struct CpuFeatures {
@@ -99,6 +116,9 @@ pub struct SimdInput {
 
 impl SimdInput {
     /// Load 32 bytes from memory (unaligned)
+    ///
+    /// # Safety
+    /// `ptr` must be valid to read 32 bytes, and the caller must ensure AVX2 is available.
     #[inline]
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
@@ -111,6 +131,9 @@ impl SimdInput {
     }
 
     /// Load 16 bytes from memory (unaligned) for SSE2/NEON
+    ///
+    /// # Safety
+    /// `ptr` must be valid to read 16 bytes, and the caller must ensure NEON is available.
     #[inline]
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
@@ -123,6 +146,9 @@ impl SimdInput {
     }
 
     /// Compare all bytes against a constant, return 32-bit bitmask
+    ///
+    /// # Safety
+    /// The caller must ensure this value was loaded with AVX2 enabled.
     #[inline]
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
@@ -135,30 +161,21 @@ impl SimdInput {
     }
 
     /// Compare all bytes against a constant, return 16-bit bitmask (NEON)
+    ///
+    /// # Safety
+    /// The caller must ensure this value was loaded with NEON enabled.
     #[inline]
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
     pub unsafe fn eq(&self, byte: u8) -> u32 {
         let cmp = std::arch::aarch64::vceqq_u8(self.v0, std::arch::aarch64::vdupq_n_u8(byte));
-        // Convert NEON mask to bitmask using vector shift and accumulate
-        // The comparison result is 0xFF for match, 0x00 for no match
-        // We need to extract the high bit of each byte into a bitmask
-        let shifted = std::arch::aarch64::vshrq_n_u8(cmp, 7);
-        // Use pairwise addition to pack bits
-        let mut mask = 0u32;
-        // Extract bits manually - NEON doesn't have movemask equivalent
-        // We process 16 bytes and set bits accordingly
-        let mut bytes = [0u8; 16];
-        std::arch::aarch64::vst1q_u8(bytes.as_mut_ptr(), shifted);
-        for i in 0..16 {
-            if bytes[i] != 0 {
-                mask |= 1 << i;
-            }
-        }
-        mask
+        unsafe { neon_movemask_u8(cmp) }
     }
 
     /// Check if any byte has high bit set (non-ASCII)
+    ///
+    /// # Safety
+    /// The caller must ensure this value was loaded with AVX2 enabled.
     #[inline]
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
@@ -167,6 +184,9 @@ impl SimdInput {
     }
 
     /// Check if any byte has high bit set (non-ASCII) - NEON
+    ///
+    /// # Safety
+    /// The caller must ensure this value was loaded with NEON enabled.
     #[inline]
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
@@ -274,8 +294,8 @@ unsafe fn find_any_neon(input: &[u8], start: usize, needles: &[u8; 4]) -> usize 
                 // Find first set bit by extracting bytes
                 let mut bytes = [0u8; 16];
                 std::arch::aarch64::vst1q_u8(bytes.as_mut_ptr(), any);
-                for i in 0..16 {
-                    if bytes[i] != 0 {
+                for (i, byte) in bytes.iter().enumerate() {
+                    if *byte != 0 {
                         return pos + i;
                     }
                 }
@@ -312,6 +332,9 @@ fn find_any_scalar(input: &[u8], start: usize, needles: &[u8; 4]) -> usize {
 
 /// Classify 32 bytes simultaneously as whitespace
 /// Returns 32-bit bitmask where 1 = whitespace
+///
+/// # Safety
+/// The caller must ensure AVX2 is available.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32 {
@@ -329,6 +352,27 @@ pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32
         std::arch::x86_64::_mm256_or_si256(is_lf, is_cr),
     );
     std::arch::x86_64::_mm256_movemask_epi8(any) as u32
+}
+
+/// Classify 16 bytes simultaneously as whitespace using NEON.
+/// Returns a 16-bit bitmask in the low bits where 1 = whitespace.
+///
+/// # Safety
+/// The caller must ensure NEON is available.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn classify_whitespace_neon(input: std::arch::aarch64::uint8x16_t) -> u32 {
+    unsafe {
+        let is_space = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x20));
+        let is_tab = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x09));
+        let is_lf = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0A));
+        let is_cr = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0D));
+        let any = std::arch::aarch64::vorrq_u8(
+            std::arch::aarch64::vorrq_u8(is_space, is_tab),
+            std::arch::aarch64::vorrq_u8(is_lf, is_cr),
+        );
+        neon_movemask_u8(any)
+    }
 }
 
 /// Skip whitespace in bulk using SIMD
@@ -349,6 +393,23 @@ pub fn skip_whitespace_simd(input: &[u8], start: usize) -> usize {
                     }
                 }
                 pos += 32;
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            while pos + 16 <= len {
+                unsafe {
+                    let simd_input = SimdInput::load(input[pos..].as_ptr());
+                    let ws_mask = classify_whitespace_neon(simd_input.v0);
+                    let non_ws = (!ws_mask) & 0xFFFF;
+                    if non_ws != 0 {
+                        return pos + non_ws.trailing_zeros() as usize;
+                    }
+                }
+                pos += 16;
             }
         }
     }
@@ -384,12 +445,34 @@ pub fn eof_simd(input: &[u8], position: usize) -> bool {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            while pos + 16 <= remaining.len() {
+                unsafe {
+                    let simd_input = SimdInput::load(remaining[pos..].as_ptr());
+                    if !simd_input.is_ascii() {
+                        return false; // Non-ASCII = not EOF
+                    }
+                    let ws_mask = classify_whitespace_neon(simd_input.v0);
+                    if ws_mask != 0xFFFF {
+                        return false; // Non-whitespace ASCII
+                    }
+                }
+                pos += 16;
+            }
+        }
+    }
+
     // Scalar tail
     remaining[pos..].iter().all(|b| b.is_ascii_whitespace())
 }
 
 /// SIMD-accelerated attribute boundary scanning
 /// Returns positions of: quotes, equals, whitespace, and '>'
+///
+/// # Safety
+/// The caller must ensure AVX2 is available.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn scan_attribute_boundaries_avx2(
@@ -419,6 +502,32 @@ pub unsafe fn scan_attribute_boundaries_avx2(
             std::arch::x86_64::_mm256_movemask_epi8(equals) as u32,
             classify_whitespace_avx2(input),
             std::arch::x86_64::_mm256_movemask_epi8(gt) as u32,
+        )
+    }
+}
+
+/// SIMD-accelerated attribute boundary scanning for NEON.
+/// Returns low 16-bit masks for: quotes, equals, whitespace, and '>'.
+///
+/// # Safety
+/// The caller must ensure NEON is available.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn scan_attribute_boundaries_neon(
+    input: std::arch::aarch64::uint8x16_t,
+) -> (u32, u32, u32, u32) {
+    unsafe {
+        let quotes = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(b'"'));
+        let singles = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(b'\''));
+        let equals = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(b'='));
+        let gt = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(b'>'));
+        let quote_mask = std::arch::aarch64::vorrq_u8(quotes, singles);
+
+        (
+            neon_movemask_u8(quote_mask),
+            neon_movemask_u8(equals),
+            classify_whitespace_neon(input),
+            neon_movemask_u8(gt),
         )
     }
 }
@@ -459,6 +568,20 @@ pub fn index_structural_characters(input: &[u8]) -> Vec<u32> {
                     bitmask_to_indexes(mask1, (pos + 32) as u32, &mut indexes);
                 }
                 pos += 64;
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            while pos + 16 <= len {
+                unsafe {
+                    let chunk = SimdInput::load(input[pos..].as_ptr());
+                    let mask = chunk.eq(b'<') | chunk.eq(b'>') | chunk.eq(b'"') | chunk.eq(b'\'');
+                    bitmask_to_indexes(mask, pos as u32, &mut indexes);
+                }
+                pos += 16;
             }
         }
     }
@@ -577,9 +700,9 @@ pub fn scan_attributes_scalar(input: &[u8], start: usize) -> AttributeScanResult
         gt: 0,
     };
     let end = (start + 32).min(input.len());
-    for i in start..end {
-        let bit = 1u32 << (i - start);
-        match input[i] {
+    for (offset, byte) in input[start..end].iter().copied().enumerate() {
+        let bit = 1u32 << offset;
+        match byte {
             b'"' | b'\'' => result.quotes |= bit,
             b'=' => result.equals |= bit,
             b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
@@ -600,7 +723,7 @@ impl ScannerBackend for Avx2Scanner {
 
     fn find_tag_open(&self, input: &[u8], start: usize) -> usize {
         // Use SIMD to find '<'
-        find_any_of_32(input, start, &[b'<', 0, 0, 0])
+        find_any_of_32(input, start, &[b'<', b'<', b'<', b'<'])
     }
 
     fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
@@ -622,25 +745,7 @@ impl ScannerBackend for Avx2Scanner {
             }
         }
 
-        // Fallback: scalar
-        let mut result = AttributeScanResult {
-            quotes: 0,
-            equals: 0,
-            whitespace: 0,
-            gt: 0,
-        };
-        let end = (start + 32).min(input.len());
-        for i in start..end {
-            let bit = 1u32 << (i - start);
-            match input[i] {
-                b'"' | b'\'' => result.quotes |= bit,
-                b'=' => result.equals |= bit,
-                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
-                b'>' => result.gt |= bit,
-                _ => {}
-            }
-        }
-        result
+        scan_attributes_scalar(input, start)
     }
 
     fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
@@ -670,25 +775,7 @@ impl ScannerBackend for Sse42Scanner {
     }
 
     fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
-        // Scalar fallback for SSE4.2
-        let mut result = AttributeScanResult {
-            quotes: 0,
-            equals: 0,
-            whitespace: 0,
-            gt: 0,
-        };
-        let end = (start + 32).min(input.len());
-        for i in start..end {
-            let bit = 1u32 << (i - start);
-            match input[i] {
-                b'"' | b'\'' => result.quotes |= bit,
-                b'=' => result.equals |= bit,
-                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
-                b'>' => result.gt |= bit,
-                _ => {}
-            }
-        }
-        result
+        scan_attributes_scalar(input, start)
     }
 
     fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
@@ -706,32 +793,28 @@ impl ScannerBackend for NeonScanner {
 
     fn find_tag_open(&self, input: &[u8], start: usize) -> usize {
         // Use SIMD to find '<'
-        find_any_of_32(input, start, &[b'<', 0, 0, 0])
+        find_any_of_32(input, start, &[b'<', b'<', b'<', b'<'])
     }
 
     fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
-        // Scalar fallback for NEON
-        let mut result = AttributeScanResult {
-            quotes: 0,
-            equals: 0,
-            whitespace: 0,
-            gt: 0,
-        };
-        let end = (start + 32).min(input.len());
-        for i in start..end {
-            let bit = 1u32 << (i - start);
-            match input[i] {
-                b'"' | b'\'' => result.quotes |= bit,
-                b'=' => result.equals |= bit,
-                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
-                b'>' => result.gt |= bit,
-                _ => {}
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                return unsafe { scan_attributes_neon(input, start) };
             }
         }
-        result
+
+        scan_attributes_scalar(input, start)
     }
 
     fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                return unsafe { find_attribute_boundary_neon(input, start) };
+            }
+        }
+
         find_attribute_boundary_scalar(input, start)
     }
 }
@@ -752,25 +835,7 @@ impl ScannerBackend for ScalarScanner {
     }
 
     fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
-        // Scalar fallback
-        let mut result = AttributeScanResult {
-            quotes: 0,
-            equals: 0,
-            whitespace: 0,
-            gt: 0,
-        };
-        let end = (start + 32).min(input.len());
-        for i in start..end {
-            let bit = 1u32 << (i - start);
-            match input[i] {
-                b'"' | b'\'' => result.quotes |= bit,
-                b'=' => result.equals |= bit,
-                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
-                b'>' => result.gt |= bit,
-                _ => {}
-            }
-        }
-        result
+        scan_attributes_scalar(input, start)
     }
 
     fn find_attribute_boundary(&self, input: &[u8], start: usize) -> Option<BoundaryHit> {
@@ -820,17 +885,94 @@ unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<Bou
     }
 }
 
+/// NEON implementation: scan 16-byte chunks to find the first attribute boundary.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn find_attribute_boundary_neon(input: &[u8], start: usize) -> Option<BoundaryHit> {
+    unsafe {
+        let len = input.len();
+        let mut pos = start;
+
+        while pos + 16 <= len {
+            let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
+            let (quotes, equals, whitespace, gt) = scan_attribute_boundaries_neon(data);
+            let combined = quotes | equals | whitespace | gt;
+
+            if combined != 0 {
+                let bit = combined.trailing_zeros() as usize;
+                let abs_pos = pos + bit;
+                let mask_bit = 1u32 << bit;
+                let kind = if gt & mask_bit != 0 {
+                    BoundaryKind::Gt
+                } else if quotes & mask_bit != 0 {
+                    BoundaryKind::Quote
+                } else if equals & mask_bit != 0 {
+                    BoundaryKind::Equals
+                } else {
+                    BoundaryKind::Whitespace
+                };
+                return Some(BoundaryHit {
+                    position: abs_pos,
+                    kind,
+                });
+            }
+            pos += 16;
+        }
+
+        find_attribute_boundary_scalar(input, pos)
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn scan_attributes_neon(input: &[u8], start: usize) -> AttributeScanResult {
+    unsafe {
+        let mut result = AttributeScanResult {
+            quotes: 0,
+            equals: 0,
+            whitespace: 0,
+            gt: 0,
+        };
+        let limit = (start + 32).min(input.len());
+        let mut pos = start;
+
+        while pos + 16 <= limit {
+            let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
+            let (quotes, equals, whitespace, gt) = scan_attribute_boundaries_neon(data);
+            let shift = (pos - start) as u32;
+            result.quotes |= quotes << shift;
+            result.equals |= equals << shift;
+            result.whitespace |= whitespace << shift;
+            result.gt |= gt << shift;
+            pos += 16;
+        }
+
+        for (offset, byte) in input[pos..limit].iter().copied().enumerate() {
+            let bit = 1u32 << (pos + offset - start);
+            match byte {
+                b'"' | b'\'' => result.quotes |= bit,
+                b'=' => result.equals |= bit,
+                b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
+                b'>' => result.gt |= bit,
+                _ => {}
+            }
+        }
+
+        result
+    }
+}
+
 /// Scalar fallback for finding the first attribute boundary character
 pub fn find_attribute_boundary_scalar(input: &[u8], start: usize) -> Option<BoundaryHit> {
-    for i in start..input.len() {
-        let kind = match input[i] {
+    for (position, byte) in input.iter().copied().enumerate().skip(start) {
+        let kind = match byte {
             b'"' | b'\'' => BoundaryKind::Quote,
             b'=' => BoundaryKind::Equals,
             b' ' | b'\t' | b'\n' | b'\r' => BoundaryKind::Whitespace,
             b'>' => BoundaryKind::Gt,
             _ => continue,
         };
-        return Some(BoundaryHit { position: i, kind });
+        return Some(BoundaryHit { position, kind });
     }
     None
 }
@@ -901,12 +1043,12 @@ mod tests {
         let input = b"<div class=\"test\">hello</div>";
         let indexes = index_structural_characters(input);
         assert!(!indexes.is_empty());
-        assert!(indexes.contains(&(0 as u32))); // < at start
-        assert!(indexes.contains(&(11 as u32))); // " after =
-        assert!(indexes.contains(&(16 as u32))); // " before >
-        assert!(indexes.contains(&(17 as u32))); // >
-        assert!(indexes.contains(&(23 as u32))); // < before /
-        assert!(indexes.contains(&(28 as u32))); // > at end
+        assert!(indexes.contains(&0_u32)); // < at start
+        assert!(indexes.contains(&11_u32)); // " after =
+        assert!(indexes.contains(&16_u32)); // " before >
+        assert!(indexes.contains(&17_u32)); // >
+        assert!(indexes.contains(&23_u32)); // < before /
+        assert!(indexes.contains(&28_u32)); // > at end
     }
 
     #[test]
@@ -968,6 +1110,26 @@ mod tests {
                 let hit = hit.unwrap();
                 assert_eq!(input[hit.position], b'\"');
                 assert_eq!(hit.kind, BoundaryKind::Quote);
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_attribute_boundary_neon_if_available() {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                let input = b"this_is_a_long_attribute_name_that_exceeds_sixteen_bytes=";
+                let hit = unsafe { find_attribute_boundary_neon(input, 0) };
+                let hit = hit.unwrap();
+                assert_eq!(input[hit.position], b'=');
+                assert_eq!(hit.kind, BoundaryKind::Equals);
+
+                let input = b"short_key=value_rest";
+                let hit = unsafe { find_attribute_boundary_neon(input, 0) };
+                let hit = hit.unwrap();
+                assert_eq!(hit.position, 9);
+                assert_eq!(hit.kind, BoundaryKind::Equals);
             }
         }
     }
