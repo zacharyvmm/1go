@@ -67,9 +67,7 @@ impl<'html> XHtmlElement<'html> {
     }
 
     pub fn is_self_closing(&self) -> bool {
-        // Use SWAR-based tag name check for all HTML void elements.
-        // This compares 4 bytes at a time using bit tricks instead of逐个 character comparison.
-        if scah_reader::simd::is_self_closing_tag(self.name.as_bytes()) {
+        if is_html_void_element(self.name) {
             return true;
         }
         if let Some(last_attribute) = self.attributes.last() {
@@ -255,6 +253,32 @@ impl<'html> XHtmlElement<'html> {
     }
 }
 
+#[inline]
+fn is_html_void_element(name: &str) -> bool {
+    match name.len() {
+        2 => name.eq_ignore_ascii_case("br") || name.eq_ignore_ascii_case("hr"),
+        3 => {
+            name.eq_ignore_ascii_case("img")
+                || name.eq_ignore_ascii_case("col")
+                || name.eq_ignore_ascii_case("wbr")
+        }
+        4 => {
+            name.eq_ignore_ascii_case("area")
+                || name.eq_ignore_ascii_case("base")
+                || name.eq_ignore_ascii_case("link")
+                || name.eq_ignore_ascii_case("meta")
+        }
+        5 => {
+            name.eq_ignore_ascii_case("embed")
+                || name.eq_ignore_ascii_case("input")
+                || name.eq_ignore_ascii_case("param")
+                || name.eq_ignore_ascii_case("track")
+        }
+        6 => name.eq_ignore_ascii_case("source"),
+        _ => false,
+    }
+}
+
 impl<'html> IElement<'html> for XHtmlElement<'html> {
     fn name(&self) -> &'html str {
         self.name
@@ -273,49 +297,22 @@ impl<'html> IElement<'html> for XHtmlElement<'html> {
     }
 }
 
-// Table-driven dispatch for tag parsing.
-// Indexed by the first byte after '<' (+ whitespace skip), this replaces
-// a two-branch if-else chain with a single table lookup.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum TagDispatch {
-    Open,
-    Close,
-    Comment,
-}
-
-/// Lookup table: maps byte value → tag dispatch action.
-/// Default is `Open`; '/' maps to `Close`; '!' maps to `Comment`.
-const TAG_DISPATCH_TABLE: [TagDispatch; 256] = {
-    let mut table = [TagDispatch::Open; 256];
-    table[b'/' as usize] = TagDispatch::Close;
-    table[b'!' as usize] = TagDispatch::Comment;
-    table
-};
-
 impl<'a> XHtmlTag<'a> {
     pub fn from(reader: &mut Reader<'a>) -> Option<Self> {
         reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', b'<']);
         if let Some(character) = reader.peek() {
-            // Table-driven dispatch: single indexed load instead of two comparisons.
-            match TAG_DISPATCH_TABLE[character as usize] {
-                TagDispatch::Close => {
-                    let start = reader.get_position() + 1;
-                    reader.next_until(b'>');
+            if character == b'/' {
+                let start = reader.get_position() + 1;
+                reader.next_until(b'>');
 
-                    let end = reader.get_position();
-                    reader.skip();
+                let end = reader.get_position();
+                reader.skip();
 
-                    return Some(Self::Close(reader.slice(start..end).trim()));
-                }
-                TagDispatch::Comment => {
-                    reader.next_until(b'>');
-                    reader.skip();
-                    return None;
-                }
-                TagDispatch::Open => {
-                    // Fall through to return Open below
-                }
+                return Some(Self::Close(reader.slice(start..end).trim()));
+            } else if character == b'!' {
+                reader.next_until(b'>');
+                reader.skip();
+                return None;
             }
         }
         Some(Self::Open)

@@ -2,50 +2,64 @@ use std::ops::Range;
 
 pub mod simd;
 
-pub use simd::{BoundaryHit, BoundaryKind};
 use simd::{
-    CpuFeatures, ScannerBackend, create_scanner, eof_simd, eq_ignore_case_4, find_any_of_32,
-    is_self_closing_tag, skip_whitespace_simd,
+    AttributeScanResult, CpuFeatures, ScannerBackend, create_scanner, eof_simd, eq_ignore_case_4,
+    find_any_of_32, find_attribute_boundary_scalar, find_tag_open_scalar, is_self_closing_tag,
+    scan_attributes_scalar, skip_whitespace_simd as skip_whitespace_simd_impl,
 };
+pub use simd::{BoundaryHit, BoundaryKind};
 
 pub struct Reader<'a> {
     source: &'a [u8],
     position: usize,
-    scanner: Box<dyn ScannerBackend>,
-    cpu_features: CpuFeatures,
+    scanner: Option<Box<dyn ScannerBackend>>,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(input: &'a str) -> Self {
-        let cpu_features = CpuFeatures::detect();
-        let scanner = create_scanner();
-        Self {
-            source: input.as_bytes(),
-            position: 0,
-            scanner,
-            cpu_features,
-        }
+        Self::from_parts(input.as_bytes(), 0, false)
+    }
+
+    pub fn new_with_simd(input: &'a str) -> Self {
+        Self::from_parts(input.as_bytes(), 0, true)
     }
 
     pub fn from_bytes(input: &'a [u8]) -> Self {
-        let cpu_features = CpuFeatures::detect();
-        let scanner = create_scanner();
+        Self::from_parts(input, 0, false)
+    }
+
+    pub fn from_bytes_with_simd(input: &'a [u8]) -> Self {
+        Self::from_parts(input, 0, true)
+    }
+
+    fn from_parts(source: &'a [u8], position: usize, enable_scanner: bool) -> Self {
+        let scanner = if enable_scanner && CpuFeatures::get().has_simd() {
+            Some(create_scanner())
+        } else {
+            None
+        };
         Self {
-            source: input,
-            position: 0,
+            source,
+            position: position.min(source.len()),
             scanner,
-            cpu_features,
         }
     }
 
     /// Get CPU features information
     pub fn cpu_features(&self) -> &CpuFeatures {
-        &self.cpu_features
+        CpuFeatures::get()
     }
 
     /// Get scanner backend name
     pub fn scanner_name(&self) -> &str {
-        self.scanner.name()
+        self.scanner
+            .as_ref()
+            .map_or("scalar", |scanner| scanner.name())
+    }
+
+    /// Whether this reader has the AVX2 attribute-boundary scanner enabled.
+    pub fn has_simd_attribute_boundary(&self) -> bool {
+        self.scanner.is_some() && self.cpu_features().has_avx2
     }
 
     #[inline]
@@ -106,9 +120,23 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// SIMD-accelerated whitespace skipping
+    /// Scalar whitespace skipping for the classic parser hot path.
+    #[inline]
     pub fn skip_whitespace(&mut self) {
-        self.position = skip_whitespace_simd(self.source, self.position);
+        while self.position < self.source.len()
+            && matches!(self.source[self.position], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            self.position += 1;
+        }
+    }
+
+    /// SIMD-accelerated whitespace skipping for SIMD-aware parsing paths.
+    pub fn skip_whitespace_simd(&mut self) {
+        if self.scanner.is_some() && self.cpu_features().has_avx2 {
+            self.position = skip_whitespace_simd_impl(self.source, self.position);
+        } else {
+            self.skip_whitespace();
+        }
     }
 
     pub fn eof(&self) -> bool {
@@ -151,24 +179,35 @@ impl<'a> Reader<'a> {
 
     /// Use SIMD scanner to find tag open
     pub fn find_tag_open(&self) -> usize {
-        self.scanner.find_tag_open(self.source, self.position)
+        self.scanner.as_ref().map_or_else(
+            || find_tag_open_scalar(self.source, self.position),
+            |scanner| scanner.find_tag_open(self.source, self.position),
+        )
     }
 
     /// Use SIMD scanner to scan attributes
-    pub fn scan_attributes(&self) -> simd::AttributeScanResult {
-        self.scanner.scan_attributes(self.source, self.position)
+    pub fn scan_attributes(&self) -> AttributeScanResult {
+        self.scanner.as_ref().map_or_else(
+            || scan_attributes_scalar(self.source, self.position),
+            |scanner| scanner.scan_attributes(self.source, self.position),
+        )
     }
 
     /// Use SIMD to find the first attribute boundary character from current position.
     /// Returns the position and type of the boundary character (quote, `=`, whitespace, or `>`).
     pub fn find_attribute_boundary(&self) -> Option<BoundaryHit> {
-        self.scanner
-            .find_attribute_boundary(self.source, self.position)
+        self.scanner.as_ref().map_or_else(
+            || find_attribute_boundary_scalar(self.source, self.position),
+            |scanner| scanner.find_attribute_boundary(self.source, self.position),
+        )
     }
 
     /// Find attribute boundary starting from a specific position
     pub fn find_attribute_boundary_from(&self, start: usize) -> Option<BoundaryHit> {
-        self.scanner.find_attribute_boundary(self.source, start)
+        self.scanner.as_ref().map_or_else(
+            || find_attribute_boundary_scalar(self.source, start),
+            |scanner| scanner.find_attribute_boundary(self.source, start),
+        )
     }
 
     /// Set the reader position directly
@@ -204,14 +243,11 @@ impl<'a> Reader<'a> {
     /// at the given position. Useful for the tape parser to create
     /// readers at specific structural positions.
     pub fn from_position(source: &'a [u8], position: usize) -> Self {
-        let cpu_features = CpuFeatures::detect();
-        let scanner = create_scanner();
-        Self {
-            source,
-            position: position.min(source.len()),
-            scanner,
-            cpu_features,
-        }
+        Self::from_parts(source, position, false)
+    }
+
+    pub fn from_position_with_simd(source: &'a [u8], position: usize) -> Self {
+        Self::from_parts(source, position, true)
     }
 }
 

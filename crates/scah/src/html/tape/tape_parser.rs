@@ -426,7 +426,7 @@ where
 
         let tape = std::mem::take(&mut self.tape);
         let source_len = self.source.len();
-        let mut reader = Reader::from_bytes(self.source);
+        let mut reader = Reader::from_bytes_with_simd(self.source);
 
         for entry in &tape {
             let entry = *entry;
@@ -444,7 +444,7 @@ where
                     reader.set_position(entry.offset as usize + 1); // Skip '<'
 
                     // Skip whitespace and get tag name
-                    reader.skip_whitespace();
+                    reader.skip_whitespace_simd();
 
                     // Parse the element using existing infrastructure
                     self.element.from(&mut reader, &mut self.store.attributes);

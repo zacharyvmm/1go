@@ -4,6 +4,8 @@
 //! at once, inspired by simdjson's architecture. Supports AVX2, SSE2, and NEON
 //! with runtime CPU detection and scalar fallbacks.
 
+use std::sync::OnceLock;
+
 /// Runtime CPU feature detection
 #[derive(Debug, Clone, Copy)]
 pub struct CpuFeatures {
@@ -39,6 +41,12 @@ impl CpuFeatures {
     /// Check if SIMD is available
     pub fn has_simd(&self) -> bool {
         self.has_avx2 || self.has_sse42 || self.has_neon || self.has_avx512
+    }
+
+    /// Return the process-wide CPU feature snapshot.
+    pub fn get() -> &'static Self {
+        static FEATURES: OnceLock<CpuFeatures> = OnceLock::new();
+        FEATURES.get_or_init(Self::detect)
     }
 }
 
@@ -536,7 +544,7 @@ pub fn is_self_closing_tag(name: &[u8]) -> bool {
 
 /// Select best backend at runtime
 pub fn create_scanner() -> Box<dyn ScannerBackend> {
-    let features = CpuFeatures::detect();
+    let features = CpuFeatures::get();
     if features.has_avx2 {
         Box::new(Avx2Scanner)
     } else if features.has_sse42 {
@@ -546,6 +554,40 @@ pub fn create_scanner() -> Box<dyn ScannerBackend> {
     } else {
         Box::new(ScalarScanner)
     }
+}
+
+/// Scalar tag-open search used when a Reader has no SIMD scanner attached.
+#[inline]
+pub fn find_tag_open_scalar(input: &[u8], start: usize) -> usize {
+    if start >= input.len() {
+        return input.len();
+    }
+
+    memchr::memchr(b'<', &input[start..])
+        .map(|pos| start + pos)
+        .unwrap_or(input.len())
+}
+
+/// Scalar scan for attribute boundary masks over the next 32 bytes.
+pub fn scan_attributes_scalar(input: &[u8], start: usize) -> AttributeScanResult {
+    let mut result = AttributeScanResult {
+        quotes: 0,
+        equals: 0,
+        whitespace: 0,
+        gt: 0,
+    };
+    let end = (start + 32).min(input.len());
+    for i in start..end {
+        let bit = 1u32 << (i - start);
+        match input[i] {
+            b'"' | b'\'' => result.quotes |= bit,
+            b'=' => result.equals |= bit,
+            b' ' | b'\t' | b'\n' | b'\r' => result.whitespace |= bit,
+            b'>' => result.gt |= bit,
+            _ => {}
+        }
+    }
+    result
 }
 
 /// AVX2 scanner implementation
@@ -779,7 +821,7 @@ unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<Bou
 }
 
 /// Scalar fallback for finding the first attribute boundary character
-fn find_attribute_boundary_scalar(input: &[u8], start: usize) -> Option<BoundaryHit> {
+pub fn find_attribute_boundary_scalar(input: &[u8], start: usize) -> Option<BoundaryHit> {
     for i in start..input.len() {
         let kind = match input[i] {
             b'"' | b'\'' => BoundaryKind::Quote,

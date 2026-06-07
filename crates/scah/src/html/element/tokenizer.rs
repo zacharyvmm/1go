@@ -11,10 +11,19 @@ const DOUBLEQUOTE: u8 = b'"';
 const SINGLEQUOTE: u8 = b'\'';
 const EQUAL: u8 = b'=';
 const END_OF_ELEMENT: u8 = b'>';
+const UNQUOTED_BOUNDARIES: [u8; 8] = [
+    b' ',
+    b'\t',
+    b'\n',
+    b'\r',
+    DOUBLEQUOTE,
+    SINGLEQUOTE,
+    EQUAL,
+    END_OF_ELEMENT,
+];
 
 impl<'a> ElementAttributeToken<'a> {
     pub fn next(reader: &mut Reader<'a>) -> Option<Self> {
-        // SIMD-accelerated whitespace skip
         reader.skip_whitespace();
 
         let start_pos = reader.get_position();
@@ -47,20 +56,29 @@ impl<'a> ElementAttributeToken<'a> {
                 reader.skip(); // consume '>' so the parser doesn't re-read it
                 None
             }
-            _ => {
-                // SIMD-accelerated boundary scanning for unquoted tokens.
-                // Instead of byte-at-a-time next_until_list, use the SIMD scanner
-                // to find the first boundary character (quote, '=', whitespace, '>')
-                // in 32-byte chunks.
-                Self::scan_unquoted_token(reader, start_pos)
+            _ if reader.has_simd_attribute_boundary() => {
+                Self::scan_unquoted_token_simd(reader, start_pos)
             }
+            _ => Self::scan_unquoted_token_scalar(reader, start_pos),
+        }
+    }
+
+    /// Scan an unquoted attribute name or value using the scalar fast path.
+    #[inline]
+    fn scan_unquoted_token_scalar(reader: &mut Reader<'a>, start_pos: usize) -> Option<Self> {
+        reader.next_until_list(&UNQUOTED_BOUNDARIES);
+        let end = reader.get_position();
+        if start_pos >= end {
+            None
+        } else {
+            Some(Self::String(reader.slice(start_pos..end)))
         }
     }
 
     /// Scan an unquoted attribute name or value using SIMD boundary detection.
     /// Returns the token spanning from `start_pos` to the first boundary character.
     #[inline]
-    fn scan_unquoted_token(reader: &mut Reader<'a>, start_pos: usize) -> Option<Self> {
+    fn scan_unquoted_token_simd(reader: &mut Reader<'a>, start_pos: usize) -> Option<Self> {
         // Use SIMD-accelerated boundary finding from the reader.
         // This processes 32 bytes at a time via AVX2 (or falls back to scalar).
         match reader.find_attribute_boundary() {
