@@ -16,14 +16,14 @@
 //! - Cleaner code organization
 //! - Potential for parallel tokenization in the future
 
-use super::structural_scanner::{StructuralIndex, FusedTapeBuilder};
-use super::tape_entry::{TapeEntry, TapeEntryKind, CompactAttrEntry};
+use super::structural_scanner::{FusedTapeBuilder, StructuralIndex};
+use super::tape_entry::{CompactAttrEntry, TapeEntry, TapeEntryKind};
 use crate::QuerySpec;
+use crate::Reader;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
 use crate::html::element::builder::XHtmlElement;
 use crate::html::open_elements::{OpenElement, OpenElementStack};
 use crate::store::Store;
-use crate::Reader;
 
 /// A tape-based HTML parser that implements the two-stage pipeline
 ///
@@ -207,7 +207,8 @@ where
     /// The `Store` containing all matched elements
     pub fn parse_fused_parallel_direct(mut self) -> Store<'html, 'query> {
         // Direct parallel writing: no merge overhead
-        let (tape, compact_attrs, tag_attr_map) = FusedTapeBuilder::build_parallel_direct(self.source);
+        let (tape, compact_attrs, tag_attr_map) =
+            FusedTapeBuilder::build_parallel_direct(self.source);
         self.tape = tape;
         self.compact_attributes = compact_attrs;
         self.tag_attr_map = tag_attr_map;
@@ -232,7 +233,8 @@ where
     /// The `Store` containing all matched elements
     pub fn parse_fused_parallel_adaptive(mut self) -> Store<'html, 'query> {
         // Adaptive parallel processing with optimal chunk sizing
-        let (tape, compact_attrs, tag_attr_map) = FusedTapeBuilder::build_parallel_adaptive(self.source);
+        let (tape, compact_attrs, tag_attr_map) =
+            FusedTapeBuilder::build_parallel_adaptive(self.source);
         self.tape = tape;
         self.compact_attributes = compact_attrs;
         self.tag_attr_map = tag_attr_map;
@@ -257,11 +259,8 @@ where
             if let Some(struct_pos) = self.structural_index.next_position_after(pos) {
                 // Add text entry for content before the structural character
                 if struct_pos > pos {
-                    self.tape.push(TapeEntry::new(
-                        TapeEntryKind::Text,
-                        pos,
-                        struct_pos - pos,
-                    ));
+                    self.tape
+                        .push(TapeEntry::new(TapeEntryKind::Text, pos, struct_pos - pos));
                 }
 
                 let ch = input[struct_pos as usize];
@@ -298,7 +297,8 @@ where
             } else {
                 // No more structural characters - remaining is text
                 if pos < len {
-                    self.tape.push(TapeEntry::new(TapeEntryKind::Text, pos, len - pos));
+                    self.tape
+                        .push(TapeEntry::new(TapeEntryKind::Text, pos, len - pos));
                 }
                 break;
             }
@@ -346,7 +346,9 @@ where
             }
         } else if next_ch == b'!' {
             // Comment or doctype: <!...>
-            if pos + 3 < len && input[(pos + 2) as usize] == b'-' && input[(pos + 3) as usize] == b'-'
+            if pos + 3 < len
+                && input[(pos + 2) as usize] == b'-'
+                && input[(pos + 3) as usize] == b'-'
             {
                 // Comment: <!--...-->
                 let mut end = pos + 4;
@@ -355,11 +357,7 @@ where
                         && input[(end + 1) as usize] == b'-'
                         && input[(end + 2) as usize] == b'>'
                     {
-                        return Some(TapeEntry::new(
-                            TapeEntryKind::Comment,
-                            pos,
-                            end - pos + 3,
-                        ));
+                        return Some(TapeEntry::new(TapeEntryKind::Comment, pos, end - pos + 3));
                     }
                     end += 1;
                 }
@@ -435,13 +433,9 @@ where
             match entry.kind {
                 TapeEntryKind::OpenTag | TapeEntryKind::SelfClosingTag => {
                     // Push text content before this tag if we have a text_start
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                    {
-                        if let Some(position) = self
-                            .store
-                            .text_content
-                            .push(&reader, entry.offset as usize)
+                    if self.capture_text_content && self.store.text_content.text_start.is_some() {
+                        if let Some(position) =
+                            self.store.text_content.push(&reader, entry.offset as usize)
                         {
                             self.position.text_content_position = position;
                         }
@@ -474,8 +468,7 @@ where
                     self.position.reader_position = entry.end() as usize;
 
                     if is_self_closing {
-                        self.position.element_depth =
-                            self.open_elements.depth().saturating_add(1);
+                        self.position.element_depth = self.open_elements.depth().saturating_add(1);
                     } else {
                         self.open_elements.push(self.element.name);
                         self.position.element_depth = self.open_elements.depth();
@@ -513,13 +506,9 @@ where
                 }
                 TapeEntryKind::CloseTag => {
                     // Push text content before this close tag
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                    {
-                        if let Some(position) = self
-                            .store
-                            .text_content
-                            .push(&reader, entry.offset as usize)
+                    if self.capture_text_content && self.store.text_content.text_start.is_some() {
+                        if let Some(position) =
+                            self.store.text_content.push(&reader, entry.offset as usize)
                         {
                             self.position.text_content_position = position;
                         }
@@ -549,14 +538,10 @@ where
                 }
                 TapeEntryKind::Text => {
                     // Handle text content
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                    {
+                    if self.capture_text_content && self.store.text_content.text_start.is_some() {
                         // Push text from text_start to the end of this text entry
-                        if let Some(position) = self
-                            .store
-                            .text_content
-                            .push(&reader, entry.end() as usize)
+                        if let Some(position) =
+                            self.store.text_content.push(&reader, entry.end() as usize)
                         {
                             self.position.text_content_position = position;
                         }
@@ -602,13 +587,9 @@ where
             match entry.kind {
                 TapeEntryKind::OpenTag | TapeEntryKind::SelfClosingTag => {
                     // Push text content before this tag if we have a text_start
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                    {
-                        if let Some(position) = self
-                            .store
-                            .text_content
-                            .push(&reader, entry.offset as usize)
+                    if self.capture_text_content && self.store.text_content.text_start.is_some() {
+                        if let Some(position) =
+                            self.store.text_content.push(&reader, entry.offset as usize)
                         {
                             self.position.text_content_position = position;
                         }
@@ -652,8 +633,7 @@ where
                     self.position.reader_position = entry.end() as usize;
 
                     if is_self_closing {
-                        self.position.element_depth =
-                            self.open_elements.depth().saturating_add(1);
+                        self.position.element_depth = self.open_elements.depth().saturating_add(1);
                     } else {
                         self.open_elements.push(self.element.name);
                         self.position.element_depth = self.open_elements.depth();
@@ -690,13 +670,9 @@ where
                 }
                 TapeEntryKind::CloseTag => {
                     // Push text content before this close tag
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                    {
-                        if let Some(position) = self
-                            .store
-                            .text_content
-                            .push(&reader, entry.offset as usize)
+                    if self.capture_text_content && self.store.text_content.text_start.is_some() {
+                        if let Some(position) =
+                            self.store.text_content.push(&reader, entry.offset as usize)
                         {
                             self.position.text_content_position = position;
                         }
@@ -726,13 +702,9 @@ where
                 }
                 TapeEntryKind::Text => {
                     // Handle text content
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                    {
-                        if let Some(position) = self
-                            .store
-                            .text_content
-                            .push(&reader, entry.end() as usize)
+                    if self.capture_text_content && self.store.text_content.text_start.is_some() {
+                        if let Some(position) =
+                            self.store.text_content.push(&reader, entry.end() as usize)
                         {
                             self.position.text_content_position = position;
                         }
@@ -910,8 +882,6 @@ where
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,9 +905,7 @@ mod tests {
     #[test]
     fn test_tape_parser_nested() {
         let html = b"<div><section><a href='link'>Link</a></section></div>";
-        let queries = &[
-            Query::all("div section a", Save::all()).unwrap().build(),
-        ];
+        let queries = &[Query::all("div section a", Save::all()).unwrap().build()];
         let selectors = QueryMultiplexer::new(queries);
 
         let parser = TapeParser::new(selectors, html);
@@ -974,9 +942,15 @@ mod tests {
         assert!(!parser.tape().is_empty());
 
         // Should have: open_tag, text, close_tag
-        let has_open = parser.tape().iter().any(|e| e.kind == TapeEntryKind::OpenTag);
+        let has_open = parser
+            .tape()
+            .iter()
+            .any(|e| e.kind == TapeEntryKind::OpenTag);
         let has_text = parser.tape().iter().any(|e| e.kind == TapeEntryKind::Text);
-        let has_close = parser.tape().iter().any(|e| e.kind == TapeEntryKind::CloseTag);
+        let has_close = parser
+            .tape()
+            .iter()
+            .any(|e| e.kind == TapeEntryKind::CloseTag);
 
         assert!(has_open);
         assert!(has_text);
@@ -995,7 +969,10 @@ mod tests {
         let anchors: Vec<_> = store.get("a[href]").unwrap().collect();
         assert_eq!(anchors.len(), 1);
         assert_eq!(anchors[0].name, "a");
-        assert_eq!(anchors[0].attribute(&store, "href"), Some("https://example.com"));
+        assert_eq!(
+            anchors[0].attribute(&store, "href"),
+            Some("https://example.com")
+        );
         assert_eq!(anchors[0].attribute(&store, "target"), Some("_blank"));
     }
 
@@ -1136,16 +1113,17 @@ mod tests {
 
         let anchors: Vec<_> = store.get("a[href]").unwrap().collect();
         assert_eq!(anchors.len(), 1);
-        assert_eq!(anchors[0].attribute(&store, "href"), Some("https://example.com"));
+        assert_eq!(
+            anchors[0].attribute(&store, "href"),
+            Some("https://example.com")
+        );
         assert_eq!(anchors[0].attribute(&store, "target"), Some("_blank"));
     }
 
     #[test]
     fn test_parse_fused_parallel_nested() {
         let html = b"<div><section><a href='link'>Link</a></section></div>";
-        let queries = &[
-            Query::all("div section a", Save::all()).unwrap().build(),
-        ];
+        let queries = &[Query::all("div section a", Save::all()).unwrap().build()];
         let selectors = QueryMultiplexer::new(queries);
 
         let parser = TapeParser::new(selectors, html);
@@ -1175,16 +1153,11 @@ mod tests {
         let mut html = String::with_capacity(200 * 1024);
         html.push_str("<html><body>");
         for i in 0..2000 {
-            html.push_str(&format!(
-                "<div data-index='{}'>content{}</div>",
-                i, i
-            ));
+            html.push_str(&format!("<div data-index='{}'>content{}</div>", i, i));
         }
         html.push_str("</body></html>");
 
-        let queries = &[
-            Query::all("div", Save::all()).unwrap().build(),
-        ];
+        let queries = &[Query::all("div", Save::all()).unwrap().build()];
 
         // Parse with sequential fused
         let selectors_seq = QueryMultiplexer::new(queries);
@@ -1200,8 +1173,19 @@ mod tests {
         let divs_seq: Vec<_> = store_seq.get("div").unwrap().collect();
         let divs_par: Vec<_> = store_par.get("div").unwrap().collect();
 
-        assert_eq!(divs_seq.len(), divs_par.len(), "Sequential found {} elements, parallel found {}", divs_seq.len(), divs_par.len());
-        assert_eq!(divs_seq.len(), 2000, "Expected 2000 divs, found {}", divs_seq.len());
+        assert_eq!(
+            divs_seq.len(),
+            divs_par.len(),
+            "Sequential found {} elements, parallel found {}",
+            divs_seq.len(),
+            divs_par.len()
+        );
+        assert_eq!(
+            divs_seq.len(),
+            2000,
+            "Expected 2000 divs, found {}",
+            divs_seq.len()
+        );
 
         // Check first and last elements match
         assert_eq!(divs_seq[0].name, divs_par[0].name);
@@ -1249,16 +1233,17 @@ mod tests {
 
         let anchors: Vec<_> = store.get("a[href]").unwrap().collect();
         assert_eq!(anchors.len(), 1);
-        assert_eq!(anchors[0].attribute(&store, "href"), Some("https://example.com"));
+        assert_eq!(
+            anchors[0].attribute(&store, "href"),
+            Some("https://example.com")
+        );
         assert_eq!(anchors[0].attribute(&store, "target"), Some("_blank"));
     }
 
     #[test]
     fn test_parse_fused_parallel_direct_nested() {
         let html = b"<div><section><a href='link'>Link</a></section></div>";
-        let queries = &[
-            Query::all("div section a", Save::all()).unwrap().build(),
-        ];
+        let queries = &[Query::all("div section a", Save::all()).unwrap().build()];
         let selectors = QueryMultiplexer::new(queries);
 
         let parser = TapeParser::new(selectors, html);
@@ -1288,16 +1273,11 @@ mod tests {
         let mut html = String::with_capacity(200 * 1024);
         html.push_str("<html><body>");
         for i in 0..2000 {
-            html.push_str(&format!(
-                "<div data-index='{}'>content{}</div>",
-                i, i
-            ));
+            html.push_str(&format!("<div data-index='{}'>content{}</div>", i, i));
         }
         html.push_str("</body></html>");
 
-        let queries = &[
-            Query::all("div", Save::all()).unwrap().build(),
-        ];
+        let queries = &[Query::all("div", Save::all()).unwrap().build()];
 
         // Parse with sequential fused
         let selectors_seq = QueryMultiplexer::new(queries);
@@ -1313,8 +1293,19 @@ mod tests {
         let divs_seq: Vec<_> = store_seq.get("div").unwrap().collect();
         let divs_dir: Vec<_> = store_dir.get("div").unwrap().collect();
 
-        assert_eq!(divs_seq.len(), divs_dir.len(), "Sequential found {} elements, direct parallel found {}", divs_seq.len(), divs_dir.len());
-        assert_eq!(divs_seq.len(), 2000, "Expected 2000 divs, found {}", divs_seq.len());
+        assert_eq!(
+            divs_seq.len(),
+            divs_dir.len(),
+            "Sequential found {} elements, direct parallel found {}",
+            divs_seq.len(),
+            divs_dir.len()
+        );
+        assert_eq!(
+            divs_seq.len(),
+            2000,
+            "Expected 2000 divs, found {}",
+            divs_seq.len()
+        );
 
         // Check first and last elements match
         assert_eq!(divs_seq[0].name, divs_dir[0].name);

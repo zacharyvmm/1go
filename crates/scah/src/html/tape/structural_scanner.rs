@@ -9,9 +9,9 @@
 //! - Falls back to scalar processing for tail bytes
 //! - Produces a dense `Vec<u32>` of positions for cache-friendly Stage 2
 
-use scah_reader::simd::{SimdInput, bitmask_to_indexes};
-use super::tape_entry::{TapeEntry, TapeEntryKind, CompactAttrEntry};
+use super::tape_entry::{CompactAttrEntry, TapeEntry, TapeEntryKind};
 use rayon::prelude::*;
+use scah_reader::simd::{SimdInput, bitmask_to_indexes};
 
 /// Structural characters for HTML tokenization
 ///
@@ -93,10 +93,8 @@ impl StructuralIndex {
                         let in1 = SimdInput::load(input[pos + 32..].as_ptr());
 
                         // Find all structural characters
-                        let mask0 =
-                            in0.eq(b'<') | in0.eq(b'>') | in0.eq(b'"') | in0.eq(b'\'');
-                        let mask1 =
-                            in1.eq(b'<') | in1.eq(b'>') | in1.eq(b'"') | in1.eq(b'\'');
+                        let mask0 = in0.eq(b'<') | in0.eq(b'>') | in0.eq(b'"') | in0.eq(b'\'');
+                        let mask1 = in1.eq(b'<') | in1.eq(b'>') | in1.eq(b'"') | in1.eq(b'\'');
 
                         bitmask_to_indexes(mask0, pos as u32, &mut self.positions);
                         bitmask_to_indexes(mask1, (pos + 32) as u32, &mut self.positions);
@@ -108,8 +106,7 @@ impl StructuralIndex {
                 if pos + 32 <= len {
                     unsafe {
                         let in0 = SimdInput::load(input[pos..].as_ptr());
-                        let mask0 =
-                            in0.eq(b'<') | in0.eq(b'>') | in0.eq(b'"') | in0.eq(b'\'');
+                        let mask0 = in0.eq(b'<') | in0.eq(b'>') | in0.eq(b'"') | in0.eq(b'\'');
                         bitmask_to_indexes(mask0, pos as u32, &mut self.positions);
                     }
                     pos += 32;
@@ -327,7 +324,13 @@ impl FusedTapeBuilder {
                         let _dash_mask = chunk.eq(b'-');
 
                         // Process each set bit in the combined mask
-                        let combined = lt_mask | gt_mask | quote_mask | eq_mask | ws_mask | slash_mask | excl_mask;
+                        let combined = lt_mask
+                            | gt_mask
+                            | quote_mask
+                            | eq_mask
+                            | ws_mask
+                            | slash_mask
+                            | excl_mask;
                         let mut mask = combined;
 
                         while mask != 0 {
@@ -362,7 +365,10 @@ impl FusedTapeBuilder {
                                     } else if slash_mask & bit != 0 && abs_pos == tag_start + 1 {
                                         // Closing tag: </...>
                                         tag_name_start = abs_pos + 1;
-                                    } else if ws_mask & bit != 0 || gt_mask & bit != 0 || slash_mask & bit != 0 {
+                                    } else if ws_mask & bit != 0
+                                        || gt_mask & bit != 0
+                                        || slash_mask & bit != 0
+                                    {
                                         // End of tag name
                                         if tag_name_start == 0 {
                                             tag_name_start = tag_start + 1;
@@ -393,7 +399,8 @@ impl FusedTapeBuilder {
                                 FusedState::AttrName => {
                                     if gt_mask & bit != 0 {
                                         // End of tag
-                                        let _is_close = input.get(tag_start + 1).copied() == Some(b'/');
+                                        let _is_close =
+                                            input.get(tag_start + 1).copied() == Some(b'/');
                                         self.finish_tag(
                                             input,
                                             tag_start,
@@ -504,7 +511,10 @@ impl FusedTapeBuilder {
                                     // Look for --> to end comment
                                     if gt_mask & bit != 0 {
                                         // Check if this is the end of comment -->
-                                        if abs_pos >= 2 && input[abs_pos - 1] == b'-' && input[abs_pos - 2] == b'-' {
+                                        if abs_pos >= 2
+                                            && input[abs_pos - 1] == b'-'
+                                            && input[abs_pos - 2] == b'-'
+                                        {
                                             self.tape.push(TapeEntry::new(
                                                 TapeEntryKind::Comment,
                                                 tag_start as u32,
@@ -565,7 +575,13 @@ impl FusedTapeBuilder {
                         _comment_start = tag_start;
                     } else if ch == b'/' && pos == tag_start + 1 {
                         tag_name_start = pos + 1;
-                    } else if ch == b' ' || ch == b'\t' || ch == b'\n' || ch == b'\r' || ch == b'>' || ch == b'/' {
+                    } else if ch == b' '
+                        || ch == b'\t'
+                        || ch == b'\n'
+                        || ch == b'\r'
+                        || ch == b'>'
+                        || ch == b'/'
+                    {
                         if tag_name_start == 0 {
                             tag_name_start = tag_start + 1;
                         }
@@ -658,7 +674,13 @@ impl FusedTapeBuilder {
                             attr_in_quotes = false;
                         }
                     } else {
-                        if ch == b' ' || ch == b'\t' || ch == b'\n' || ch == b'\r' || ch == b'>' || ch == b'/' {
+                        if ch == b' '
+                            || ch == b'\t'
+                            || ch == b'\n'
+                            || ch == b'\r'
+                            || ch == b'>'
+                            || ch == b'/'
+                        {
                             let attr = CompactAttrEntry::new_unquoted(
                                 attr_key_start as u32,
                                 (attr_key_end - attr_key_start) as u16,
@@ -763,7 +785,8 @@ impl FusedTapeBuilder {
 
         // Record attribute mapping for this tag
         let attr_count = self.attributes.len() - self.current_tag_attr_start;
-        self.tag_attr_map.push((self.current_tag_attr_start, attr_count));
+        self.tag_attr_map
+            .push((self.current_tag_attr_start, attr_count));
         self.current_tag_attr_start = self.attributes.len();
     }
 
@@ -864,17 +887,17 @@ impl DocumentProfile {
     pub fn analyze(input: &[u8]) -> Self {
         let size = input.len();
         let num_cores = rayon::current_num_threads().max(1);
-        
+
         // Sample first 8KB to estimate densities
         let sample_size = size.min(8 * 1024);
         let sample = &input[..sample_size];
-        
+
         let mut tag_count = 0u32;
         let mut attr_count = 0u32;
         let mut in_tag = false;
         let mut in_quotes = false;
         let mut quote_char: u8 = 0;
-        
+
         for &byte in sample {
             if in_quotes {
                 if byte == quote_char {
@@ -901,11 +924,19 @@ impl DocumentProfile {
                 }
             }
         }
-        
+
         let sample_kb = sample_size as f64 / 1024.0;
-        let tag_density = if sample_kb > 0.0 { tag_count as f64 / sample_kb } else { 10.0 };
-        let attr_density = if tag_count > 0 { attr_count as f64 / tag_count as f64 } else { 2.0 };
-        
+        let tag_density = if sample_kb > 0.0 {
+            tag_count as f64 / sample_kb
+        } else {
+            10.0
+        };
+        let attr_density = if tag_count > 0 {
+            attr_count as f64 / tag_count as f64
+        } else {
+            2.0
+        };
+
         Self {
             size,
             tag_density,
@@ -913,13 +944,13 @@ impl DocumentProfile {
             num_cores,
         }
     }
-    
+
     /// Calculate optimal chunk size based on document characteristics
     pub fn optimal_chunk_size(&self) -> usize {
         // Base chunk size on document size and available cores
         let ideal_chunks = self.num_cores * 4; // Aim for 4x cores for good load balancing
         let base_chunk_size = self.size / ideal_chunks;
-        
+
         // Adjust based on tag density:
         // - High tag density (many small tags) -> smaller chunks for better parallelism
         // - Low tag density (few large tags) -> larger chunks to reduce merge overhead
@@ -930,17 +961,13 @@ impl DocumentProfile {
         } else {
             1.0
         };
-        
+
         // Adjust based on attribute density:
         // - High attr density -> larger chunks (attrs are expensive to merge)
-        let attr_factor = if self.attr_density > 5.0 {
-            1.25
-        } else {
-            1.0
-        };
-        
+        let attr_factor = if self.attr_density > 5.0 { 1.25 } else { 1.0 };
+
         let adjusted = (base_chunk_size as f64 * density_factor * attr_factor) as usize;
-        
+
         // Clamp to reasonable bounds
         adjusted.max(MIN_CHUNK_SIZE).min(MAX_CHUNK_SIZE)
     }
@@ -1040,7 +1067,13 @@ impl ChunkSplitter {
         let mut in_quotes = false;
 
         // Scan from beginning to track context state at scan_start
-        Self::scan_context(input, scan_start, &mut in_tag, &mut in_quotes, &mut quote_char);
+        Self::scan_context(
+            input,
+            scan_start,
+            &mut in_tag,
+            &mut in_quotes,
+            &mut quote_char,
+        );
 
         // Now scan from scan_start forward looking for a clean boundary
         let mut pos = scan_start;
@@ -1580,7 +1613,9 @@ impl FusedTapeBuilder {
     ///
     /// # Returns
     /// A tuple of (tape entries, compact attribute entries, tag-to-attr mapping)
-    pub fn build_parallel(input: &[u8]) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
+    pub fn build_parallel(
+        input: &[u8],
+    ) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
         Self::build_parallel_with_chunk_size(input, DEFAULT_CHUNK_SIZE)
     }
 
@@ -1597,7 +1632,9 @@ impl FusedTapeBuilder {
     ///
     /// # Returns
     /// A tuple of (tape entries, compact attribute entries, tag-to-attr mapping)
-    pub fn build_parallel_adaptive(input: &[u8]) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
+    pub fn build_parallel_adaptive(
+        input: &[u8],
+    ) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
         // Fall back to sequential for small documents
         if input.len() < PARALLEL_THRESHOLD {
             return Self::build(input);
@@ -1651,7 +1688,9 @@ impl FusedTapeBuilder {
     ///
     /// # Returns
     /// A tuple of (tape entries, compact attribute entries, tag-to-attr mapping)
-    pub fn build_parallel_direct(input: &[u8]) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
+    pub fn build_parallel_direct(
+        input: &[u8],
+    ) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
         Self::build_parallel_direct_with_chunk_size(input, DEFAULT_CHUNK_SIZE)
     }
 
@@ -1665,7 +1704,9 @@ impl FusedTapeBuilder {
     ///
     /// # Returns
     /// A tuple of (tape entries, compact attribute entries, tag-to-attr mapping)
-    pub fn build_parallel_direct_adaptive(input: &[u8]) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
+    pub fn build_parallel_direct_adaptive(
+        input: &[u8],
+    ) -> (Vec<TapeEntry>, Vec<CompactAttrEntry>, Vec<(usize, usize)>) {
         // Fall back to sequential for small documents
         if input.len() < PARALLEL_THRESHOLD {
             return Self::build(input);
@@ -1715,7 +1756,9 @@ impl FusedTapeBuilder {
         // Phase 3: Allocate final buffers
         let mut final_tape = vec![TapeEntry::new(TapeEntryKind::Text, 0, 0); total_tape];
         let mut final_attrs = Vec::with_capacity(total_attrs);
-        unsafe { final_attrs.set_len(total_attrs); }
+        unsafe {
+            final_attrs.set_len(total_attrs);
+        }
         let mut final_tag_map = vec![(0usize, 0usize); total_tag_map];
 
         // Phase 4: Parallel write - each chunk writes directly to final buffer
@@ -1842,7 +1885,9 @@ impl FusedTapeBuilder {
         // Phase 3: Allocate final buffers
         let mut final_tape = vec![TapeEntry::new(TapeEntryKind::Text, 0, 0); total_tape];
         let mut final_attrs = Vec::with_capacity(total_attrs);
-        unsafe { final_attrs.set_len(total_attrs); }
+        unsafe {
+            final_attrs.set_len(total_attrs);
+        }
         let mut final_tag_map = vec![(0usize, 0usize); total_tag_map];
 
         // Phase 4: Parallel write - each chunk writes directly to final buffer
@@ -2071,7 +2116,7 @@ impl FusedTapeBuilder {
         // Each '<' potentially starts a tag (tape entry)
         // Each '>' ends a tag
         // Text segments between tags are also tape entries
-        
+
         // Rough estimate: tape_count = tags + text_segments
         // tag_map_count = number of complete tags (min of lt, gt)
         tag_map_count = lt_count.min(gt_count) as usize;
@@ -2194,7 +2239,11 @@ impl FusedTapeBuilder {
                 match ch {
                     b'<' => {
                         // Check if this is a comment
-                        if i + 3 < len && input[i + 1] == b'!' && input[i + 2] == b'-' && input[i + 3] == b'-' {
+                        if i + 3 < len
+                            && input[i + 1] == b'!'
+                            && input[i + 2] == b'-'
+                            && input[i + 3] == b'-'
+                        {
                             comment_depth += 1;
                         } else {
                             in_tag = true;
@@ -2245,8 +2294,8 @@ mod tests {
         // 0123456789012345678
         // < at 0, > at 4, < at 12, > at 17
         assert_eq!(index.len(), 4);
-        assert_eq!(index.get(0), Some(0));  // <
-        assert_eq!(index.get(1), Some(4));  // >
+        assert_eq!(index.get(0), Some(0)); // <
+        assert_eq!(index.get(1), Some(4)); // >
         assert_eq!(index.get(2), Some(12)); // <
         assert_eq!(index.get(3), Some(17)); // >
     }
@@ -2351,7 +2400,8 @@ mod tests {
         // Test with a larger input to ensure SIMD paths are exercised
         let mut input = Vec::new();
         for i in 0..1000 {
-            input.extend_from_slice(format!("<div class='item{}'>content{}</div>", i, i).as_bytes());
+            input
+                .extend_from_slice(format!("<div class='item{}'>content{}</div>", i, i).as_bytes());
         }
 
         let index = StructuralIndex::build(&input);
@@ -2396,7 +2446,11 @@ mod tests {
         let mut input = Vec::with_capacity(200 * 1024);
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-index='{}'>content{}</div>", i, i, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-index='{}'>content{}</div>",
+                    i, i, i
+                )
+                .as_bytes(),
             );
         }
 
@@ -2467,8 +2521,15 @@ mod tests {
         let (tape, _, _) = TapeMerger::merge(input, vec![chunk1, chunk2]);
 
         // Text entries should be coalesced
-        let text_entries: Vec<_> = tape.iter().filter(|e| e.kind == TapeEntryKind::Text).collect();
-        assert_eq!(text_entries.len(), 1, "Adjacent text entries should be coalesced");
+        let text_entries: Vec<_> = tape
+            .iter()
+            .filter(|e| e.kind == TapeEntryKind::Text)
+            .collect();
+        assert_eq!(
+            text_entries.len(),
+            1,
+            "Adjacent text entries should be coalesced"
+        );
         assert_eq!(text_entries[0].offset, 5);
         assert_eq!(text_entries[0].length, 7); // "hello " + " worl" = 7 bytes from pos 5
     }
@@ -2476,9 +2537,7 @@ mod tests {
     #[test]
     fn test_tape_merger_preserves_attr_map() {
         let chunk1 = ChunkResult {
-            tape: vec![
-                TapeEntry::new(TapeEntryKind::OpenTag, 0, 20),
-            ],
+            tape: vec![TapeEntry::new(TapeEntryKind::OpenTag, 0, 20)],
             attributes: vec![
                 CompactAttrEntry::new_bool(5, 3),
                 CompactAttrEntry::new_bool(9, 4),
@@ -2491,12 +2550,8 @@ mod tests {
         };
 
         let chunk2 = ChunkResult {
-            tape: vec![
-                TapeEntry::new(TapeEntryKind::OpenTag, 20, 15),
-            ],
-            attributes: vec![
-                CompactAttrEntry::new_bool(25, 5),
-            ],
+            tape: vec![TapeEntry::new(TapeEntryKind::OpenTag, 20, 15)],
+            attributes: vec![CompactAttrEntry::new_bool(25, 5)],
             tag_attr_map: vec![(0, 1)],
             chunk_offset: 20,
             chunk_length: 15,
@@ -2511,8 +2566,8 @@ mod tests {
         assert_eq!(attrs.len(), 3);
         // Tag map should be rebased
         assert_eq!(tag_map.len(), 2);
-        assert_eq!(tag_map[0], (0, 2));  // First tag: attrs 0-1
-        assert_eq!(tag_map[1], (2, 1));  // Second tag: attr 2
+        assert_eq!(tag_map[0], (0, 2)); // First tag: attrs 0-1
+        assert_eq!(tag_map[1], (2, 1)); // Second tag: attr 2
     }
 
     #[test]
@@ -2535,7 +2590,14 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-x='{}' data-y='{}'>content{}</div>", i, i * 2, i * 3, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-x='{}' data-y='{}'>content{}</div>",
+                    i,
+                    i * 2,
+                    i * 3,
+                    i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -2578,7 +2640,11 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-index='{}'>content{}</div>", i, i, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-index='{}'>content{}</div>",
+                    i, i, i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -2608,19 +2674,28 @@ mod tests {
     #[test]
     fn test_detect_end_state_clean() {
         let input = b"<div>hello</div>";
-        assert_eq!(FusedTapeBuilder::detect_end_state(input), ChunkEndState::Clean);
+        assert_eq!(
+            FusedTapeBuilder::detect_end_state(input),
+            ChunkEndState::Clean
+        );
     }
 
     #[test]
     fn test_detect_end_state_inside_tag() {
         let input = b"<div class='test'";
-        assert_eq!(FusedTapeBuilder::detect_end_state(input), ChunkEndState::InsideTag);
+        assert_eq!(
+            FusedTapeBuilder::detect_end_state(input),
+            ChunkEndState::InsideTag
+        );
     }
 
     #[test]
     fn test_detect_end_state_inside_quoted() {
         let input = b"<div class='test";
-        assert_eq!(FusedTapeBuilder::detect_end_state(input), ChunkEndState::InsideQuotedAttr { quote_char: b'\'' });
+        assert_eq!(
+            FusedTapeBuilder::detect_end_state(input),
+            ChunkEndState::InsideQuotedAttr { quote_char: b'\'' }
+        );
     }
 
     // --- Direct parallel writing tests ---
@@ -2645,7 +2720,14 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-x='{}' data-y='{}'>content{}</div>", i, i * 2, i * 3, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-x='{}' data-y='{}'>content{}</div>",
+                    i,
+                    i * 2,
+                    i * 3,
+                    i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -2688,7 +2770,11 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-index='{}'>content{}</div>", i, i, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-index='{}'>content{}</div>",
+                    i, i, i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -2713,7 +2799,7 @@ mod tests {
             attrs_seq.len(),
             attrs_dir.len()
         );
-}
+    }
 
     // --- Adaptive chunk sizing tests ---
 
@@ -2741,7 +2827,11 @@ mod tests {
         let mut large_input = Vec::with_capacity(200 * 1024);
         for i in 0..2000 {
             large_input.extend_from_slice(
-                format!("<div class='item{}' data-index='{}'>content{}</div>", i, i, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-index='{}'>content{}</div>",
+                    i, i, i
+                )
+                .as_bytes(),
             );
         }
         let large_profile = DocumentProfile::analyze(&large_input);
@@ -2756,7 +2846,11 @@ mod tests {
         let mut input = Vec::with_capacity(200 * 1024);
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-index='{}'>content{}</div>", i, i, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-index='{}'>content{}</div>",
+                    i, i, i
+                )
+                .as_bytes(),
             );
         }
 
@@ -2793,7 +2887,14 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-x='{}' data-y='{}'>content{}</div>", i, i * 2, i * 3, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-x='{}' data-y='{}'>content{}</div>",
+                    i,
+                    i * 2,
+                    i * 3,
+                    i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -2836,7 +2937,11 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-index='{}'>content{}</div>", i, i, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-index='{}'>content{}</div>",
+                    i, i, i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -2868,7 +2973,8 @@ mod tests {
         // Small input should fall back to sequential
         let input = b"<div class='test' id='main'>Hello World</div>";
         let (tape_seq, attrs_seq, map_seq) = FusedTapeBuilder::build(input);
-        let (tape_dir, attrs_dir, map_dir) = FusedTapeBuilder::build_parallel_direct_adaptive(input);
+        let (tape_dir, attrs_dir, map_dir) =
+            FusedTapeBuilder::build_parallel_direct_adaptive(input);
 
         // Results should be identical for small inputs (falls back to sequential)
         assert_eq!(tape_seq.len(), tape_dir.len());
@@ -2883,7 +2989,14 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-x='{}' data-y='{}'>content{}</div>", i, i * 2, i * 3, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-x='{}' data-y='{}'>content{}</div>",
+                    i,
+                    i * 2,
+                    i * 3,
+                    i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -2926,7 +3039,11 @@ mod tests {
         input.extend_from_slice(b"<html><body>");
         for i in 0..2000 {
             input.extend_from_slice(
-                format!("<div class='item{}' data-index='{}'>content{}</div>", i, i, i).as_bytes(),
+                format!(
+                    "<div class='item{}' data-index='{}'>content{}</div>",
+                    i, i, i
+                )
+                .as_bytes(),
             );
         }
         input.extend_from_slice(b"</body></html>");
@@ -3024,8 +3141,15 @@ mod tests {
         let (tape, _, _) = TapeMerger::merge_streaming(input, vec![chunk1, chunk2]);
 
         // Text entries should be coalesced
-        let text_entries: Vec<_> = tape.iter().filter(|e| e.kind == TapeEntryKind::Text).collect();
-        assert_eq!(text_entries.len(), 1, "Adjacent text entries should be coalesced");
+        let text_entries: Vec<_> = tape
+            .iter()
+            .filter(|e| e.kind == TapeEntryKind::Text)
+            .collect();
+        assert_eq!(
+            text_entries.len(),
+            1,
+            "Adjacent text entries should be coalesced"
+        );
         assert_eq!(text_entries[0].offset, 5);
         assert_eq!(text_entries[0].length, 7); // "hello " + " worl" = 7 bytes from pos 5
     }

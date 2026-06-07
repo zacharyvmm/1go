@@ -91,7 +91,12 @@ impl CompactAttrEntry {
 
     /// Create a new attribute entry with an unquoted value
     #[inline]
-    pub fn new_unquoted(key_offset: u32, key_length: u16, value_offset: u32, value_length: u16) -> Self {
+    pub fn new_unquoted(
+        key_offset: u32,
+        key_length: u16,
+        value_offset: u32,
+        value_length: u16,
+    ) -> Self {
         Self {
             key_offset,
             key_length,
@@ -104,7 +109,12 @@ impl CompactAttrEntry {
 
     /// Create a new attribute entry with a double-quoted value
     #[inline]
-    pub fn new_double_quoted(key_offset: u32, key_length: u16, value_offset: u32, value_length: u16) -> Self {
+    pub fn new_double_quoted(
+        key_offset: u32,
+        key_length: u16,
+        value_offset: u32,
+        value_length: u16,
+    ) -> Self {
         Self {
             key_offset,
             key_length,
@@ -117,7 +127,12 @@ impl CompactAttrEntry {
 
     /// Create a new attribute entry with a single-quoted value
     #[inline]
-    pub fn new_single_quoted(key_offset: u32, key_length: u16, value_offset: u32, value_length: u16) -> Self {
+    pub fn new_single_quoted(
+        key_offset: u32,
+        key_length: u16,
+        value_offset: u32,
+        value_length: u16,
+    ) -> Self {
         Self {
             key_offset,
             key_length,

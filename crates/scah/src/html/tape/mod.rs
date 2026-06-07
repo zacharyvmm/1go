@@ -25,13 +25,13 @@
 //! - Reduced allocator pressure (flat arrays vs tree nodes)
 //! - Clear separation of concerns (parallel scan vs sequential build)
 
+mod structural_scanner;
 mod tape_entry;
 mod tape_parser;
-mod structural_scanner;
 
-pub use tape_entry::{TapeEntry, TapeEntryKind, CompactAttrEntry, AttrFlags};
-pub use tape_parser::TapeParser;
 pub use structural_scanner::{
-    StructuralIndex, FusedTapeBuilder, ChunkSplitter, TapeMerger,
-    ChunkResult, ChunkEndState, DocumentProfile,
+    ChunkEndState, ChunkResult, ChunkSplitter, DocumentProfile, FusedTapeBuilder, StructuralIndex,
+    TapeMerger,
 };
+pub use tape_entry::{AttrFlags, CompactAttrEntry, TapeEntry, TapeEntryKind};
+pub use tape_parser::TapeParser;

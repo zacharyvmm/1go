@@ -4,7 +4,7 @@
 //! the redundant attribute re-scan in the fused path.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use scah::{Query, Save, parse_tape, parse_fused};
+use scah::{Query, Save, parse_fused, parse_tape};
 use std::hint::black_box;
 
 /// Generate a form-heavy HTML document with many attributes per element.
@@ -64,9 +64,7 @@ fn bench_fused_vs_3stage_forms(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(content.len() as u64));
 
         // Benchmark: 3-stage tape parser with save_none
-        let none_queries = &[Query::all("input", Save::none())
-            .unwrap()
-            .build()];
+        let none_queries = &[Query::all("input", Save::none()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("tape_3stage_save_none", size),
             &content,
@@ -91,9 +89,7 @@ fn bench_fused_vs_3stage_forms(c: &mut Criterion) {
         );
 
         // Benchmark: 3-stage tape parser with save_all
-        let all_queries = &[Query::all("input", Save::all())
-            .unwrap()
-            .build()];
+        let all_queries = &[Query::all("input", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("tape_3stage_save_all", size),
             &content,
@@ -118,9 +114,7 @@ fn bench_fused_vs_3stage_forms(c: &mut Criterion) {
         );
 
         // Benchmark: query all form-groups
-        let group_queries = &[Query::all("div.form-group", Save::all())
-            .unwrap()
-            .build()];
+        let group_queries = &[Query::all("div.form-group", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("tape_3stage_form_groups", size),
             &content,
@@ -155,9 +149,7 @@ fn bench_fused_vs_3stage_data_attrs(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(content.len() as u64));
 
         // Benchmark: 3-stage tape parser
-        let link_queries = &[Query::all("a.link", Save::all())
-            .unwrap()
-            .build()];
+        let link_queries = &[Query::all("a.link", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("tape_3stage_links", size),
             &content,
@@ -182,9 +174,7 @@ fn bench_fused_vs_3stage_data_attrs(c: &mut Criterion) {
         );
 
         // Benchmark: component divs
-        let comp_queries = &[Query::all("div.component", Save::all())
-            .unwrap()
-            .build()];
+        let comp_queries = &[Query::all("div.component", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("tape_3stage_components", size),
             &content,

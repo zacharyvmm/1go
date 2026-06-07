@@ -3,7 +3,10 @@ use std::ops::Range;
 pub mod simd;
 
 pub use simd::{BoundaryHit, BoundaryKind};
-use simd::{CpuFeatures, ScannerBackend, create_scanner, find_any_of_32, skip_whitespace_simd, eof_simd, is_self_closing_tag, eq_ignore_case_4};
+use simd::{
+    CpuFeatures, ScannerBackend, create_scanner, eof_simd, eq_ignore_case_4, find_any_of_32,
+    is_self_closing_tag, skip_whitespace_simd,
+};
 
 pub struct Reader<'a> {
     source: &'a [u8],
@@ -159,7 +162,8 @@ impl<'a> Reader<'a> {
     /// Use SIMD to find the first attribute boundary character from current position.
     /// Returns the position and type of the boundary character (quote, `=`, whitespace, or `>`).
     pub fn find_attribute_boundary(&self) -> Option<BoundaryHit> {
-        self.scanner.find_attribute_boundary(self.source, self.position)
+        self.scanner
+            .find_attribute_boundary(self.source, self.position)
     }
 
     /// Find attribute boundary starting from a specific position
@@ -176,7 +180,12 @@ impl<'a> Reader<'a> {
     /// The caller must ensure `pos` is within bounds and at a valid UTF-8 boundary
     #[inline]
     pub fn set_position(&mut self, pos: usize) {
-        debug_assert!(pos <= self.source.len(), "Position {} out of bounds (len: {})", pos, self.source.len());
+        debug_assert!(
+            pos <= self.source.len(),
+            "Position {} out of bounds (len: {})",
+            pos,
+            self.source.len()
+        );
         self.position = pos.min(self.source.len());
     }
 

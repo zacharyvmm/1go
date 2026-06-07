@@ -131,10 +131,7 @@ impl SimdInput {
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
     pub unsafe fn eq(&self, byte: u8) -> u32 {
-        let cmp = std::arch::aarch64::vceqq_u8(
-            self.v0,
-            std::arch::aarch64::vdupq_n_u8(byte),
-        );
+        let cmp = std::arch::aarch64::vceqq_u8(self.v0, std::arch::aarch64::vdupq_n_u8(byte));
         // Convert NEON mask to bitmask using vector shift and accumulate
         // The comparison result is 0xFF for match, 0x00 for no match
         // We need to extract the high bit of each byte into a bitmask
@@ -311,10 +308,14 @@ fn find_any_scalar(input: &[u8], start: usize, needles: &[u8; 4]) -> usize {
 #[target_feature(enable = "avx2")]
 pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32 {
     // Direct comparison for whitespace characters: space(0x20), tab(0x09), newline(0x0A), CR(0x0D)
-    let is_space = std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x20));
-    let is_tab = std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x09));
-    let is_lf = std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0A));
-    let is_cr = std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0D));
+    let is_space =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x20));
+    let is_tab =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x09));
+    let is_lf =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0A));
+    let is_cr =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0D));
     let any = std::arch::x86_64::_mm256_or_si256(
         std::arch::x86_64::_mm256_or_si256(is_space, is_tab),
         std::arch::x86_64::_mm256_or_si256(is_lf, is_cr),
@@ -487,7 +488,7 @@ pub fn eq_ignore_case_sw(a: &[u8], b: &[u8]) -> bool {
     // Process 4 bytes at a time
     let mut i = 0;
     while i + 4 <= a.len() {
-        if !eq_ignore_case_4(&a[i..], [b[i], b[i+1], b[i+2], b[i+3]]) {
+        if !eq_ignore_case_4(&a[i..], [b[i], b[i + 1], b[i + 2], b[i + 3]]) {
             return false;
         }
         i += 4;
@@ -566,7 +567,7 @@ impl ScannerBackend for Avx2Scanner {
             if is_x86_feature_detected!("avx2") && start + 32 <= input.len() {
                 unsafe {
                     let data = std::arch::x86_64::_mm256_loadu_si256(
-                        input[start..].as_ptr() as *const std::arch::x86_64::__m256i,
+                        input[start..].as_ptr() as *const std::arch::x86_64::__m256i
                     );
                     let (quotes, equals, whitespace, gt) = scan_attribute_boundaries_avx2(data);
                     return AttributeScanResult {
@@ -745,7 +746,7 @@ unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<Bou
 
         while pos + 32 <= len {
             let data = std::arch::x86_64::_mm256_loadu_si256(
-                input[pos..].as_ptr() as *const std::arch::x86_64::__m256i,
+                input[pos..].as_ptr() as *const std::arch::x86_64::__m256i
             );
             let (quotes, equals, whitespace, gt) = scan_attribute_boundaries_avx2(data);
             let combined = quotes | equals | whitespace | gt;
@@ -787,10 +788,7 @@ fn find_attribute_boundary_scalar(input: &[u8], start: usize) -> Option<Boundary
             b'>' => BoundaryKind::Gt,
             _ => continue,
         };
-        return Some(BoundaryHit {
-            position: i,
-            kind,
-        });
+        return Some(BoundaryHit { position: i, kind });
     }
     None
 }

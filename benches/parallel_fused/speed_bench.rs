@@ -50,7 +50,8 @@ fn generate_data_attr_html(element_count: usize) -> String {
 /// Generate a large document with mixed content types.
 fn generate_mixed_html(target_size: usize) -> String {
     let mut html = String::with_capacity(target_size);
-    html.push_str(r#"<!DOCTYPE html>
+    html.push_str(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -60,7 +61,8 @@ fn generate_mixed_html(target_size: usize) -> String {
 <body>
 <header>
     <nav class="main-nav" data-theme="dark" data-responsive="true">
-        <ul class="nav-list" role="menubar" aria-label="Main navigation">"#);
+        <ul class="nav-list" role="menubar" aria-label="Main navigation">"#,
+    );
 
     let mut current_size = html.len();
     let mut item_count = 0;
@@ -77,12 +79,14 @@ fn generate_mixed_html(target_size: usize) -> String {
         item_count += 1;
 
         if item_count % 100 == 0 {
-            html.push_str(r#"
+            html.push_str(
+                r#"
         </ul>
     </nav>
 </header>
 <main class="content" role="main" data-section="body">
-    <section class="article-list" data-layout="grid" data-columns="3">"#);
+    <section class="article-list" data-layout="grid" data-columns="3">"#,
+            );
 
             for j in 0..100 {
                 html.push_str(&format!(
@@ -104,16 +108,20 @@ fn generate_mixed_html(target_size: usize) -> String {
                 ));
             }
 
-            html.push_str(r#"
+            html.push_str(
+                r#"
     </section>
-</main>"#);
+</main>"#,
+            );
             current_size = html.len();
         }
     }
 
-    html.push_str(r#"
+    html.push_str(
+        r#"
 </body>
-</html>"#);
+</html>"#,
+    );
     html
 }
 
@@ -301,9 +309,9 @@ fn bench_parallel_vs_sequential_data_attrs(c: &mut Criterion) {
 fn bench_parallel_vs_sequential_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel_vs_sequential_mixed");
 
-    let mixed_queries = &[
-        Query::all("article.article-card", Save::all()).unwrap().build(),
-    ];
+    let mixed_queries = &[Query::all("article.article-card", Save::all())
+        .unwrap()
+        .build()];
 
     // 100KB document
     let content_100k = generate_mixed_html(100 * 1024);

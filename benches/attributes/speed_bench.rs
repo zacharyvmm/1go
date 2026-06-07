@@ -66,9 +66,7 @@ fn bench_attribute_heavy(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(content.len() as u64));
 
         // Benchmark: parse with save_none (tokenizer-only throughput)
-        let none_queries = &[Query::all("input", Save::none())
-            .unwrap()
-            .build()];
+        let none_queries = &[Query::all("input", Save::none()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("scah_form_save_none", size),
             &content,
@@ -81,9 +79,7 @@ fn bench_attribute_heavy(c: &mut Criterion) {
         );
 
         // Benchmark: parse with save_all (full extraction)
-        let all_queries = &[Query::all("input", Save::all())
-            .unwrap()
-            .build()];
+        let all_queries = &[Query::all("input", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("scah_form_save_all", size),
             &content,
@@ -96,9 +92,7 @@ fn bench_attribute_heavy(c: &mut Criterion) {
         );
 
         // Benchmark: query all form-groups with attribute access
-        let group_queries = &[Query::all("div.form-group", Save::all())
-            .unwrap()
-            .build()];
+        let group_queries = &[Query::all("div.form-group", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("scah_form_groups_save_all", size),
             &content,
@@ -122,9 +116,7 @@ fn bench_data_attributes(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(content.len() as u64));
 
         // Benchmark: parse with save_none
-        let none_queries = &[Query::all("a.link", Save::none())
-            .unwrap()
-            .build()];
+        let none_queries = &[Query::all("a.link", Save::none()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("scah_data_attr_save_none", size),
             &content,
@@ -137,9 +129,7 @@ fn bench_data_attributes(c: &mut Criterion) {
         );
 
         // Benchmark: parse with save_all
-        let all_queries = &[Query::all("a.link", Save::all())
-            .unwrap()
-            .build()];
+        let all_queries = &[Query::all("a.link", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("scah_data_attr_save_all", size),
             &content,
@@ -152,9 +142,7 @@ fn bench_data_attributes(c: &mut Criterion) {
         );
 
         // Benchmark: query all component divs
-        let comp_queries = &[Query::all("div.component", Save::all())
-            .unwrap()
-            .build()];
+        let comp_queries = &[Query::all("div.component", Save::all()).unwrap().build()];
         group.bench_with_input(
             BenchmarkId::new("scah_data_attr_components", size),
             &content,
@@ -190,10 +178,7 @@ fn bench_attribute_tokenizer_micro(c: &mut Criterion) {
     // Micro-benchmark: single element with no attributes
     group.bench_function("scah_no_attrs_element_parse", |b| {
         b.iter(|| {
-            let store = parse(
-                black_box("<div>text</div>"),
-                black_box(&div_queries),
-            );
+            let store = parse(black_box("<div>text</div>"), black_box(&div_queries));
             black_box(store);
         })
     });

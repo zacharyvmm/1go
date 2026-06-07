@@ -237,10 +237,7 @@ impl<'html> XHtmlElement<'html> {
             } else if key == "id" && value.is_some() {
                 self.id = value;
             } else {
-                attribute_tape.push(Attribute {
-                    key,
-                    value,
-                });
+                attribute_tape.push(Attribute { key, value });
             }
         }
 

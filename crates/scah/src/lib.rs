@@ -113,8 +113,8 @@ pub use engine::multiplexer::QueryMultiplexer;
 pub use html::element::builder::XHtmlElement;
 pub use html::parser::XHtmlParser;
 pub use html::tape::{
-    TapeParser, StructuralIndex, TapeEntry, TapeEntryKind, CompactAttrEntry, AttrFlags,
-    FusedTapeBuilder, ChunkSplitter, TapeMerger, ChunkResult, ChunkEndState, DocumentProfile,
+    AttrFlags, ChunkEndState, ChunkResult, ChunkSplitter, CompactAttrEntry, DocumentProfile,
+    FusedTapeBuilder, StructuralIndex, TapeEntry, TapeEntryKind, TapeMerger, TapeParser,
 };
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
