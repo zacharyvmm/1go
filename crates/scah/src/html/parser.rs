@@ -13,11 +13,13 @@ use crate::store::Store;
 /// and not parsed as HTML (script, style, textarea, title).
 #[inline]
 fn is_raw_text_element(name: &str) -> bool {
-    // Case-insensitive comparison — no allocation.
-    name.eq_ignore_ascii_case("script")
-        || name.eq_ignore_ascii_case("style")
-        || name.eq_ignore_ascii_case("textarea")
-        || name.eq_ignore_ascii_case("title")
+    // Only 's' (script, style) and 't' (textarea, title) need the full check.
+    // For all other first bytes — 24/26 of the alphabet — return immediately.
+    match name.as_bytes().first() {
+        Some(b's') => name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style"),
+        Some(b't') => name.eq_ignore_ascii_case("textarea") || name.eq_ignore_ascii_case("title"),
+        _ => false,
+    }
 }
 
 pub struct XHtmlParser<'html, 'query, Q> {

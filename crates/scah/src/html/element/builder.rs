@@ -70,19 +70,26 @@ impl<'html> XHtmlElement<'html> {
         attribute: Attribute<'html>,
         attribute_tape: &mut Vec<Attribute<'html>>,
     ) {
+        // Branch 1: first call — capture tag name, strip trailing solidus.
         if self.name.is_empty() && attribute.value.is_none() {
-            // Strip trailing solidus from tag name: <hr/> -> "hr"
             let name = attribute.key;
-            self.name = if name.ends_with('/') {
+            // Direct last-byte check avoids Pattern trait overhead from
+            // `ends_with(char)`.  Compiles to: load len, load last byte, cmp.
+            self.name = if name.as_bytes().last() == Some(&b'/') {
                 &name[..name.len() - 1]
             } else {
                 name
             };
-        } else if self.class.is_none() && attribute.key == "class" && attribute.value.is_some() {
-            self.class = attribute.value;
-        } else if self.id.is_none() && attribute.key == "id" && attribute.value.is_some() {
-            self.id = attribute.value;
+        } else if attribute.value.is_some() {
+            // Branch 2/3: classify known value-bearing attributes.
+            // `value.is_some()` hoisted here so we don't check it twice.
+            match attribute.key {
+                "class" if self.class.is_none() => self.class = attribute.value,
+                "id" if self.id.is_none() => self.id = attribute.value,
+                _ => attribute_tape.push(attribute),
+            }
         } else {
+            // Branch 4: boolean (valueless) attribute or stray key.
             attribute_tape.push(attribute);
         }
     }
