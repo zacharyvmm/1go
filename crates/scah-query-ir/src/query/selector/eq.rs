@@ -3,7 +3,7 @@ use super::string_search::AttributeSelectionKind;
 
 impl<'a> AttributeSelection<'a> {
     pub fn matches_attribute(&self, other: &Attribute<'_>) -> bool {
-        if self.name != other.key {
+        if !self.name.eq_ignore_ascii_case(other.key) {
             return false;
         }
 
@@ -78,10 +78,28 @@ impl<'a> ElementPredicate<'a> {
         }
 
         self.attributes.as_slice().iter().all(|selector_attribute| {
-            other
-                .attributes()
-                .iter()
-                .any(|xhtml_attribute| selector_attribute.matches_attribute(xhtml_attribute))
+            // Check the dedicated id/class fields first, since they are stored
+            // separately from the generic attribute tape.
+            match selector_attribute.name {
+                "id" => match other.id() {
+                    Some(id) => selector_attribute.matches_attribute(&Attribute {
+                        key: "id",
+                        value: Some(id),
+                    }),
+                    None => false,
+                },
+                "class" => match other.class() {
+                    Some(class) => selector_attribute.matches_attribute(&Attribute {
+                        key: "class",
+                        value: Some(class),
+                    }),
+                    None => false,
+                },
+                _ => other
+                    .attributes()
+                    .iter()
+                    .any(|xhtml_attribute| selector_attribute.matches_attribute(xhtml_attribute)),
+            }
         })
     }
 }
@@ -288,5 +306,115 @@ mod tests {
         assert!(selector_one.matches_element(&element_two));
         assert!(selector_two.matches_element(&element_one));
         assert!(selector_two.matches_element(&element_two));
+    }
+
+    // --- Edge Case #4: [id] and [class] attribute selectors ---
+
+    #[test]
+    fn test_id_attribute_selector_presence() {
+        // [id] should match elements that have an id
+        let selector = ElementPredicate {
+            name: Some("div"),
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from(vec![AttributeSelection {
+                name: "id",
+                value: None,
+                kind: AttributeSelectionKind::Presence,
+            }]),
+        };
+        assert!(selector.matches_element(&FakeElement {
+            name: "div",
+            id: Some("myid"),
+            class: None,
+            attributes: &[],
+        }));
+        assert!(!selector.matches_element(&FakeElement {
+            name: "div",
+            id: None,
+            class: None,
+            attributes: &[],
+        }));
+    }
+
+    #[test]
+    fn test_id_attribute_selector_exact() {
+        // [id="x"] should match element with id="x"
+        let selector = ElementPredicate {
+            name: None,
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from(vec![AttributeSelection {
+                name: "id",
+                value: Some("target"),
+                kind: AttributeSelectionKind::Exact,
+            }]),
+        };
+        assert!(selector.matches_element(&FakeElement {
+            name: "div",
+            id: Some("target"),
+            class: None,
+            attributes: &[],
+        }));
+        assert!(!selector.matches_element(&FakeElement {
+            name: "div",
+            id: Some("other"),
+            class: None,
+            attributes: &[],
+        }));
+    }
+
+    #[test]
+    fn test_class_attribute_selector_presence() {
+        // [class] should match elements that have a class
+        let selector = ElementPredicate {
+            name: None,
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from(vec![AttributeSelection {
+                name: "class",
+                value: None,
+                kind: AttributeSelectionKind::Presence,
+            }]),
+        };
+        assert!(selector.matches_element(&FakeElement {
+            name: "div",
+            id: None,
+            class: Some("foo bar"),
+            attributes: &[],
+        }));
+        assert!(!selector.matches_element(&FakeElement {
+            name: "div",
+            id: None,
+            class: None,
+            attributes: &[],
+        }));
+    }
+
+    #[test]
+    fn test_class_attribute_selector_contains() {
+        // [class~="foo"] should match element with class containing "foo"
+        let selector = ElementPredicate {
+            name: None,
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from(vec![AttributeSelection {
+                name: "class",
+                value: Some("foo"),
+                kind: AttributeSelectionKind::WhitespaceSeparated,
+            }]),
+        };
+        assert!(selector.matches_element(&FakeElement {
+            name: "div",
+            id: None,
+            class: Some("foo bar"),
+            attributes: &[],
+        }));
+        assert!(!selector.matches_element(&FakeElement {
+            name: "div",
+            id: None,
+            class: Some("baz qux"),
+            attributes: &[],
+        }));
     }
 }

@@ -4,7 +4,10 @@
 //! and NEON on aarch64/Apple Silicon, with scalar baselines beside them.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use scah::{Query, Reader, Save, StructuralIndex, parse, parse_tape, parse_fused, parse_fused_parallel, parse_fused_parallel_direct, parse_fused_parallel_adaptive};
+use scah::{
+    Query, Reader, Save, StructuralIndex, parse, parse_fused, parse_fused_parallel,
+    parse_fused_parallel_adaptive, parse_fused_parallel_direct, parse_tape,
+};
 use scah_reader::simd::{
     CpuFeatures, find_attribute_boundary_scalar, skip_whitespace_simd as skip_whitespace_simd_impl,
 };
@@ -214,26 +217,38 @@ fn bench_simd_tape_pipeline(c: &mut Criterion) {
             })
         });
 
-        group.bench_with_input(BenchmarkId::new("fused_parallel_parse", count), &html, |b, html| {
-            b.iter(|| {
-                let store = parse_fused_parallel(black_box(html), black_box(&queries));
-                consume_store(black_box(&store), "article.card");
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("fused_parallel_parse", count),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused_parallel(black_box(html), black_box(&queries));
+                    consume_store(black_box(&store), "article.card");
+                })
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("fused_parallel_direct_parse", count), &html, |b, html| {
-            b.iter(|| {
-                let store = parse_fused_parallel_direct(black_box(html), black_box(&queries));
-                consume_store(black_box(&store), "article.card");
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("fused_parallel_direct_parse", count),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused_parallel_direct(black_box(html), black_box(&queries));
+                    consume_store(black_box(&store), "article.card");
+                })
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("fused_parallel_adaptive_parse", count), &html, |b, html| {
-            b.iter(|| {
-                let store = parse_fused_parallel_adaptive(black_box(html), black_box(&queries));
-                consume_store(black_box(&store), "article.card");
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("fused_parallel_adaptive_parse", count),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse_fused_parallel_adaptive(black_box(html), black_box(&queries));
+                    consume_store(black_box(&store), "article.card");
+                })
+            },
+        );
     }
 
     group.finish();

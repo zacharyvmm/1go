@@ -56,7 +56,13 @@ impl<'html> XHtmlElement<'html> {
         attribute_tape: &mut Vec<Attribute<'html>>,
     ) {
         if self.name.is_empty() && attribute.value.is_none() {
-            self.name = attribute.key;
+            // Strip trailing solidus from tag name: <hr/> -> "hr"
+            let name = attribute.key;
+            self.name = if name.ends_with('/') {
+                &name[..name.len() - 1]
+            } else {
+                name
+            };
         } else if self.class.is_none() && attribute.key == "class" && attribute.value.is_some() {
             self.class = attribute.value;
         } else if self.id.is_none() && attribute.key == "id" && attribute.value.is_some() {
@@ -70,10 +76,9 @@ impl<'html> XHtmlElement<'html> {
         if is_html_void_element(self.name) {
             return true;
         }
-        if let Some(last_attribute) = self.attributes.last() {
-            return last_attribute.key == "\\";
-        }
-
+        // In HTML mode, only void elements are self-closing;
+        // trailing solidus is ignored for non-void elements.
+        // For XHTML/XML mode, `trailing_solidus` would close arbitrary elements.
         false
     }
 
@@ -141,14 +146,28 @@ impl<'html> XHtmlElement<'html> {
             }
         }
 
-        if let Some(attribute) = key {
-            self.add_to_element(
-                Attribute {
-                    key: attribute,
-                    value: None,
-                },
-                attribute_tape,
-            );
+        // Detect trailing solidus: if the last "attribute" is a lone "/"
+        // treat it as a trailing solidus, not as an attribute (HTML-compatible behavior).
+        if let Some(k) = key {
+            if k == "/" {
+                // Trailing solidus — skip it, don't add as attribute.
+                // Also remove any "/" attribute that may have been pushed with a value.
+                let tape_len = attribute_tape.len();
+                if tape_len > start_len {
+                    let last = &attribute_tape[tape_len - 1];
+                    if last.key == "/" {
+                        attribute_tape.truncate(tape_len - 1);
+                    }
+                }
+            } else {
+                self.add_to_element(
+                    Attribute {
+                        key: k,
+                        value: None,
+                    },
+                    attribute_tape,
+                );
+            }
         }
 
         // Since we are
@@ -310,8 +329,35 @@ impl<'a> XHtmlTag<'a> {
 
                 return Some(Self::Close(reader.slice(start..end).trim()));
             } else if character == b'!' {
-                reader.next_until(b'>');
-                reader.skip();
+                // HTML comments: <!-- ... -->
+                // Check for HTML comment: <!--
+                if reader.source_bytes().get(reader.get_position() + 1) == Some(&b'-')
+                    && reader.source_bytes().get(reader.get_position() + 2) == Some(&b'-')
+                {
+                    // Consume the '!' and both '-' characters
+                    reader.skip(); // skip '!'
+                    reader.skip(); // skip first '-'
+                    reader.skip(); // skip second '-'
+                    loop {
+                        reader.next_until(b'-');
+                        if reader.peek() == Some(b'-') {
+                            reader.skip();
+                            if reader.peek() == Some(b'>') {
+                                reader.skip();
+                                break;
+                            }
+                        } else if reader.peek().is_none() {
+                            // EOF inside comment — stop
+                            break;
+                        } else {
+                            reader.skip();
+                        }
+                    }
+                } else {
+                    // Other SGML markup like <!DOCTYPE ...>
+                    reader.next_until(b'>');
+                    reader.skip();
+                }
                 return None;
             }
         }
@@ -681,5 +727,110 @@ mod tests {
         let tag = XHtmlTag::from(&mut reader);
 
         assert!(tag.is_none())
+    }
+
+    // --- Edge Case #2: slash / self-closing ---
+
+    #[test]
+    fn test_void_element_with_trailing_slash() {
+        // <hr /> should parse as self-closing void element, / not an attribute
+        let mut reader = Reader::new("hr />");
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+        element.from(&mut reader, &mut attributes);
+        assert_eq!(element.name, "hr");
+        assert!(element.is_self_closing());
+        assert!(element.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_void_element_without_slash() {
+        let mut reader = Reader::new("hr>");
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+        element.from(&mut reader, &mut attributes);
+        assert_eq!(element.name, "hr");
+        assert!(element.is_self_closing());
+    }
+
+    #[test]
+    fn test_input_with_trailing_slash() {
+        // <input disabled /> — disabled attr, / is not an attribute
+        let mut reader = Reader::new("input disabled />");
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+        element.from(&mut reader, &mut attributes);
+        assert_eq!(element.name, "input");
+        assert!(element.is_self_closing());
+        // disabled should be an attribute, / should NOT
+        assert_eq!(element.attributes.len(), 1);
+        assert_eq!(element.attributes[0].key, "disabled");
+    }
+
+    #[test]
+    fn test_non_void_element_with_slash_is_not_self_closing() {
+        // <div />after — in HTML, div is NOT self-closing
+        // The slash is just ignored
+        let mut reader = Reader::new("div />");
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+        element.from(&mut reader, &mut attributes);
+        assert_eq!(element.name, "div");
+        assert!(!element.is_self_closing());
+        assert!(element.attributes.is_empty());
+    }
+
+    // --- Edge Case #3: tag whitespace ---
+
+    #[test]
+    fn test_tag_with_newline_between_attributes() {
+        let mut reader = Reader::new("a\n  href=\"x\"\n  class=\"link\">");
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+        element.from(&mut reader, &mut attributes);
+        assert_eq!(element.name, "a");
+        assert_eq!(element.class, Some("link"));
+        assert_eq!(element.attributes.len(), 1);
+        assert_eq!(element.attributes[0].key, "href");
+        assert_eq!(element.attributes[0].value, Some("x"));
+    }
+
+    #[test]
+    fn test_tag_with_tab_between_attributes() {
+        let mut reader = Reader::new("a\thref=x>");
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+        element.from(&mut reader, &mut attributes);
+        assert_eq!(element.name, "a");
+        assert_eq!(element.attributes[0].key, "href");
+        assert_eq!(element.attributes[0].value, Some("x"));
+    }
+
+    // --- Edge Case #7: comments with > inside ---
+
+    #[test]
+    fn test_comment_with_gt_inside() {
+        // <!-- a > b --><a>real</a>
+        // The > inside the comment should not terminate the comment
+        let mut reader = Reader::new("<!-- a > b -->");
+        let tag = XHtmlTag::from(&mut reader);
+        assert!(tag.is_none());
+        // Reader should be at end of comment, after -->
+        assert_eq!(reader.get_position(), 14);
+    }
+
+    #[test]
+    fn test_comment_with_nested_markup() {
+        // <!-- <div><span></span></div> -->
+        let mut reader = Reader::new("<!-- <div><span></span></div> -->");
+        let tag = XHtmlTag::from(&mut reader);
+        assert!(tag.is_none());
+    }
+
+    #[test]
+    fn test_doctype_is_skipped() {
+        let mut reader = Reader::new("!DOCTYPE html>");
+        let tag = XHtmlTag::from(&mut reader);
+        assert!(tag.is_none());
     }
 }

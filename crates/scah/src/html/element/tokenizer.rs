@@ -11,7 +11,8 @@ const DOUBLEQUOTE: u8 = b'"';
 const SINGLEQUOTE: u8 = b'\'';
 const EQUAL: u8 = b'=';
 const END_OF_ELEMENT: u8 = b'>';
-const UNQUOTED_BOUNDARIES: [u8; 8] = [
+const SLASH: u8 = b'/';
+const UNQUOTED_BOUNDARIES: [u8; 9] = [
     b' ',
     b'\t',
     b'\n',
@@ -20,6 +21,7 @@ const UNQUOTED_BOUNDARIES: [u8; 8] = [
     SINGLEQUOTE,
     EQUAL,
     END_OF_ELEMENT,
+    SLASH,
 ];
 
 impl<'a> ElementAttributeToken<'a> {

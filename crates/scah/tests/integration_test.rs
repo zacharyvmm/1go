@@ -403,3 +403,186 @@ fn test_macro_query_matches_runtime_store_contents() {
         );
     }
 }
+
+// ============================================================================
+// Edge Case Regression Tests
+// ============================================================================
+
+/// Edge Case #1: Empty elements must not panic
+#[test]
+fn test_empty_elements_no_panic() {
+    let html = "<div></div><p>   </p><div><!-- comment --></div><div><span></span></div>";
+    let queries = &[Query::all("div", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div").unwrap().collect();
+    assert_eq!(divs.len(), 3);
+    for div in &divs {
+        // None of these should have text content, but they must not panic
+        assert_eq!(div.text_content(&store), None);
+    }
+}
+
+/// Edge Case #2: Slash / self-closing behavior
+#[test]
+fn test_slash_self_closing() {
+    let html = r#"<hr/><hr /><input disabled/><input disabled /><div />after</div>"#;
+    let queries = &[Query::all("hr", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    // Both <hr> variants should be matched
+    assert_eq!(store.get("hr").unwrap().count(), 2);
+
+    // Non-void elements with / should NOT be self-closing
+    let div_queries = &[Query::all("div", Save::all()).unwrap().build()];
+    let div_store = parse(html, div_queries);
+    let divs: Vec<_> = div_store.get("div").unwrap().collect();
+    assert_eq!(divs.len(), 1);
+}
+
+/// Edge Case #2 (continued): / should not leak into attributes
+#[test]
+fn test_slash_not_in_attributes() {
+    let queries = &[Query::all("hr", Save::all()).unwrap().build()];
+    let store = parse("<hr />", queries);
+    let hrs: Vec<_> = store.get("hr").unwrap().collect();
+    assert_eq!(hrs.len(), 1);
+    // / should NOT appear as an attribute
+    assert!(hrs[0].attribute(&store, "/").is_none());
+}
+
+/// Edge Case #3: Whitespace in tags (tabs, newlines)
+#[test]
+fn test_whitespace_in_tags() {
+    let html = "<a\n  href=\"x\"\n  class=\"link\">text</a>";
+    let queries = &[Query::all("a.link", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let links: Vec<_> = store.get("a.link").unwrap().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].attribute(&store, "href"), Some("x"));
+}
+
+/// Edge Case #7: Comments containing >
+#[test]
+fn test_comment_with_gt() {
+    // The > inside the comment should not leak fake elements
+    let html = r#"<!-- a > <a href="fake">not-real</a> --><a href="real">real</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    // Only the real link should be found
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].attribute(&store, "href"), Some("real"));
+}
+
+/// Edge Case #8: Raw-text / RCDATA elements (style, script, textarea, title)
+#[test]
+fn test_raw_text_elements() {
+    let html = r#"<style>.x::before { content: "<a>"; }</style><a>real</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    // The fake <a> inside <style> should not be matched
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].text_content(&store), Some("real"));
+}
+
+#[test]
+fn test_script_raw_text() {
+    let html = r#"<script>const x = "<a>fake</a>";</script><a>real</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].text_content(&store), Some("real"));
+}
+
+#[test]
+fn test_textarea_raw_text() {
+    let html = r#"<textarea><a>not an element</a></textarea><a>real</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].text_content(&store), Some("real"));
+}
+
+#[test]
+fn test_title_raw_text() {
+    let html = r#"<title><a>not an element</a></title><a>real</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].text_content(&store), Some("real"));
+}
+
+/// Edge Case #4: [id] and [class] attribute selectors
+#[test]
+fn test_id_attribute_selector() {
+    let html = r#"<div id="a">A</div><div>B</div>"#;
+    let queries = &[Query::all("div[id]", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div[id]").unwrap().collect();
+    assert_eq!(divs.len(), 1);
+    assert_eq!(divs[0].text_content(&store), Some("A"));
+}
+
+#[test]
+fn test_class_attribute_selector() {
+    let html = r#"<div class="x">A</div><div>B</div>"#;
+    let queries = &[Query::all("div[class]", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div[class]").unwrap().collect();
+    assert_eq!(divs.len(), 1);
+    assert_eq!(divs[0].text_content(&store), Some("A"));
+}
+
+/// Edge Case #5: Nested descendant deduplication
+#[test]
+fn test_nested_descendant_dedup() {
+    let html = r#"<section><div><a id="one">1</a></div><div><div><a id="two">2</a></div></div></section>"#;
+    let queries = &[Query::first("section", Save::none())
+        .unwrap()
+        .then(|s| Ok([s.all("div a", Save::only_text_content())?]))
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let root_sections: Vec<_> = store.get("section").unwrap().collect();
+    assert_eq!(root_sections.len(), 1);
+    // Each <a> should appear exactly once, even though "two"
+    // is a descendant of two nested divs
+    let anchors: Vec<_> = root_sections[0]
+        .get(&store, "div a")
+        .unwrap()
+        .collect();
+    assert_eq!(anchors.len(), 2);
+    let texts: Vec<_> = anchors.iter().map(|a| a.text_content(&store)).collect();
+    assert!(texts.contains(&Some("1")));
+    assert!(texts.contains(&Some("2")));
+}
+
+/// Edge Case #6: Nested first() completion
+#[test]
+fn test_nested_first_completion() {
+    // Each <div> should only yield its FIRST <a> child
+    let html = r#"<div><a>1</a><a>2</a></div><div><a>3</a><a>4</a></div>"#;
+    let queries = &[Query::all("div", Save::none())
+        .unwrap()
+        .then(|d| Ok([d.first("> a", Save::only_text_content())?]))
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div").unwrap().collect();
+    assert_eq!(divs.len(), 2);
+
+    for div in &divs {
+        let children: Vec<_> = div.get(&store, "> a").unwrap().collect();
+        // Each div should have exactly ONE <a> child (the first one)
+        assert_eq!(children.len(), 1, "Each div should have exactly 1 first child <a>");
+    }
+}

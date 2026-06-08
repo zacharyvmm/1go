@@ -5,6 +5,7 @@ use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRe
 use crate::store::ElementId;
 use crate::store::Store;
 use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
+use smallvec::SmallVec;
 
 /// NFA execution engine for streaming StAX events.
 ///
@@ -108,6 +109,11 @@ where
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();
 
+        // Track which (section, parent) pairs have already been saved for
+        // this element to prevent duplicate saves from multiple cursors
+        // matching the same descendant at different nesting depths.
+        let mut emitted: SmallVec<[(QuerySectionId, ElementId); 4]> = SmallVec::new();
+
         for i in 0..snapshot_len {
             if self.cursors[i].end() {
                 continue;
@@ -200,13 +206,19 @@ where
                     }
 
                     let saved_parent = if is_save_point {
-                        save_hits.push(Self::save_element(
-                            runner_index,
-                            self.query,
-                            store,
-                            element.clone(),
-                            &mut self.cursors[i],
-                        ));
+                        let section = position.selection;
+                        let parent = self.cursors[i].parent;
+                        let key = (section, parent);
+                        if !emitted.contains(&key) {
+                            emitted.push(key);
+                            save_hits.push(Self::save_element(
+                                runner_index,
+                                self.query,
+                                store,
+                                element.clone(),
+                                &mut self.cursors[i],
+                            ));
+                        }
                         let sp = self.cursors[i].parent;
                         self.cursors[i].parent = original_parent;
                         sp
@@ -241,6 +253,36 @@ where
                 super::cursor::CursorMode::Anchored { .. } => {
                     if self_closing {
                         if is_save_point {
+                            let section = position.selection;
+                            let parent = self.cursors[i].parent;
+                            let key = (section, parent);
+                            if !emitted.contains(&key) {
+                                emitted.push(key);
+                                let mut base = ScopedCursor::new_moving(
+                                    depth,
+                                    self.cursors[i].parent,
+                                    self.cursors[i].position,
+                                );
+                                save_hits.push(Self::save_element(
+                                    runner_index,
+                                    self.query,
+                                    store,
+                                    element.clone(),
+                                    &mut base,
+                                ));
+                            }
+                        }
+                        continue;
+                    }
+
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+
+                    let saved_parent = if is_save_point {
+                        let section = position.selection;
+                        let parent = self.cursors[i].parent;
+                        let key = (section, parent);
+                        if !emitted.contains(&key) {
+                            emitted.push(key);
                             let mut base = ScopedCursor::new_moving(
                                 depth,
                                 self.cursors[i].parent,
@@ -253,26 +295,10 @@ where
                                 element.clone(),
                                 &mut base,
                             ));
+                            base.parent
+                        } else {
+                            self.cursors[i].parent
                         }
-                        continue;
-                    }
-
-                    spawned_positions = self.cursors[i].next_positions(self.query);
-
-                    let saved_parent = if is_save_point {
-                        let mut base = ScopedCursor::new_moving(
-                            depth,
-                            self.cursors[i].parent,
-                            self.cursors[i].position,
-                        );
-                        save_hits.push(Self::save_element(
-                            runner_index,
-                            self.query,
-                            store,
-                            element.clone(),
-                            &mut base,
-                        ));
-                        base.parent
                     } else {
                         self.cursors[i].parent
                     };

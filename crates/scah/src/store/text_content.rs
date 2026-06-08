@@ -35,7 +35,11 @@ impl TextContent {
     }
 
     pub fn get_position(&self) -> usize {
-        assert!(!self.content.is_empty());
+        // Return 0 for empty content instead of panicking.
+        // Callers must handle the case where content is empty.
+        if self.content.is_empty() {
+            return 0;
+        }
         // BUG: the position is off by one
         self.content.len() - 1
     }

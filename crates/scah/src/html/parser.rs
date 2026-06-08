@@ -9,6 +9,16 @@ use crate::debug::TraceEvent;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer};
 use crate::store::Store;
 
+/// Returns `true` if the element's content must be treated as raw text
+/// and not parsed as HTML (script, style, textarea, title).
+#[inline]
+fn is_raw_text_element(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "script" | "style" | "textarea" | "title"
+    )
+}
+
 pub struct XHtmlParser<'html, 'query, Q> {
     position: DocumentPosition,
     pub selectors: QueryMultiplexer<'query, Q>,
@@ -19,7 +29,10 @@ pub struct XHtmlParser<'html, 'query, Q> {
     implied_closes: Vec<OpenElement<'html>>,
     save_hits: Vec<crate::engine::multiplexer::SaveHit>,
     capture_text_content: bool,
-    in_script: bool,
+    /// When `Some(tag)`, we are inside a raw-text or escapable-raw-text
+    /// element (`script`, `style`, `textarea`, `title`) and must consume
+    /// everything until the matching closing tag.
+    raw_text_tag: Option<&'html str>,
     eof_drained: bool,
 }
 
@@ -42,7 +55,7 @@ where
             implied_closes: Vec::new(),
             save_hits: Vec::new(),
             capture_text_content,
-            in_script: false,
+            raw_text_tag: None,
             eof_drained: false,
             store: Store::default(),
         }
@@ -63,14 +76,17 @@ where
             implied_closes: Vec::new(),
             save_hits: Vec::new(),
             capture_text_content,
-            in_script: false,
+            raw_text_tag: None,
             eof_drained: false,
             store: Store::with_capacity(capacity),
         }
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
-        if self.in_script {
+        if let Some(raw_tag) = self.raw_text_tag {
+            // We are inside a raw-text or escapable-raw-text element.
+            // Scan until we find the case-insensitive closing tag.
+            let close_prefix_len = 2 + raw_tag.len(); // "</" + tagname
             loop {
                 reader.next_until(b'<');
                 if reader.peek().is_none() {
@@ -78,19 +94,47 @@ where
                     return false;
                 }
 
-                if reader.match_ignore_case("</script>") {
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                        && let Some(position) =
-                            self.store.text_content.push(reader, reader.get_position())
-                    {
-                        self.position.text_content_position = position;
+                // Check if this is the closing tag for our raw text element.
+                // We need: '</' + tag_name + '>' (case-insensitive tag name).
+                let pos = reader.get_position();
+                let source = reader.source_bytes();
+                if pos + close_prefix_len <= source.len()
+                    && source[pos] == b'<'
+                    && source[pos + 1] == b'/'
+                {
+                    // Compare the tag name case-insensitively
+                    let tag_start = pos + 2;
+                    let tag_end = tag_start + raw_tag.len();
+                    let candidate = &source[tag_start..tag_end.min(source.len())];
+                    let matches_tag = candidate.len() == raw_tag.len()
+                        && candidate.eq_ignore_ascii_case(raw_tag.as_bytes());
+                    // Check for '>' after the tag name (possibly with whitespace)
+                    let has_close = if matches_tag && tag_end < source.len() {
+                        // Allow optional whitespace before '>'
+                        let after = &source[tag_end..];
+                        after.iter().position(|&b| !b.is_ascii_whitespace())
+                            .map_or(false, |i| after[i] == b'>')
+                    } else {
+                        false
+                    };
+
+                    if has_close {
+                        // Push any remaining text content before the closing tag
+                        if self.capture_text_content
+                            && self.store.text_content.text_start.is_some()
+                            && let Some(position) =
+                                self.store.text_content.push(reader, reader.get_position())
+                        {
+                            self.position.text_content_position = position;
+                        }
+                        // Exit raw text mode but leave the reader at '<' so the
+                        // normal parser path can handle '</tagname>' as a close tag.
+                        reader.set_position(pos);
+                        self.raw_text_tag = None;
+                        break;
                     }
-                    self.in_script = false;
-                    break;
-                } else {
-                    reader.skip();
                 }
+                reader.skip(); // skip '<'
             }
         }
 
@@ -147,8 +191,10 @@ where
 
         match tag {
             XHtmlTag::Open => {
-                if self.element.name.eq_ignore_ascii_case("script") {
-                    self.in_script = true;
+                // Enter raw-text mode for elements whose content must not be
+                // parsed as HTML: script, style, textarea, title.
+                if is_raw_text_element(self.element.name) {
+                    self.raw_text_tag = Some(self.element.name);
                 }
 
                 self.position.reader_position = tag_start_position;
@@ -348,13 +394,12 @@ where
                 .map(|start_idx| reader.slice(start_idx..self.position.reader_position));
 
             let text_content = saved.text_content_start.and_then(|start_idx| {
+                if self.store.text_content.is_empty() {
+                    return None;
+                }
                 let end = self.store.text_content.get_position();
                 if start_idx == usize::MAX {
-                    if self.store.text_content.is_empty() {
-                        None
-                    } else {
-                        Some(0..end)
-                    }
+                    Some(0..end)
                 } else if start_idx == end {
                     None
                 } else {
@@ -588,7 +633,6 @@ mod tests {
         "#;
 
     #[test]
-    #[ignore = "Known issue: Duplication of elements is not handled"]
     fn test_multi_selection() {
         let mut reader = Reader::new(MORE_ADVANCED_BASIC_HTML);
         let queries = Query::all("main > section", Save::all())
@@ -1268,10 +1312,6 @@ mod tests {
                 Attribute {
                     key: "src",
                     value: Some("https://example.com/p1.png")
-                },
-                Attribute {
-                    key: "/",
-                    value: None
                 }
             ]
         );
@@ -1367,16 +1407,8 @@ mod tests {
                     value: Some("https://example.com/p1.png")
                 },
                 Attribute {
-                    key: "/",
-                    value: None
-                },
-                Attribute {
                     key: "src",
                     value: Some("https://example.com/p2.png")
-                },
-                Attribute {
-                    key: "/",
-                    value: None
                 },
             ]
         );
@@ -1434,5 +1466,180 @@ mod tests {
         assert_eq!(p2_p.name, "p");
         assert!(p2_p.inner_html.is_some());
         assert!(p2_p.text_content(&store).is_some());
+    }
+
+    // --- Edge Case #1 regression tests: empty elements must not panic ---
+
+    #[test]
+    fn test_empty_div_does_not_panic_with_text_content() {
+        let html = "<div></div>";
+        let queries = &[Query::all("div", Save::only_text_content())
+            .unwrap()
+            .build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].text_content(&store), None);
+    }
+
+    #[test]
+    fn test_empty_div_does_not_panic_with_all() {
+        let html = "<div></div>";
+        let queries = &[Query::all("div", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].text_content(&store), None);
+    }
+
+    #[test]
+    fn test_whitespace_only_element_does_not_panic() {
+        let html = "<p>   </p>";
+        let queries = &[Query::all("p", Save::only_text_content())
+            .unwrap()
+            .build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("p").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].text_content(&store), None);
+    }
+
+    #[test]
+    fn test_comment_only_element_does_not_panic() {
+        let html = "<div><!-- comment only --></div>";
+        let queries = &[Query::all("div", Save::only_text_content())
+            .unwrap()
+            .build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].text_content(&store), None);
+    }
+
+    #[test]
+    fn test_nested_empty_span_does_not_panic() {
+        let html = "<div><span></span></div>";
+        let queries = &[Query::all("div", Save::only_text_content())
+            .unwrap()
+            .build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].text_content(&store), None);
+    }
+
+    // --- Edge Case #4 regression tests: [id] and [class] selectors ---
+
+    #[test]
+    fn test_attribute_selector_id_bare() {
+        let html = "<div id='x'>text</div><div>other</div>";
+        let queries = &[Query::all("div[id]", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div[id]").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].id, Some("x"));
+    }
+
+    #[test]
+    fn test_attribute_selector_id_equals() {
+        let html = "<div id='x'>text</div><div id='y'>other</div>";
+        let queries = &[Query::all("div[id=\"x\"]", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div[id=\"x\"]").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].id, Some("x"));
+    }
+
+    #[test]
+    fn test_attribute_selector_class_bare() {
+        let html = "<div class='foo'>text</div><div>other</div>";
+        let queries = &[Query::all("div[class]", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div[class]").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].class, Some("foo"));
+    }
+
+    #[test]
+    fn test_attribute_selector_class_contains() {
+        let html = "<div class='foo bar'>text</div><div class='baz'>other</div>";
+        let queries = &[Query::all("div[class~=\"foo\"]", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div[class~=\"foo\"]").unwrap().collect();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].class, Some("foo bar"));
+    }
+
+    // --- Edge Case #8 regression tests: raw-text / RCDATA elements ---
+
+    #[test]
+    fn test_style_contents_not_parsed_as_markup() {
+        let html = "<style>.x::before { content: \"<a>\"; }</style><a>real</a>";
+        let queries = &[Query::all("a", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("a").unwrap().collect();
+        assert_eq!(elements.len(), 1, "Only the real <a> outside <style> should match");
+        assert_eq!(elements[0].text_content(&store), Some("real"));
+    }
+
+    #[test]
+    fn test_textarea_contents_not_parsed_as_markup() {
+        let html = "<textarea><a>not an element</a></textarea><a>real</a>";
+        let queries = &[Query::all("a", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("a").unwrap().collect();
+        assert_eq!(elements.len(), 1, "Only the real <a> outside <textarea> should match");
+        assert_eq!(elements[0].text_content(&store), Some("real"));
+    }
+
+    #[test]
+    fn test_title_contents_not_parsed_as_markup() {
+        let html = "<title><a>not an element</a></title><a>real</a>";
+        let queries = &[Query::all("a", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("a").unwrap().collect();
+        assert_eq!(elements.len(), 1, "Only the real <a> outside <title> should match");
+        assert_eq!(elements[0].text_content(&store), Some("real"));
+    }
+
+    // --- Edge Case #5 regression tests: nested descendant deduplication ---
+
+    #[test]
+    fn test_nested_descendant_no_duplicates() {
+        let html = "<section><div><div><a href='x'>X</a></div></div></section>";
+        let queries = &[Query::all("section div a", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("section div a").unwrap().collect();
+        assert_eq!(elements.len(), 1, "Should not duplicate <a> for nested divs");
+        assert_eq!(elements[0].name, "a");
+    }
+
+    #[test]
+    fn test_multi_level_descendant_no_duplicates() {
+        let html = "<div id='a'><div id='b'><span>x</span></div></div>";
+        let queries = &[Query::all("div span", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+        let elements: Vec<_> = store.get("div span").unwrap().collect();
+        assert_eq!(elements.len(), 1, "Single <span> should not match both <div> parents");
+        assert_eq!(elements[0].name, "span");
+    }
+
+    // --- Edge Case #6 regression tests: nested first() completion ---
+
+    #[test]
+    fn test_nested_first_only_matches_one_per_parent() {
+        let html = "<div><a>1</a><a>2</a></div><div><a>3</a><a>4</a></div>";
+        let queries = &[Query::all("div", Save::none())
+            .unwrap()
+            .then(|div| Ok([div.first("a", Save::all())?]))
+            .unwrap()
+            .build()];
+        let store = parse(html, queries);
+        let divs: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(divs.len(), 2);
+        for div in &divs {
+            let as_: Vec<_> = div.get(&store, "a").unwrap().collect();
+            assert_eq!(as_.len(), 1, "Each div should have exactly one <a> via first()");
+        }
     }
 }
