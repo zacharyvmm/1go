@@ -639,7 +639,7 @@ unsafe fn find_tag_open_structural_avx2(input: &[u8], start: usize) -> usize {
     memchr::memchr(b'<', &input[pos..]).map_or(len, |off| pos + off)
 }
 
-/// Scan for the next '<' (tag-open) using direct byte comparison on NEON.
+/// Scan for the next '<' using NEON unified structural scanner.
 ///
 /// # Safety
 /// The caller must ensure NEON is available.
@@ -648,17 +648,25 @@ unsafe fn find_tag_open_structural_avx2(input: &[u8], start: usize) -> usize {
 unsafe fn find_tag_open_structural_neon(input: &[u8], start: usize) -> usize {
     let len = input.len();
     let mut pos = start;
-    let needle = std::arch::aarch64::vdupq_n_u8(b'<');
 
     while pos + 16 <= len {
-        let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
-        let cmp = std::arch::aarch64::vceqq_u8(data, needle);
-        let mask = neon_movemask_u8(cmp);
+        let (_, mask) = unsafe {
+            let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
+            let mask = scan_boundary_combined_neon(data);
+            (data, mask)
+        };
 
         if mask != 0 {
-            return pos + mask.trailing_zeros() as usize;
+            let end = (pos + 16).min(len);
+            while pos < end {
+                if input[pos] == b'<' {
+                    return pos;
+                }
+                pos += 1;
+            }
+        } else {
+            pos += 16;
         }
-        pos += 16;
     }
 
     memchr::memchr(b'<', &input[pos..]).map_or(len, |off| pos + off)
@@ -1066,8 +1074,6 @@ pub(crate) unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) ->
 }
 
 /// NEON implementation: scan 16-byte chunks to find the first attribute boundary.
-///
-/// Table loads are hoisted out of the hot loop — saves vld1q_u8 × 2 per chunk.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub(crate) unsafe fn find_attribute_boundary_neon(input: &[u8], start: usize) -> Option<BoundaryHit> {
@@ -1075,24 +1081,9 @@ pub(crate) unsafe fn find_attribute_boundary_neon(input: &[u8], start: usize) ->
         let len = input.len();
         let mut pos = start;
 
-        // Hoist table loads
-        let lo_table = std::arch::aarch64::vld1q_u8(STRUCTURAL_LO.as_ptr());
-        let hi_table = std::arch::aarch64::vld1q_u8(STRUCTURAL_HI.as_ptr());
-        let zero = std::arch::aarch64::vdupq_n_u8(0);
-        let bit7 = std::arch::aarch64::vdupq_n_u8(0x80);
-
         while pos + 16 <= len {
             let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
-
-            // Inlined PSHUFB-like scan
-            let lo = std::arch::aarch64::vqtbl1q_u8(lo_table, data);
-            let nibbles = std::arch::aarch64::vshrq_n_u8(data, 4);
-            let hi = std::arch::aarch64::vqtbl1q_u8(hi_table, nibbles);
-            let combined = std::arch::aarch64::vandq_u8(lo, hi);
-            let is_boundary = std::arch::aarch64::vceqq_u8(combined, zero);
-            let in_bit7 = std::arch::aarch64::vmvnq_u8(is_boundary);
-            let in_bit7 = std::arch::aarch64::vandq_u8(in_bit7, bit7);
-            let mask = neon_movemask_u8(in_bit7);
+            let mask = scan_boundary_combined_neon(data);
 
             if mask != 0 {
                 let bit = mask.trailing_zeros() as usize;
