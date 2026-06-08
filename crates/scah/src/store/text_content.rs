@@ -47,7 +47,13 @@ impl TextContent {
     pub fn push<'html>(&mut self, reader: &Reader<'html>, end_position: usize) -> Option<usize> {
         // It has to be inside an element, so this is an impossible case other than at initialization
         let Some(start_position) = self.text_start else {
-            unreachable!("Their has to be a start position set before pushing text content")
+            // Safe fallback — if invariants are violated, return None
+            // instead of panicking in release builds.
+            debug_assert!(
+                false,
+                "Their has to be a start position set before pushing text content"
+            );
+            return None;
         };
         let text = reader.slice(start_position..end_position).trim();
 

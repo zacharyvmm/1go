@@ -338,7 +338,7 @@ fn find_any_scalar(input: &[u8], start: usize, needles: &[u8; 4]) -> usize {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32 {
-    // Direct comparison for whitespace characters: space(0x20), tab(0x09), newline(0x0A), CR(0x0D)
+    // Direct comparison for whitespace characters: space(0x20), tab(0x09), newline(0x0A), CR(0x0D), FF(0x0C)
     let is_space =
         std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x20));
     let is_tab =
@@ -347,10 +347,13 @@ pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32
         std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0A));
     let is_cr =
         std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0D));
+    let is_ff =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0C));
     let any = std::arch::x86_64::_mm256_or_si256(
         std::arch::x86_64::_mm256_or_si256(is_space, is_tab),
         std::arch::x86_64::_mm256_or_si256(is_lf, is_cr),
     );
+    let any = std::arch::x86_64::_mm256_or_si256(any, is_ff);
     std::arch::x86_64::_mm256_movemask_epi8(any) as u32
 }
 
@@ -367,10 +370,12 @@ pub unsafe fn classify_whitespace_neon(input: std::arch::aarch64::uint8x16_t) ->
         let is_tab = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x09));
         let is_lf = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0A));
         let is_cr = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0D));
+        let is_ff = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0C));
         let any = std::arch::aarch64::vorrq_u8(
             std::arch::aarch64::vorrq_u8(is_space, is_tab),
             std::arch::aarch64::vorrq_u8(is_lf, is_cr),
         );
+        let any = std::arch::aarch64::vorrq_u8(any, is_ff);
         neon_movemask_u8(any)
     }
 }
@@ -597,17 +602,24 @@ pub fn index_structural_characters(input: &[u8]) -> Vec<u32> {
     indexes
 }
 
-/// Compare 4 bytes case-insensitively using SWAR
+/// Compare 4 bytes case-insensitively using SWAR.
+///
+/// # Safety
+///
+/// This function uses the `val |= 0x20` trick to normalize case for A-Z/a-z.
+/// **All bytes must be ASCII alphabetic (A-Z or a-z)**; non-alpha bytes may
+/// produce false matches (e.g., `[` matches `{`).
 #[inline]
 pub fn eq_ignore_case_4(a: &[u8], b: [u8; 4]) -> bool {
     if a.len() < 4 {
         return false;
     }
-    let mut val = u32::from_ne_bytes([a[0], a[1], a[2], a[3]]);
-    // Mask out bit 5 (case bit) from each byte
-    val |= 0x20202020;
-    let target = u32::from_ne_bytes(b) | 0x20202020;
-    val == target
+    let val = u32::from_ne_bytes([a[0], a[1], a[2], a[3]]);
+    // Lowercase all four bytes by setting bit 5.
+    // This is only valid for ASCII A-Z and a-z bytes.
+    let packed_lower = val | 0x20202020;
+    let target_lower = u32::from_ne_bytes(b) | 0x20202020;
+    packed_lower == target_lower
 }
 
 /// Compare bytes case-insensitively using SWAR (variable length)
@@ -968,7 +980,7 @@ pub fn find_attribute_boundary_scalar(input: &[u8], start: usize) -> Option<Boun
         let kind = match byte {
             b'"' | b'\'' => BoundaryKind::Quote,
             b'=' => BoundaryKind::Equals,
-            b' ' | b'\t' | b'\n' | b'\r' => BoundaryKind::Whitespace,
+            b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' => BoundaryKind::Whitespace,
             b'>' => BoundaryKind::Gt,
             _ => continue,
         };

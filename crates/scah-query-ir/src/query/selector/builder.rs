@@ -237,6 +237,15 @@ impl<'query> AttributeSelection<'query> {
             ));
         }
 
+        // If a match selector operator (~, ^, $, *, |) was seen without a
+        // following `=`, that's an error. Example: [attr~] or [attr*].
+        if !equal && kv.selection_kind != AttributeSelectionKind::Presence {
+            return Err(SelectorParseError::new(
+                "attribute selector is missing '=' after match operator",
+                reader.get_position(),
+            ));
+        }
+
         kv.refresh_equal();
 
         Ok(AttributeSelection {

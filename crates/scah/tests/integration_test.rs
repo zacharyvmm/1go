@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 #[cfg(debug_assertions)]
 use scah::debug;
-use scah::{Attribute, Query, QuerySpec, Save, Store, parse, query};
+use scah::{Attribute, Query, QuerySpec, Save, Store, parse, parse_tape, query};
 const HTML: &str = r#"
 <!DOCTYPE html>
 <html>
@@ -672,4 +672,101 @@ fn test_then_same_element_two_parents() {
     assert_eq!(inner_children.len(), 1, "inner div should see <a> as descendant");
     assert_eq!(outer_children[0].text_content(&store), Some("X"));
     assert_eq!(inner_children[0].text_content(&store), Some("X"));
+}
+
+// ============================================================================
+// Fix Regression Tests (edge-case-discovery-and-remediation)
+// ============================================================================
+
+/// Fix 1: Double `=` in unquoted attrs must not panic
+#[test]
+fn test_double_equals_in_unquoted_attrs() {
+    let html = r#"<div key=a=b>text</div>"#;
+    let queries = &[Query::all("div", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div").unwrap().collect();
+    assert_eq!(divs.len(), 1);
+    // The key should be parsed (key="a" and then "b" becomes a separate key)
+    // or the value could be consumed as-is. We mainly care it doesn't panic.
+}
+
+/// Fix 2: `<!-->` must not swallow rest of document
+#[test]
+fn test_abrupt_comment_close() {
+    let html = r#"<!--><div id="real">content</div>"#;
+    let queries = &[Query::all("div#real", Save::all()).unwrap().build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div#real").unwrap().collect();
+    assert_eq!(divs.len(), 1, "abruptly-closed comment should not swallow the div");
+}
+
+/// Fix 2 also: `<!--` alone at EOF should not panic
+#[test]
+fn test_comment_open_only() {
+    let html = "<!--";
+    let queries = &[Query::all("div", Save::none()).unwrap().build()];
+    let store = parse(html, queries);
+    // Just verify no panic
+    assert!(store.get("div").is_none());
+}
+
+/// Fix 3: Form feed (U+000C) must be treated as whitespace
+#[test]
+fn test_form_feed_as_whitespace() {
+    let html = "<div\x0Cclass=\"real\">text</div>";
+    let queries = &[Query::all("div.real", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div.real").unwrap().collect();
+    assert_eq!(divs.len(), 1);
+}
+
+/// Fix 5: Attribute match operators without `=` must be rejected
+#[test]
+fn test_attr_selector_missing_equals() {
+    // [attr~] without `=` should error
+    assert!(Query::all("div[class~]", Save::none()).is_err());
+    // [attr^] without `=` should error
+    assert!(Query::all("div[id^]", Save::none()).is_err());
+    // [attr$] without `=` should error
+    assert!(Query::all("a[href$]", Save::none()).is_err());
+    // [attr*] without `=` should error
+    assert!(Query::all("a[href*]", Save::none()).is_err());
+    // [attr] (presence) without `=` should still work
+    assert!(Query::all("div[id]", Save::none()).is_ok());
+    assert!(Query::all("div[class]", Save::none()).is_ok());
+}
+
+/// Fix 6: Simple tag parser must handle all raw text elements, not just script
+#[test]
+fn test_simple_tag_parser_style_raw_text() {
+    let html = r#"<style>div { content: "<a>"; }</style><a href="real">link</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse_tape(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].attribute(&store, "href"), Some("real"));
+}
+
+/// Fix 6 continued: textarea / title in simple tag parser
+#[test]
+fn test_simple_tag_parser_textarea_raw_text() {
+    let html = r#"<textarea><a>not an element</a></textarea><a href="real">link</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse_tape(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].attribute(&store, "href"), Some("real"));
+}
+
+/// Fix 6 continued: title in simple tag parser
+#[test]
+fn test_simple_tag_parser_title_raw_text() {
+    let html = r#"<title><a>not an element</a></title><a href="real">link</a>"#;
+    let queries = &[Query::all("a", Save::all()).unwrap().build()];
+    let store = parse_tape(html, queries);
+    let links: Vec<_> = store.get("a").unwrap().collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].attribute(&store, "href"), Some("real"));
 }

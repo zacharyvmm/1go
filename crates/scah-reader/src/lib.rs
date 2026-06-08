@@ -125,7 +125,7 @@ impl<'a> Reader<'a> {
     #[inline]
     pub fn skip_whitespace(&mut self) {
         while self.position < self.source.len()
-            && matches!(self.source[self.position], b' ' | b'\t' | b'\n' | b'\r')
+            && matches!(self.source[self.position], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')
         {
             self.position += 1;
         }

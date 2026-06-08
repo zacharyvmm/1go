@@ -11,11 +11,12 @@ const DOUBLEQUOTE: u8 = b'"';
 const SINGLEQUOTE: u8 = b'\'';
 const EQUAL: u8 = b'=';
 const END_OF_ELEMENT: u8 = b'>';
-const UNQUOTED_BOUNDARIES: [u8; 8] = [
+const UNQUOTED_BOUNDARIES: [u8; 9] = [
     b' ',
     b'\t',
     b'\n',
     b'\r',
+    b'\x0C',
     DOUBLEQUOTE,
     SINGLEQUOTE,
     EQUAL,

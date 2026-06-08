@@ -123,21 +123,21 @@ fn parse_simple_tag<'html: 'query, 'query: 'html>(
         };
 
         if !info.is_close
-            && tag_name_eq_ignore_ascii_case(input, &info.name, "script")
             && !tag_name_eq(input, &info.name, simple.tag)
-            && let Some((script_close_start, script_close_end)) =
-                find_script_close(input, tag_end + 1)
+            && is_raw_text_tag(input, &info.name)
+            && let Some((raw_close_start, raw_close_end)) =
+                find_raw_text_close(input, tag_name_str(input, &info.name), tag_end + 1)
         {
             if simple.save.text_content && !captures.is_empty() {
                 push_text_segment(
                     &mut store,
                     &reader,
                     text_start.unwrap_or(tag_end + 1),
-                    script_close_start,
+                    raw_close_start,
                 );
-                text_start = Some(script_close_end + 1);
+                text_start = Some(raw_close_end + 1);
             }
-            search_pos = script_close_end + 1;
+            search_pos = raw_close_end + 1;
             continue;
         }
 
@@ -277,7 +277,7 @@ fn find_tag_end(input: &[u8], mut position: usize) -> Option<usize> {
 fn tag_info(input: &[u8], tag_start: usize, tag_end: usize) -> Option<TagInfo> {
     let mut position = tag_start + 1;
     while position < tag_end
-        && (input[position] == b'<' || matches!(input[position], b' ' | b'\t' | b'\n' | b'\r'))
+        && (input[position] == b'<' || matches!(input[position], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C'))
     {
         position += 1;
     }
@@ -289,7 +289,7 @@ fn tag_info(input: &[u8], tag_start: usize, tag_end: usize) -> Option<TagInfo> {
     let is_close = input[position] == b'/';
     if is_close {
         position += 1;
-        while position < tag_end && matches!(input[position], b' ' | b'\t' | b'\n' | b'\r') {
+        while position < tag_end && matches!(input[position], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C') {
             position += 1;
         }
     }
@@ -297,7 +297,7 @@ fn tag_info(input: &[u8], tag_start: usize, tag_end: usize) -> Option<TagInfo> {
     let name_start = position;
     while position < tag_end {
         match input[position] {
-            b' ' | b'\t' | b'\n' | b'\r' | b'/' => break,
+            b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' | b'/' => break,
             _ => position += 1,
         }
     }
@@ -307,7 +307,7 @@ fn tag_info(input: &[u8], tag_start: usize, tag_end: usize) -> Option<TagInfo> {
     }
 
     let mut before_end = tag_end;
-    while before_end > name_start && matches!(input[before_end - 1], b' ' | b'\t' | b'\n' | b'\r') {
+    while before_end > name_start && matches!(input[before_end - 1], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C') {
         before_end -= 1;
     }
 
@@ -328,12 +328,26 @@ fn tag_name_eq_ignore_ascii_case(input: &[u8], range: &Range<usize>, tag: &str) 
     input[range.clone()].eq_ignore_ascii_case(tag.as_bytes())
 }
 
-fn find_script_close(input: &[u8], mut search_pos: usize) -> Option<(usize, usize)> {
+#[inline]
+fn is_raw_text_tag(input: &[u8], range: &Range<usize>) -> bool {
+    let name = &input[range.clone()];
+    matches!(
+        name.to_ascii_lowercase().as_slice(),
+        b"script" | b"style" | b"textarea" | b"title"
+    )
+}
+
+#[inline]
+fn tag_name_str<'a>(input: &'a [u8], range: &Range<usize>) -> &'a str {
+    unsafe { std::str::from_utf8_unchecked(&input[range.clone()]) }
+}
+
+fn find_raw_text_close(input: &[u8], tag: &str, mut search_pos: usize) -> Option<(usize, usize)> {
     while let Some(tag_start) = find_next_tag(input, search_pos) {
         let tag_end = find_tag_end(input, tag_start + 1)?;
         if let Some(info) = tag_info(input, tag_start, tag_end)
             && info.is_close
-            && tag_name_eq_ignore_ascii_case(input, &info.name, "script")
+            && tag_name_eq_ignore_ascii_case(input, &info.name, tag)
         {
             return Some((tag_start, tag_end));
         }

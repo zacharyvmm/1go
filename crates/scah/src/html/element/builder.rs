@@ -113,7 +113,13 @@ impl<'html> XHtmlElement<'html> {
             match token {
                 ElementAttributeToken::String(string_value) => match key {
                     None => {
-                        debug_assert!(!assign);
+                        // If `assign` is true, a stray `=` appeared without a preceding key.
+                        // Example: <div key=a=b> — after "key=a" is consumed, the next `=`
+                        // sets assign=true but there's no key yet. Treat this `=` as stray
+                        // and use string_value as the next key.
+                        if assign {
+                            assign = false;
+                        }
                         key = Some(string_value);
                     }
                     Some(k) => {
@@ -216,7 +222,7 @@ impl<'html> XHtmlElement<'html> {
         let mut name_end = name_start;
         while name_end < tag_bytes.len() {
             match tag_bytes[name_end] {
-                b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/' => break,
+                b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' | b'>' | b'/' => break,
                 _ => name_end += 1,
             }
         }
@@ -318,7 +324,7 @@ impl<'html> IElement<'html> for XHtmlElement<'html> {
 
 impl<'a> XHtmlTag<'a> {
     pub fn from(reader: &mut Reader<'a>) -> Option<Self> {
-        reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', b'<']);
+        reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', b'\x0C', b'<']);
         if let Some(character) = reader.peek() {
             if character == b'/' {
                 let start = reader.get_position() + 1;
@@ -339,6 +345,12 @@ impl<'a> XHtmlTag<'a> {
                     reader.skip(); // skip first '-'
                     reader.skip(); // skip second '-'
                     loop {
+                        // Check for abrupt close before scanning: <!--> or <!-->
+                        if reader.peek() == Some(b'>') {
+                            // HTML spec: "<!-->" is an abruptly-closed comment.
+                            reader.skip();
+                            break;
+                        }
                         reader.next_until(b'-');
                         if reader.peek() == Some(b'-') {
                             reader.skip();
