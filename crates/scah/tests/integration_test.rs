@@ -586,3 +586,90 @@ fn test_nested_first_completion() {
         assert_eq!(children.len(), 1, "Each div should have exactly 1 first child <a>");
     }
 }
+
+/// Single element with multiple ancestor paths — browser deduplicates
+#[test]
+fn test_single_element_multiple_ancestors_count() {
+    // <div><div><a>X</a></div></div> — the <a> has two <div> ancestors
+    // but is physically one DOM node. querySelectorAll('div a') returns 1.
+    let html = r#"<div><div><a>X</a></div></div>"#;
+    let queries = &[Query::all("div a", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let anchors: Vec<_> = store.get("div a").unwrap().collect();
+    assert_eq!(anchors.len(), 1, "single <a> with multiple <div> ancestors must appear once");
+    assert_eq!(anchors[0].text_content(&store), Some("X"));
+}
+
+/// Deep nesting should not create phantom duplicates
+#[test]
+fn test_deep_nesting_single_leaf() {
+    // Triple-nested divs with one span at the bottom
+    let html = r#"<div><div><div><span>deep</span></div></div></div>"#;
+    let queries = &[Query::all("div span", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let spans: Vec<_> = store.get("div span").unwrap().collect();
+    assert_eq!(spans.len(), 1, "deeply nested single span must appear once");
+    assert_eq!(spans[0].text_content(&store), Some("deep"));
+}
+
+/// Child combinator — each <a> is a direct child of some <div>
+#[test]
+fn test_child_combinator_nested() {
+    // <div><a>1</a><div><a>2</a></div></div>
+    // Both <a> elements are direct children of a <div>:
+    //   <a>1</a> is direct child of outer <div>
+    //   <a>2</a> is direct child of inner <div>
+    let html = r#"<div><a>1</a><div><a>2</a></div></div>"#;
+    let queries = &[Query::all("div > a", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let anchors: Vec<_> = store.get("div > a").unwrap().collect();
+    assert_eq!(anchors.len(), 2, "both <a> elements are direct children of some <div>");
+    let texts: Vec<_> = anchors.iter().map(|a| a.text_content(&store).unwrap()).collect();
+    assert!(texts.contains(&"1"));
+    assert!(texts.contains(&"2"));
+}
+
+/// Multiple sections with nested divs — each <a> is distinct
+#[test]
+fn test_multiple_sections_nested() {
+    let html = r#"<section><div><a>A1</a></div></section><section><div><div><a>A2</a></div></div></section>"#;
+    let queries = &[Query::all("section div a", Save::only_text_content())
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let anchors: Vec<_> = store.get("section div a").unwrap().collect();
+    assert_eq!(anchors.len(), 2, "two distinct sections, two distinct <a> elements");
+    let texts: Vec<_> = anchors.iter().map(|a| a.text_content(&store).unwrap()).collect();
+    assert!(texts.contains(&"A1"));
+    assert!(texts.contains(&"A2"));
+}
+
+/// .then() — same element appears under both parents (correct for per-parent model)
+#[test]
+fn test_then_same_element_two_parents() {
+    // <div id="outer"><div id="inner"><a>X</a></div></div>
+    // Both divs should see the <a> as their descendant
+    let html = r#"<div id="outer"><div id="inner"><a>X</a></div></div>"#;
+    let queries = &[Query::all("div", Save::none())
+        .unwrap()
+        .then(|d| Ok([d.all("a", Save::only_text_content())?]))
+        .unwrap()
+        .build()];
+    let store = parse(html, queries);
+    let divs: Vec<_> = store.get("div").unwrap().collect();
+    assert_eq!(divs.len(), 2);
+
+    let outer_children: Vec<_> = divs[0].get(&store, "a").unwrap().collect();
+    let inner_children: Vec<_> = divs[1].get(&store, "a").unwrap().collect();
+    // Both divs should find the <a> (it IS a descendant of both)
+    assert_eq!(outer_children.len(), 1, "outer div should see <a> as descendant");
+    assert_eq!(inner_children.len(), 1, "inner div should see <a> as descendant");
+    assert_eq!(outer_children[0].text_content(&store), Some("X"));
+    assert_eq!(inner_children[0].text_content(&store), Some("X"));
+}

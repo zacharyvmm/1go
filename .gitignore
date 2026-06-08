@@ -2,3 +2,4 @@
 /benches/bench_data/
 
 criterion.json
+/docs

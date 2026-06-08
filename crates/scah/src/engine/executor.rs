@@ -109,9 +109,18 @@ where
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();
 
-        // Track which (section, parent) pairs have already been saved for
-        // this element to prevent duplicate saves from multiple cursors
-        // matching the same descendant at different nesting depths.
+        // Dedup system: track which (section, parent) pairs have already been
+        // saved for this element. Anchored cursors (created via `do_fork` for
+        // descendant combinators) can redundantly spawn Moving cursors that
+        // match the same element through different ancestor paths. This
+        // save-time SmallVec dedup matches browser `querySelectorAll`
+        // dedup-by-identity behavior — a single DOM node always appears
+        // exactly once in flat queries, and once per-parent in `.then()` queries.
+        //
+        // The stack-allocated SmallVec is cheap (≤4 entries in typical usage).
+        // A future optimization could suppress the redundant spawns from the
+        // Anchored cursor branch at spawn time rather than filtering at save
+        // time, but that requires combinator-aware logic and is more invasive.
         let mut emitted: SmallVec<[(QuerySectionId, ElementId); 4]> = SmallVec::new();
 
         for i in 0..snapshot_len {
@@ -176,6 +185,19 @@ where
                     // afterward so this cursor can still match later siblings.
                     let original_parent = self.cursors[i].parent;
 
+                    // Fork: create an Anchored cursor that stays behind to re-match
+                    // sibling/descendant elements at this state. The fork itself is
+                    // ESSENTIAL for correctness — without it, later sibling elements
+                    // at the same nesting level (e.g. a second `<div>` after the first)
+                    // would be missed entirely. DO NOT suppress this fork.
+                    //
+                    // The Anchored cursor's subsequent SPAWN of `next_positions` is
+                    // what creates duplicate Moving cursors (the dedup SmallVec cleans
+                    // these up at save time). A future optimization could suppress the
+                    // spawns from Anchored cursors (not the fork) when a shallower
+                    // Moving cursor already covers the same position. But that requires
+                    // combinator-aware logic (descendant vs child vs sibling) and is
+                    // more invasive than the current save-time dedup approach.
                     if is_descendant && !terminal_all {
                         let do_fork = if is_section_end {
                             let is_all = matches!(section_kind, SelectionKind::All);
