@@ -13,10 +13,11 @@ use crate::store::Store;
 /// and not parsed as HTML (script, style, textarea, title).
 #[inline]
 fn is_raw_text_element(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "script" | "style" | "textarea" | "title"
-    )
+    // Case-insensitive comparison — no allocation.
+    name.eq_ignore_ascii_case("script")
+        || name.eq_ignore_ascii_case("style")
+        || name.eq_ignore_ascii_case("textarea")
+        || name.eq_ignore_ascii_case("title")
 }
 
 pub struct XHtmlParser<'html, 'query, Q> {
