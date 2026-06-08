@@ -9,6 +9,19 @@ use simd::{
 };
 pub use simd::{BoundaryHit, BoundaryKind};
 
+/// Precomputed 256-byte LUT for ASCII whitespace detection.
+/// Replaces the 5-alternative `matches!` in the hot `skip_whitespace` loop
+/// with a single L1-cache lookup per byte.
+static WS_LUT: [bool; 256] = {
+    let mut lut = [false; 256];
+    lut[0x20] = true; // space
+    lut[0x09] = true; // tab
+    lut[0x0A] = true; // LF
+    lut[0x0D] = true; // CR
+    lut[0x0C] = true; // FF
+    lut
+};
+
 pub struct Reader<'a> {
     source: &'a [u8],
     position: usize,
@@ -121,14 +134,17 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Scalar whitespace skipping for the classic parser hot path.
+    /// LUT-accelerated whitespace skipping — replaces the 5-alternative
+    /// `matches!` with a single L1-cache lookup per byte.
     #[inline]
     pub fn skip_whitespace(&mut self) {
-        while self.position < self.source.len()
-            && matches!(self.source[self.position], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C')
-        {
-            self.position += 1;
+        let src = self.source;
+        let mut pos = self.position;
+        let len = src.len();
+        while pos < len && WS_LUT[src[pos] as usize] {
+            pos += 1;
         }
+        self.position = pos;
     }
 
     /// SIMD-accelerated whitespace skipping for SIMD-aware parsing paths.
@@ -197,19 +213,49 @@ impl<'a> Reader<'a> {
 
     /// Use SIMD to find the first attribute boundary character from current position.
     /// Returns the position and type of the boundary character (quote, `=`, whitespace, or `>`).
+    ///
+    /// Uses a fast-path that bypasses the `ScannerBackend` trait dispatch when
+    /// AVX2 or NEON is available — the virtual call overhead is significant
+    /// for short attribute tokens (3–15 bytes, the common case).
+    #[inline]
     pub fn find_attribute_boundary(&self) -> Option<BoundaryHit> {
-        self.scanner.as_ref().map_or_else(
-            || find_attribute_boundary_scalar(self.source, self.position),
-            |scanner| scanner.find_attribute_boundary(self.source, self.position),
-        )
+        // Fast path: direct SIMD call, no trait dispatch
+        #[cfg(target_arch = "x86_64")]
+        {
+            if self.scanner.is_some() && is_x86_feature_detected!("avx2") {
+                return unsafe {
+                    simd::find_attribute_boundary_avx2(self.source, self.position)
+                };
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if self.scanner.is_some() && std::arch::is_aarch64_feature_detected!("neon") {
+                return unsafe {
+                    simd::find_attribute_boundary_neon(self.source, self.position)
+                };
+            }
+        }
+        // Fallback: scalar or no scanner
+        find_attribute_boundary_scalar(self.source, self.position)
     }
 
     /// Find attribute boundary starting from a specific position
+    #[inline]
     pub fn find_attribute_boundary_from(&self, start: usize) -> Option<BoundaryHit> {
-        self.scanner.as_ref().map_or_else(
-            || find_attribute_boundary_scalar(self.source, start),
-            |scanner| scanner.find_attribute_boundary(self.source, start),
-        )
+        #[cfg(target_arch = "x86_64")]
+        {
+            if self.scanner.is_some() && is_x86_feature_detected!("avx2") {
+                return unsafe { simd::find_attribute_boundary_avx2(self.source, start) };
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if self.scanner.is_some() && std::arch::is_aarch64_feature_detected!("neon") {
+                return unsafe { simd::find_attribute_boundary_neon(self.source, start) };
+            }
+        }
+        find_attribute_boundary_scalar(self.source, start)
     }
 
     /// Set the reader position directly

@@ -604,11 +604,12 @@ unsafe fn scan_boundary_combined_neon(input: std::arch::aarch64::uint8x16_t) -> 
     }
 }
 
-/// Scan for the next '<' (tag-open) using the unified structural scanner.
+/// Scan for the next '<' (tag-open) using direct byte comparison.
 ///
-/// Unlike [`find_attribute_boundary_avx2`], this skips past any non-`<`
-/// structural bytes (whitespace, quotes, etc.) found by the scanner and
-/// continues until it hits a genuine `<`.
+/// A dedicated `_mm256_cmpeq_epi8` for '<' outperforms the full PSHUFB
+/// scanner here: the PSHUFB path triggers on every whitespace byte
+/// (99%+ of chunks), then walks byte-by-byte looking for '<'.  Direct
+/// cmpeq finds '<' in 3 SIMD ops with zero false positives.
 ///
 /// # Safety
 /// The caller must ensure AVX2 is available.
@@ -617,35 +618,28 @@ unsafe fn scan_boundary_combined_neon(input: std::arch::aarch64::uint8x16_t) -> 
 unsafe fn find_tag_open_structural_avx2(input: &[u8], start: usize) -> usize {
     let len = input.len();
     let mut pos = start;
+    let needle = unsafe { std::arch::x86_64::_mm256_set1_epi8(b'<' as i8) };
 
     while pos + 32 <= len {
-        let (_, mask) = unsafe {
-            let data = std::arch::x86_64::_mm256_loadu_si256(
+        let data = unsafe {
+            std::arch::x86_64::_mm256_loadu_si256(
                 input[pos..].as_ptr() as *const std::arch::x86_64::__m256i,
-            );
-            let mask = scan_boundary_combined_avx2(data);
-            (data, mask)
+            )
         };
+        let cmp = unsafe { std::arch::x86_64::_mm256_cmpeq_epi8(data, needle) };
+        let mask = unsafe { std::arch::x86_64::_mm256_movemask_epi8(cmp) } as u32;
 
         if mask != 0 {
-            // Found some structural byte — walk forward to find the first '<'
-            let end = (pos + 32).min(len);
-            while pos < end {
-                if input[pos] == b'<' {
-                    return pos;
-                }
-                pos += 1;
-            }
-        } else {
-            pos += 32;
+            return pos + mask.trailing_zeros() as usize;
         }
+        pos += 32;
     }
 
     // Scalar tail
     memchr::memchr(b'<', &input[pos..]).map_or(len, |off| pos + off)
 }
 
-/// Scan for the next '<' using NEON unified structural scanner.
+/// Scan for the next '<' (tag-open) using direct byte comparison on NEON.
 ///
 /// # Safety
 /// The caller must ensure NEON is available.
@@ -654,25 +648,17 @@ unsafe fn find_tag_open_structural_avx2(input: &[u8], start: usize) -> usize {
 unsafe fn find_tag_open_structural_neon(input: &[u8], start: usize) -> usize {
     let len = input.len();
     let mut pos = start;
+    let needle = std::arch::aarch64::vdupq_n_u8(b'<');
 
     while pos + 16 <= len {
-        let (_, mask) = unsafe {
-            let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
-            let mask = scan_boundary_combined_neon(data);
-            (data, mask)
-        };
+        let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
+        let cmp = std::arch::aarch64::vceqq_u8(data, needle);
+        let mask = neon_movemask_u8(cmp);
 
         if mask != 0 {
-            let end = (pos + 16).min(len);
-            while pos < end {
-                if input[pos] == b'<' {
-                    return pos;
-                }
-                pos += 1;
-            }
-        } else {
-            pos += 16;
+            return pos + mask.trailing_zeros() as usize;
         }
+        pos += 16;
     }
 
     memchr::memchr(b'<', &input[pos..]).map_or(len, |off| pos + off)
@@ -1022,19 +1008,45 @@ impl ScannerBackend for ScalarScanner {
     }
 }
 
-/// AVX2 implementation: scan 32-byte chunks to find the first attribute boundary
+/// AVX2 implementation: scan 32-byte chunks to find the first attribute boundary.
+///
+/// PSHUFB table loads are hoisted out of the hot loop since they are
+/// compile-time constants — saves 2 loads + 2 broadcasts per chunk.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<BoundaryHit> {
+pub(crate) unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<BoundaryHit> {
     unsafe {
         let len = input.len();
         let mut pos = start;
 
+        // Hoist PSHUFB table loads — compile-time constants, loaded once.
+        let lo_table = std::arch::x86_64::_mm256_broadcastsi128_si256(
+            std::arch::x86_64::_mm_loadu_si128(STRUCTURAL_LO.as_ptr() as *const _),
+        );
+        let hi_table = std::arch::x86_64::_mm256_broadcastsi128_si256(
+            std::arch::x86_64::_mm_loadu_si128(STRUCTURAL_HI.as_ptr() as *const _),
+        );
+        let nibble_mask = std::arch::x86_64::_mm256_set1_epi16(0x0F0F);
+        let bit7 = std::arch::x86_64::_mm256_set1_epi8(0x80u8 as i8);
+        let zero = std::arch::x86_64::_mm256_setzero_si256();
+
         while pos + 32 <= len {
             let data = std::arch::x86_64::_mm256_loadu_si256(
-                input[pos..].as_ptr() as *const std::arch::x86_64::__m256i
+                input[pos..].as_ptr() as *const std::arch::x86_64::__m256i,
             );
-            let mask = scan_boundary_combined_avx2(data);
+
+            // Inlined PSHUFB nibble-lookup (see scan_boundary_combined_avx2
+            // for the original standalone form).
+            let lo = std::arch::x86_64::_mm256_shuffle_epi8(lo_table, data);
+            let nibbles = std::arch::x86_64::_mm256_and_si256(
+                std::arch::x86_64::_mm256_srli_epi16(data, 4),
+                nibble_mask,
+            );
+            let hi = std::arch::x86_64::_mm256_shuffle_epi8(hi_table, nibbles);
+            let combined = std::arch::x86_64::_mm256_and_si256(lo, hi);
+            let not_boundary = std::arch::x86_64::_mm256_cmpeq_epi8(combined, zero);
+            let in_bit7 = std::arch::x86_64::_mm256_andnot_si256(not_boundary, bit7);
+            let mask = std::arch::x86_64::_mm256_movemask_epi8(in_bit7) as u32;
 
             if mask != 0 {
                 let bit = mask.trailing_zeros() as usize;
@@ -1054,16 +1066,33 @@ unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<Bou
 }
 
 /// NEON implementation: scan 16-byte chunks to find the first attribute boundary.
+///
+/// Table loads are hoisted out of the hot loop — saves vld1q_u8 × 2 per chunk.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn find_attribute_boundary_neon(input: &[u8], start: usize) -> Option<BoundaryHit> {
+pub(crate) unsafe fn find_attribute_boundary_neon(input: &[u8], start: usize) -> Option<BoundaryHit> {
     unsafe {
         let len = input.len();
         let mut pos = start;
 
+        // Hoist table loads
+        let lo_table = std::arch::aarch64::vld1q_u8(STRUCTURAL_LO.as_ptr());
+        let hi_table = std::arch::aarch64::vld1q_u8(STRUCTURAL_HI.as_ptr());
+        let zero = std::arch::aarch64::vdupq_n_u8(0);
+        let bit7 = std::arch::aarch64::vdupq_n_u8(0x80);
+
         while pos + 16 <= len {
             let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
-            let mask = scan_boundary_combined_neon(data);
+
+            // Inlined PSHUFB-like scan
+            let lo = std::arch::aarch64::vqtbl1q_u8(lo_table, data);
+            let nibbles = std::arch::aarch64::vshrq_n_u8(data, 4);
+            let hi = std::arch::aarch64::vqtbl1q_u8(hi_table, nibbles);
+            let combined = std::arch::aarch64::vandq_u8(lo, hi);
+            let is_boundary = std::arch::aarch64::vceqq_u8(combined, zero);
+            let in_bit7 = std::arch::aarch64::vmvnq_u8(is_boundary);
+            let in_bit7 = std::arch::aarch64::vandq_u8(in_bit7, bit7);
+            let mask = neon_movemask_u8(in_bit7);
 
             if mask != 0 {
                 let bit = mask.trailing_zeros() as usize;

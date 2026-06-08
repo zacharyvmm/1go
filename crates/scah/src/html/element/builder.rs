@@ -3,6 +3,21 @@ use crate::Reader;
 use crate::html::tape::CompactAttrEntry;
 use scah_query_ir::{Attribute, IElement};
 
+/// LUT for whitespace + '<' — used by `XHtmlTag::from` to skip the
+/// tag-open delimiter and any trailing whitespace.  Replaces a
+/// 6-element `next_while_list` / `contains()` scan with a single LUT
+/// lookup per byte.
+static WS_AND_LT_LUT: [bool; 256] = {
+    let mut lut = [false; 256];
+    lut[0x20] = true; // space
+    lut[0x09] = true; // tab
+    lut[0x0A] = true; // LF
+    lut[0x0D] = true; // CR
+    lut[0x0C] = true; // FF
+    lut[b'<' as usize] = true;
+    lut
+};
+
 /// A key-value pair representing an HTML element attribute.
 ///
 /// Both `key` and `value` are zero-copy `&str` references into the
@@ -324,7 +339,17 @@ impl<'html> IElement<'html> for XHtmlElement<'html> {
 
 impl<'a> XHtmlTag<'a> {
     pub fn from(reader: &mut Reader<'a>) -> Option<Self> {
-        reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', b'\x0C', b'<']);
+        // Skip '<' and any trailing whitespace using LUT (faster than
+        // the generic next_while_list / contains() scan).
+        {
+            let src = reader.source_bytes();
+            let mut pos = reader.get_position();
+            let len = src.len();
+            while pos < len && WS_AND_LT_LUT[src[pos] as usize] {
+                pos += 1;
+            }
+            reader.set_position(pos);
+        }
         if let Some(character) = reader.peek() {
             if character == b'/' {
                 let start = reader.get_position() + 1;
