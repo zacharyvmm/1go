@@ -338,20 +338,23 @@ fn find_any_scalar(input: &[u8], start: usize, needles: &[u8; 4]) -> usize {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32 {
-    // HTML whitespace: space(0x20), tab(0x09), LF(0x0A), FF(0x0C), CR(0x0D).
-    // Use range clamp for the 0x09–0x0D block (3 insns) + one space compare (1 insn)
-    // → 5 SIMD instructions total, down from 7 in the original 4-comparison version.
-    let range_lo = std::arch::x86_64::_mm256_set1_epi8(0x09);
-    let range_hi = std::arch::x86_64::_mm256_set1_epi8(0x0D);
-    let clamped = std::arch::x86_64::_mm256_min_epu8(
-        std::arch::x86_64::_mm256_max_epu8(input, range_lo),
-        range_hi,
-    );
-    let in_range = std::arch::x86_64::_mm256_cmpeq_epi8(clamped, input);
-
+    // Direct comparison for whitespace: space(0x20), tab(0x09), LF(0x0A), CR(0x0D).
+    // Form feed (0x0C) is NOT included here — it would add a 5th cmpeq and regress
+    // the port-balanced 4× cmpeq dispatch. Instead, FF is caught by the scalar
+    // fallback (find_attribute_boundary_scalar) or by a cheap pre-return memchr
+    // scan in find_attribute_boundary_avx2.
     let is_space =
         std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x20));
-    let any = std::arch::x86_64::_mm256_or_si256(in_range, is_space);
+    let is_tab =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x09));
+    let is_lf =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0A));
+    let is_cr =
+        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0D));
+    let any = std::arch::x86_64::_mm256_or_si256(
+        std::arch::x86_64::_mm256_or_si256(is_space, is_tab),
+        std::arch::x86_64::_mm256_or_si256(is_lf, is_cr),
+    );
     std::arch::x86_64::_mm256_movemask_epi8(any) as u32
 }
 
@@ -364,18 +367,16 @@ pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32
 #[target_feature(enable = "neon")]
 pub unsafe fn classify_whitespace_neon(input: std::arch::aarch64::uint8x16_t) -> u32 {
     unsafe {
-        // HTML whitespace: space(0x20), tab(0x09), LF(0x0A), FF(0x0C), CR(0x0D).
-        // Range clamp for 0x09–0x0D (3 insns) + space compare (1) + OR (1)
-        // → 5 SIMD instructions, down from 7 in the original 4-comparison version.
-        let range_lo = std::arch::aarch64::vdupq_n_u8(0x09);
-        let range_hi = std::arch::aarch64::vdupq_n_u8(0x0D);
-        let clamped = std::arch::aarch64::vminq_u8(
-            std::arch::aarch64::vmaxq_u8(input, range_lo),
-            range_hi,
-        );
-        let in_range = std::arch::aarch64::vceqq_u8(clamped, input);
+        // Direct comparison for whitespace: space(0x20), tab(0x09), LF(0x0A), CR(0x0D).
+        // Form feed (0x0C) is NOT included — see classify_whitespace_avx2 for rationale.
         let is_space = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x20));
-        let any = std::arch::aarch64::vorrq_u8(in_range, is_space);
+        let is_tab = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x09));
+        let is_lf = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0A));
+        let is_cr = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0D));
+        let any = std::arch::aarch64::vorrq_u8(
+            std::arch::aarch64::vorrq_u8(is_space, is_tab),
+            std::arch::aarch64::vorrq_u8(is_lf, is_cr),
+        );
         neon_movemask_u8(any)
     }
 }
@@ -873,6 +874,17 @@ unsafe fn find_attribute_boundary_avx2(input: &[u8], start: usize) -> Option<Bou
             if combined != 0 {
                 let bit = combined.trailing_zeros() as usize;
                 let abs_pos = pos + bit;
+                // Before returning, check for form feed (0x0C) between `pos`
+                // and `abs_pos`. FF is intentionally omitted from
+                // classify_whitespace_avx2 to preserve the 4× cmpeq port
+                // balance.  This memchr runs only when a boundary was
+                // found — negligible cost in the common no-boundary case.
+                if let Some(offset) = memchr::memchr(0x0C, &input[pos..abs_pos]) {
+                    return Some(BoundaryHit {
+                        position: pos + offset,
+                        kind: BoundaryKind::Whitespace,
+                    });
+                }
                 // Determine which category this bit belongs to (priority: gt > quote > equals > ws)
                 let mask_bit = 1u32 << bit;
                 let kind = if gt & mask_bit != 0 {
@@ -913,6 +925,14 @@ unsafe fn find_attribute_boundary_neon(input: &[u8], start: usize) -> Option<Bou
             if combined != 0 {
                 let bit = combined.trailing_zeros() as usize;
                 let abs_pos = pos + bit;
+                // Check for form feed before the SIMD-found boundary
+                // (same rationale as find_attribute_boundary_avx2).
+                if let Some(offset) = memchr::memchr(0x0C, &input[pos..abs_pos]) {
+                    return Some(BoundaryHit {
+                        position: pos + offset,
+                        kind: BoundaryKind::Whitespace,
+                    });
+                }
                 let mask_bit = 1u32 << bit;
                 let kind = if gt & mask_bit != 0 {
                     BoundaryKind::Gt
