@@ -95,6 +95,10 @@ pub enum BoundaryKind {
     Equals,
     Whitespace,
     Gt,
+    /// '<' — tag open
+    TagOpen,
+    /// '/' — used in close tags and self-closing elements
+    Slash,
 }
 
 /// Result of scanning for the first boundary character in a chunk
@@ -555,7 +559,7 @@ pub fn bitmask_to_indexes(mut mask: u32, base: u32, output: &mut Vec<u32>) {
 //   whitespace: tab  LF  FF  CR  space  (0x09 0x0A 0x0C 0x0D 0x20)
 //
 // These tables satisfy: for every target byte b,
-//   BOUNDARY_LO[b & 0x0F] & BOUNDARY_HI[(b >> 4) & 0x0F] ≠ 0
+//   STRUCTURAL_LO[b & 0x0F] & STRUCTURAL_HI[(b >> 4) & 0x0F] ≠ 0
 // and for every non-target byte, the same AND = 0 (zero false positives).
 //
 // Assigned masks (structural ≠ whitespace via domain firewall):
@@ -565,10 +569,10 @@ pub fn bitmask_to_indexes(mut mask: u32, base: u32, output: &mut Vec<u32>) {
 //   bit 3 (0x08) → space
 
 /// Low-nibble PSHUFB lookup table for boundary detection.
-pub const BOUNDARY_LO: [u8; 16] = [8, 0, 1, 0, 0, 0, 0, 1, 0, 4, 4, 0, 4, 6, 2, 0];
+pub const STRUCTURAL_LO: [u8; 16] = [8, 0, 1, 0, 0, 0, 0, 1, 0, 4, 4, 0, 6, 6, 2, 1];
 
 /// High-nibble PSHUFB lookup table for boundary detection.
-pub const BOUNDARY_HI: [u8; 16] = [4, 0, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+pub const STRUCTURAL_HI: [u8; 16] = [4, 0, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// Deferred scalar classification: byte value → BoundaryKind.
 ///
@@ -580,6 +584,8 @@ pub fn classify_boundary_byte(b: u8) -> BoundaryKind {
         b'"' | b'\'' => BoundaryKind::Quote,
         b'=' => BoundaryKind::Equals,
         b'>' => BoundaryKind::Gt,
+        b'<' => BoundaryKind::TagOpen,
+        b'/' => BoundaryKind::Slash,
         // is_ascii_whitespace() covers space, tab, LF, FF, CR per the HTML spec
         _ if b.is_ascii_whitespace() => BoundaryKind::Whitespace,
         _ => {
@@ -606,10 +612,10 @@ unsafe fn scan_boundary_combined_avx2(input: std::arch::x86_64::__m256i) -> u32 
     unsafe {
         // Broadcast 16-byte table into both 128-bit lanes
         let lo_table = std::arch::x86_64::_mm256_broadcastsi128_si256(
-            std::arch::x86_64::_mm_loadu_si128(BOUNDARY_LO.as_ptr() as *const _),
+            std::arch::x86_64::_mm_loadu_si128(STRUCTURAL_LO.as_ptr() as *const _),
         );
         let hi_table = std::arch::x86_64::_mm256_broadcastsi128_si256(
-            std::arch::x86_64::_mm_loadu_si128(BOUNDARY_HI.as_ptr() as *const _),
+            std::arch::x86_64::_mm_loadu_si128(STRUCTURAL_HI.as_ptr() as *const _),
         );
 
         let lo = std::arch::x86_64::_mm256_shuffle_epi8(lo_table, input);
@@ -643,8 +649,8 @@ unsafe fn scan_boundary_combined_avx2(input: std::arch::x86_64::__m256i) -> u32 
 unsafe fn scan_boundary_combined_neon(input: std::arch::aarch64::uint8x16_t) -> u32 {
     unsafe {
         // NEON vtbl: each byte uses low 4 bits as index into a 16-byte table
-        let lo_table = std::arch::aarch64::vld1q_u8(BOUNDARY_LO.as_ptr());
-        let hi_table = std::arch::aarch64::vld1q_u8(BOUNDARY_HI.as_ptr());
+        let lo_table = std::arch::aarch64::vld1q_u8(STRUCTURAL_LO.as_ptr());
+        let hi_table = std::arch::aarch64::vld1q_u8(STRUCTURAL_HI.as_ptr());
 
         let lo = std::arch::aarch64::vqtbl1q_u8(lo_table, input);
         let nibbles = std::arch::aarch64::vshrq_n_u8(input, 4);
@@ -660,6 +666,80 @@ unsafe fn scan_boundary_combined_neon(input: std::arch::aarch64::uint8x16_t) -> 
 
         neon_movemask_u8(in_bit7)
     }
+}
+
+/// Scan for the next '<' (tag-open) using the unified structural scanner.
+///
+/// Unlike [`find_attribute_boundary_avx2`], this skips past any non-`<`
+/// structural bytes (whitespace, quotes, etc.) found by the scanner and
+/// continues until it hits a genuine `<`.
+///
+/// # Safety
+/// The caller must ensure AVX2 is available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_tag_open_structural_avx2(input: &[u8], start: usize) -> usize {
+    let len = input.len();
+    let mut pos = start;
+
+    while pos + 32 <= len {
+        let (_, mask) = unsafe {
+            let data = std::arch::x86_64::_mm256_loadu_si256(
+                input[pos..].as_ptr() as *const std::arch::x86_64::__m256i,
+            );
+            let mask = scan_boundary_combined_avx2(data);
+            (data, mask)
+        };
+
+        if mask != 0 {
+            // Found some structural byte — walk forward to find the first '<'
+            let end = (pos + 32).min(len);
+            while pos < end {
+                if input[pos] == b'<' {
+                    return pos;
+                }
+                pos += 1;
+            }
+        } else {
+            pos += 32;
+        }
+    }
+
+    // Scalar tail
+    memchr::memchr(b'<', &input[pos..]).map_or(len, |off| pos + off)
+}
+
+/// Scan for the next '<' using NEON unified structural scanner.
+///
+/// # Safety
+/// The caller must ensure NEON is available.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn find_tag_open_structural_neon(input: &[u8], start: usize) -> usize {
+    let len = input.len();
+    let mut pos = start;
+
+    while pos + 16 <= len {
+        let (_, mask) = unsafe {
+            let data = std::arch::aarch64::vld1q_u8(input[pos..].as_ptr());
+            let mask = scan_boundary_combined_neon(data);
+            (data, mask)
+        };
+
+        if mask != 0 {
+            let end = (pos + 16).min(len);
+            while pos < end {
+                if input[pos] == b'<' {
+                    return pos;
+                }
+                pos += 1;
+            }
+        } else {
+            pos += 16;
+        }
+    }
+
+    memchr::memchr(b'<', &input[pos..]).map_or(len, |off| pos + off)
 }
 
 /// Structural characters for HTML tokenization
@@ -849,8 +929,14 @@ impl ScannerBackend for Avx2Scanner {
     }
 
     fn find_tag_open(&self, input: &[u8], start: usize) -> usize {
-        // Use SIMD to find '<'
-        find_any_of_32(input, start, &[b'<', b'<', b'<', b'<'])
+        // Use unified structural scanner (PSHUFB) to find '<'
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return unsafe { find_tag_open_structural_avx2(input, start) };
+            }
+        }
+        find_tag_open_scalar(input, start)
     }
 
     fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
@@ -919,8 +1005,14 @@ impl ScannerBackend for NeonScanner {
     }
 
     fn find_tag_open(&self, input: &[u8], start: usize) -> usize {
-        // Use SIMD to find '<'
-        find_any_of_32(input, start, &[b'<', b'<', b'<', b'<'])
+        // Use unified structural scanner (NEON tbl) to find '<'
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                return unsafe { find_tag_open_structural_neon(input, start) };
+            }
+        }
+        find_tag_open_scalar(input, start)
     }
 
     fn scan_attributes(&self, input: &[u8], start: usize) -> AttributeScanResult {
