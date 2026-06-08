@@ -338,22 +338,20 @@ fn find_any_scalar(input: &[u8], start: usize, needles: &[u8; 4]) -> usize {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32 {
-    // Direct comparison for whitespace characters: space(0x20), tab(0x09), newline(0x0A), CR(0x0D), FF(0x0C)
+    // HTML whitespace: space(0x20), tab(0x09), LF(0x0A), FF(0x0C), CR(0x0D).
+    // Use range clamp for the 0x09–0x0D block (3 insns) + one space compare (1 insn)
+    // → 5 SIMD instructions total, down from 7 in the original 4-comparison version.
+    let range_lo = std::arch::x86_64::_mm256_set1_epi8(0x09);
+    let range_hi = std::arch::x86_64::_mm256_set1_epi8(0x0D);
+    let clamped = std::arch::x86_64::_mm256_min_epu8(
+        std::arch::x86_64::_mm256_max_epu8(input, range_lo),
+        range_hi,
+    );
+    let in_range = std::arch::x86_64::_mm256_cmpeq_epi8(clamped, input);
+
     let is_space =
         std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x20));
-    let is_tab =
-        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x09));
-    let is_lf =
-        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0A));
-    let is_cr =
-        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0D));
-    let is_ff =
-        std::arch::x86_64::_mm256_cmpeq_epi8(input, std::arch::x86_64::_mm256_set1_epi8(0x0C));
-    let any = std::arch::x86_64::_mm256_or_si256(
-        std::arch::x86_64::_mm256_or_si256(is_space, is_tab),
-        std::arch::x86_64::_mm256_or_si256(is_lf, is_cr),
-    );
-    let any = std::arch::x86_64::_mm256_or_si256(any, is_ff);
+    let any = std::arch::x86_64::_mm256_or_si256(in_range, is_space);
     std::arch::x86_64::_mm256_movemask_epi8(any) as u32
 }
 
@@ -366,16 +364,18 @@ pub unsafe fn classify_whitespace_avx2(input: std::arch::x86_64::__m256i) -> u32
 #[target_feature(enable = "neon")]
 pub unsafe fn classify_whitespace_neon(input: std::arch::aarch64::uint8x16_t) -> u32 {
     unsafe {
-        let is_space = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x20));
-        let is_tab = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x09));
-        let is_lf = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0A));
-        let is_cr = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0D));
-        let is_ff = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x0C));
-        let any = std::arch::aarch64::vorrq_u8(
-            std::arch::aarch64::vorrq_u8(is_space, is_tab),
-            std::arch::aarch64::vorrq_u8(is_lf, is_cr),
+        // HTML whitespace: space(0x20), tab(0x09), LF(0x0A), FF(0x0C), CR(0x0D).
+        // Range clamp for 0x09–0x0D (3 insns) + space compare (1) + OR (1)
+        // → 5 SIMD instructions, down from 7 in the original 4-comparison version.
+        let range_lo = std::arch::aarch64::vdupq_n_u8(0x09);
+        let range_hi = std::arch::aarch64::vdupq_n_u8(0x0D);
+        let clamped = std::arch::aarch64::vminq_u8(
+            std::arch::aarch64::vmaxq_u8(input, range_lo),
+            range_hi,
         );
-        let any = std::arch::aarch64::vorrq_u8(any, is_ff);
+        let in_range = std::arch::aarch64::vceqq_u8(clamped, input);
+        let is_space = std::arch::aarch64::vceqq_u8(input, std::arch::aarch64::vdupq_n_u8(0x20));
+        let any = std::arch::aarch64::vorrq_u8(in_range, is_space);
         neon_movemask_u8(any)
     }
 }
