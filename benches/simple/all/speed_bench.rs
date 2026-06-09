@@ -67,16 +67,7 @@ fn bench_comparison(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("scah_fused_parse_prebuilt_save_none", size),
-            &content,
-            |b, html| {
-                b.iter(|| {
-                    let store = parse(black_box(html), black_box(save_none_queries));
-                    black_box(store);
-                })
-            },
-        );
+
 
         let save_inner_html_queries = &[Query::all(QUERY, Save::only_inner_html())
             .expect("simple bench selector should parse")
@@ -120,16 +111,7 @@ fn bench_comparison(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("scah_fused_parse_prebuilt_save_all", size),
-            &content,
-            |b, html| {
-                b.iter(|| {
-                    let store = parse(black_box(html), black_box(save_all_queries));
-                    consume_scah_results(black_box(&store));
-                })
-            },
-        );
+
 
         group.bench_with_input(BenchmarkId::new("scah", size), &content, |b, html| {
             b.iter(|| {
@@ -146,16 +128,7 @@ fn bench_comparison(c: &mut Criterion) {
             })
         });
 
-        group.bench_with_input(BenchmarkId::new("scah_fused", size), &content, |b, html| {
-            b.iter(|| {
-                let queries = &[Query::all(QUERY, Save::all())
-                    .expect("simple bench selector should parse")
-                    .build()];
-                let store = parse(black_box(html), black_box(queries));
 
-                consume_scah_results(black_box(&store));
-            })
-        });
 
         group.bench_with_input(BenchmarkId::new("tl", size), &content, |b, html| {
             b.iter(|| {
