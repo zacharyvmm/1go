@@ -3,6 +3,7 @@ use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
 use crate::{QuerySpec, Reader};
+use scah_query_ir::TagFilter;
 
 pub(crate) struct DocumentPosition {
     pub reader_position: usize,
@@ -22,6 +23,7 @@ type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
 
 pub struct QueryMultiplexer<'query, Q> {
     runners: Runner<'query, Q>,
+    tag_filter: Option<TagFilter>,
 }
 
 impl<'html, 'query: 'html, Q> QueryMultiplexer<'query, Q>
@@ -29,13 +31,23 @@ where
     Q: QuerySpec<'query>,
 {
     pub fn new(queries: &'query [Q]) -> Self {
+        let tag_filter = TagFilter::from_queries(queries);
         Self {
             #[allow(clippy::redundant_closure)]
             runners: queries
                 .iter()
                 .map(|query| QueryExecutor::new(query))
                 .collect::<Runner<'query, Q>>(),
+            tag_filter,
         }
+    }
+
+    /// Returns the tag filter for query-guided lazy parsing, if active.
+    ///
+    /// `None` means the optimization is unavailable — all tags must be
+    /// fully tokenized (e.g., a universal `*` selector is present).
+    pub fn tag_filter(&self) -> Option<&TagFilter> {
+        self.tag_filter.as_ref()
     }
 
     pub(crate) fn requires_text_content(&self) -> bool {
