@@ -6,7 +6,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use lexbor_css::HtmlDocument;
 use lol_html::{HtmlRewriter, Settings, element};
 use lxml::HtmlDocument as LxmlDocument;
-use scah::{Query, Save, parse, parse_fused, parse_fused_parallel};
+use scah::{Query, Save, parse, parse_fused};
 use scraper::{Html, Selector};
 use std::hint::black_box;
 use tl::ParserOptions;
@@ -127,21 +127,6 @@ fn bench_spec_links(c: &mut Criterion) {
                 .expect("spec selector should parse")
                 .build()];
             let store = parse_fused(&content, queries);
-
-            for element in store.get(QUERY).unwrap() {
-                black_box(&element.attributes(&store));
-                black_box(&element.inner_html);
-                black_box(&element.text_content(&store));
-            }
-        })
-    });
-
-    group.bench_function("scah_fused_parallel", |b| {
-        b.iter(|| {
-            let queries = &[Query::all(QUERY, Save::all())
-                .expect("spec selector should parse")
-                .build()];
-            let store = parse_fused_parallel(&content, queries);
 
             for element in store.get(QUERY).unwrap() {
                 black_box(&element.attributes(&store));

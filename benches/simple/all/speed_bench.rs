@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use lexbor_css::HtmlDocument;
 use lol_html::{HtmlRewriter, Settings, element};
 use lxml::HtmlDocument as LxmlDocument;
-use scah::{Query, Save, parse, parse_fused, parse_fused_parallel, parse_tape};
+use scah::{Query, Save, parse, parse_fused};
 use scraper::{Html, Selector};
 use std::hint::black_box;
 use tl::ParserOptions;
@@ -68,17 +68,6 @@ fn bench_comparison(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("scah_simd_parse_prebuilt_save_none", size),
-            &content,
-            |b, html| {
-                b.iter(|| {
-                    let store = parse_tape(black_box(html), black_box(save_none_queries));
-                    black_box(store);
-                })
-            },
-        );
-
-        group.bench_with_input(
             BenchmarkId::new("scah_fused_parse_prebuilt_save_none", size),
             &content,
             |b, html| {
@@ -132,17 +121,6 @@ fn bench_comparison(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("scah_simd_parse_prebuilt_save_all", size),
-            &content,
-            |b, html| {
-                b.iter(|| {
-                    let store = parse_tape(black_box(html), black_box(save_all_queries));
-                    consume_scah_results(black_box(&store));
-                })
-            },
-        );
-
-        group.bench_with_input(
             BenchmarkId::new("scah_fused_parse_prebuilt_save_all", size),
             &content,
             |b, html| {
@@ -168,17 +146,6 @@ fn bench_comparison(c: &mut Criterion) {
             })
         });
 
-        group.bench_with_input(BenchmarkId::new("scah_simd", size), &content, |b, html| {
-            b.iter(|| {
-                let queries = &[Query::all(QUERY, Save::all())
-                    .expect("simple bench selector should parse")
-                    .build()];
-                let store = parse_tape(black_box(html), black_box(queries));
-
-                consume_scah_results(black_box(&store));
-            })
-        });
-
         group.bench_with_input(BenchmarkId::new("scah_fused", size), &content, |b, html| {
             b.iter(|| {
                 let queries = &[Query::all(QUERY, Save::all())
@@ -189,21 +156,6 @@ fn bench_comparison(c: &mut Criterion) {
                 consume_scah_results(black_box(&store));
             })
         });
-
-        group.bench_with_input(
-            BenchmarkId::new("scah_fused_parallel", size),
-            &content,
-            |b, html| {
-                b.iter(|| {
-                    let queries = &[Query::all(QUERY, Save::all())
-                        .expect("simple bench selector should parse")
-                        .build()];
-                    let store = parse_fused_parallel(black_box(html), black_box(queries));
-
-                    consume_scah_results(black_box(&store));
-                })
-            },
-        );
 
         group.bench_with_input(BenchmarkId::new("tl", size), &content, |b, html| {
             b.iter(|| {

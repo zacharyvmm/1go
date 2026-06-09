@@ -1,10 +1,10 @@
-//! Benchmarks comparing fused single-pass tape parser vs 3-stage tape parser.
+//! Benchmarks comparing fused single-pass tape parser vs streaming parser.
 //!
-//! This benchmark measures the throughput improvement from eliminating
-//! the redundant attribute re-scan in the fused path.
+//! This benchmark measures the throughput of the fused path against the
+//! production streaming parser, which is now the recommended default.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use scah::{Query, Save, parse_fused, parse_tape};
+use scah::{Query, Save, parse, parse_fused};
 use std::hint::black_box;
 
 /// Generate a form-heavy HTML document with many attributes per element.
@@ -56,29 +56,27 @@ fn consume_results(store: &scah::Store<'_, '_>, query: &str) {
     }
 }
 
-fn bench_fused_vs_3stage_forms(c: &mut Criterion) {
-    let mut group = c.benchmark_group("fused_vs_3stage_forms");
+fn bench_fused_vs_streaming_forms(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fused_vs_streaming_forms");
 
     for size in [100, 500, 2_000].iter() {
         let content = generate_form_html(*size);
         group.throughput(Throughput::Bytes(content.len() as u64));
 
-        // Benchmark: 3-stage tape parser with save_none
         let none_queries = &[Query::all("input", Save::none()).unwrap().build()];
         group.bench_with_input(
-            BenchmarkId::new("tape_3stage_save_none", size),
+            BenchmarkId::new("streaming_save_none", size),
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse_tape(black_box(html), black_box(none_queries));
+                    let store = parse(black_box(html), black_box(none_queries));
                     black_box(store);
                 })
             },
         );
 
-        // Benchmark: fused single-pass with save_none
         group.bench_with_input(
-            BenchmarkId::new("fused_single_pass_save_none", size),
+            BenchmarkId::new("fused_save_none", size),
             &content,
             |b, html| {
                 b.iter(|| {
@@ -88,22 +86,20 @@ fn bench_fused_vs_3stage_forms(c: &mut Criterion) {
             },
         );
 
-        // Benchmark: 3-stage tape parser with save_all
         let all_queries = &[Query::all("input", Save::all()).unwrap().build()];
         group.bench_with_input(
-            BenchmarkId::new("tape_3stage_save_all", size),
+            BenchmarkId::new("streaming_save_all", size),
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse_tape(black_box(html), black_box(all_queries));
+                    let store = parse(black_box(html), black_box(all_queries));
                     consume_results(black_box(&store), "input");
                 })
             },
         );
 
-        // Benchmark: fused single-pass with save_all
         group.bench_with_input(
-            BenchmarkId::new("fused_single_pass_save_all", size),
+            BenchmarkId::new("fused_save_all", size),
             &content,
             |b, html| {
                 b.iter(|| {
@@ -113,21 +109,20 @@ fn bench_fused_vs_3stage_forms(c: &mut Criterion) {
             },
         );
 
-        // Benchmark: query all form-groups
         let group_queries = &[Query::all("div.form-group", Save::all()).unwrap().build()];
         group.bench_with_input(
-            BenchmarkId::new("tape_3stage_form_groups", size),
+            BenchmarkId::new("streaming_form_groups", size),
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse_tape(black_box(html), black_box(group_queries));
+                    let store = parse(black_box(html), black_box(group_queries));
                     consume_results(black_box(&store), "div.form-group");
                 })
             },
         );
 
         group.bench_with_input(
-            BenchmarkId::new("fused_single_pass_form_groups", size),
+            BenchmarkId::new("fused_form_groups", size),
             &content,
             |b, html| {
                 b.iter(|| {
@@ -141,29 +136,27 @@ fn bench_fused_vs_3stage_forms(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_fused_vs_3stage_data_attrs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("fused_vs_3stage_data_attrs");
+fn bench_fused_vs_streaming_data_attrs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fused_vs_streaming_data_attrs");
 
     for size in [100, 500, 2_000].iter() {
         let content = generate_data_attr_html(*size);
         group.throughput(Throughput::Bytes(content.len() as u64));
 
-        // Benchmark: 3-stage tape parser
         let link_queries = &[Query::all("a.link", Save::all()).unwrap().build()];
         group.bench_with_input(
-            BenchmarkId::new("tape_3stage_links", size),
+            BenchmarkId::new("streaming_links", size),
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse_tape(black_box(html), black_box(link_queries));
+                    let store = parse(black_box(html), black_box(link_queries));
                     consume_results(black_box(&store), "a.link");
                 })
             },
         );
 
-        // Benchmark: fused single-pass
         group.bench_with_input(
-            BenchmarkId::new("fused_single_pass_links", size),
+            BenchmarkId::new("fused_links", size),
             &content,
             |b, html| {
                 b.iter(|| {
@@ -173,21 +166,20 @@ fn bench_fused_vs_3stage_data_attrs(c: &mut Criterion) {
             },
         );
 
-        // Benchmark: component divs
         let comp_queries = &[Query::all("div.component", Save::all()).unwrap().build()];
         group.bench_with_input(
-            BenchmarkId::new("tape_3stage_components", size),
+            BenchmarkId::new("streaming_components", size),
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse_tape(black_box(html), black_box(comp_queries));
+                    let store = parse(black_box(html), black_box(comp_queries));
                     consume_results(black_box(&store), "div.component");
                 })
             },
         );
 
         group.bench_with_input(
-            BenchmarkId::new("fused_single_pass_components", size),
+            BenchmarkId::new("fused_components", size),
             &content,
             |b, html| {
                 b.iter(|| {
@@ -201,19 +193,18 @@ fn bench_fused_vs_3stage_data_attrs(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_fused_vs_3stage_micro(c: &mut Criterion) {
-    let mut group = c.benchmark_group("fused_vs_3stage_micro");
+fn bench_fused_vs_streaming_micro(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fused_vs_streaming_micro");
 
-    // Micro-benchmark: single element with many attributes
     let heavy_attrs = r#"div class="container" id="main" data-role="page" data-theme="light" data-transitions="fade" data-url="/home" data-title="Home Page" data-add-back-btn="true" data-back-btn-text="Back" data-dom-cache="true""#;
     group.throughput(Throughput::Bytes(heavy_attrs.len() as u64));
 
     let div_queries = vec![Query::all("div", Save::all()).unwrap().build()];
 
-    group.bench_function("tape_3stage_heavy_attrs", |b| {
+    group.bench_function("streaming_heavy_attrs", |b| {
         b.iter(|| {
             let html = format!("<{}>", heavy_attrs);
-            let store = parse_tape(black_box(&html), black_box(&div_queries));
+            let store = parse(black_box(&html), black_box(&div_queries));
             black_box(store);
         })
     });
@@ -226,11 +217,10 @@ fn bench_fused_vs_3stage_micro(c: &mut Criterion) {
         })
     });
 
-    // Micro-benchmark: many simple elements
-    group.bench_function("tape_3stage_many_simple", |b| {
+    group.bench_function("streaming_many_simple", |b| {
         b.iter(|| {
             let html = "<div class='a' id='b' data-x='1'><span class='c' id='d' data-y='2'>text</span></div>";
-            let store = parse_tape(black_box(html), black_box(&div_queries));
+            let store = parse(black_box(html), black_box(&div_queries));
             black_box(store);
         })
     });
@@ -248,8 +238,8 @@ fn bench_fused_vs_3stage_micro(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_fused_vs_3stage_forms,
-    bench_fused_vs_3stage_data_attrs,
-    bench_fused_vs_3stage_micro,
+    bench_fused_vs_streaming_forms,
+    bench_fused_vs_streaming_data_attrs,
+    bench_fused_vs_streaming_micro,
 );
 criterion_main!(benches);
