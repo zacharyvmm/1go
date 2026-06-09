@@ -9,5 +9,4 @@ pub use query::selector::{
     Attribute, AttributeSelection, AttributeSelectionKind, AttributeSelections, ClassSelections,
     Combinator, ElementPredicate, IElement,
 };
-pub use query::tag_filter::TagFilter;
 pub use scah_reader::Reader;

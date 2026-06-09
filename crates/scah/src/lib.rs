@@ -112,10 +112,6 @@ mod otel;
 pub use engine::multiplexer::QueryMultiplexer;
 pub use html::element::builder::XHtmlElement;
 pub use html::parser::XHtmlParser;
-pub use html::tape::{
-    AttrFlags, CompactAttrEntry, FusedTapeBuilder, StructuralIndex, TapeEntry, TapeEntryKind,
-    TapeParser,
-};
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
 pub use scah_query_ir::{
@@ -132,6 +128,10 @@ pub use store::{Element, ElementId, Store};
 ///
 /// This is the main entry point of scah. It wires together the streaming
 /// [`XHtmlParser`], the [`QueryMultiplexer`], and the result [`Store`].
+///
+/// For simple single-tag queries (one bare tag name, no attributes or
+/// combinators), an optimized fast-path parser is used automatically
+/// in release builds for ~40% higher throughput.
 ///
 /// # Parameters
 ///
@@ -167,6 +167,13 @@ pub fn parse<'a: 'query, 'html: 'query, 'query: 'html, Q>(
 where
     Q: QuerySpec<'query>,
 {
+    // Fast-path: for simple single-tag queries, use the optimized parser.
+    // Gated to release builds so trace events are preserved in debug/test.
+    #[cfg(not(any(debug_assertions, test)))]
+    if let Some(store) = html::simple_tag_parser::parse_if_simple_tag(html, queries) {
+        return store;
+    }
+
     let selectors = QueryMultiplexer::new(queries);
 
     let mut parser = if selectors.requires_text_content() {
@@ -180,162 +187,4 @@ where
     while parser.next(&mut reader) {}
 
     parser.finish()
-}
-
-/// Parse HTML using the tape-based two-stage pipeline
-///
-/// **DEPRECATED:** Use [`parse`] or [`parse_fused`] instead. The 3-stage
-/// tape pipeline is 79% slower than streaming due to double-tokenization
-/// (SIMD structural scan → tape construction → Reader-based DOM re-tokenization).
-/// The [`parse_fused`] 2-stage pipeline avoids this by combining scanning and
-/// tokenization in one pass, while the streaming [`parse`] path remains the
-/// recommended default.
-///
-/// This function is retained for compatibility with existing benchmarks
-/// and as a reference for the SIMD infrastructure.
-///
-/// # When to use this
-///
-/// The tape-based parser is optimized for:
-/// - Large documents where SIMD scanning provides significant speedup
-/// - Documents with many structural characters (tags, attributes)
-/// - Scenarios where cache-friendly sequential access is beneficial
-///
-/// # Parameters
-///
-/// - `html`: The HTML source string
-/// - `queries`: A slice of compiled [`Query`] objects
-///
-/// # Returns
-///
-/// A [`Store`] containing all matched elements
-///
-/// # Example
-///
-/// ```rust
-/// use scah::{Query, Save, parse_tape};
-///
-/// let html = "<div><a href='link'>Hello</a></div>";
-/// let queries = &[Query::all("a", Save::all())
-///     .expect("valid selector")
-///     .build()];
-/// let store = parse_tape(html, queries);
-///
-/// let links: Vec<_> = store.get("a").unwrap().collect();
-/// assert_eq!(links.len(), 1);
-/// assert_eq!(links[0].name, "a");
-/// ```
-#[deprecated(note = "use parse() or parse_fused() instead")]
-pub fn parse_tape<'a: 'query, 'html: 'query, 'query: 'html, Q>(
-    html: &'html str,
-    queries: &'a [Q],
-) -> Store<'html, 'query>
-where
-    Q: QuerySpec<'query>,
-{
-    if let Some(store) = html::simple_tag_parser::parse_if_simple_tag(html, queries) {
-        return store;
-    }
-
-    let selectors = QueryMultiplexer::new(queries);
-    let parser = if selectors.requires_text_content() {
-        TapeParser::with_capacity(selectors, html.as_bytes(), html.len())
-    } else {
-        TapeParser::new(selectors, html.as_bytes())
-    };
-
-    parser.parse()
-}
-
-/// Parse HTML using the fused single-pass tape pipeline
-///
-/// This is the most optimized parsing path that combines SIMD structural
-/// scanning with attribute tokenization in a single pass, eliminating
-/// the redundant attribute re-scan in the current 3-stage pipeline.
-///
-/// # When to use this
-///
-/// The fused parser is optimized for:
-/// - Attribute-heavy HTML (forms, data-* attributes)
-/// - Documents where attribute parsing is a bottleneck
-/// - Maximum throughput with pre-tokenized attributes
-///
-/// # Parameters
-///
-/// - `html`: The HTML source string
-/// - `queries`: A slice of compiled [`Query`] objects
-///
-/// # Returns
-///
-/// A [`Store`] containing all matched elements
-///
-/// # Example
-///
-/// ```rust
-/// use scah::{Query, Save, parse_fused};
-///
-/// let html = "<div><a href='link' class='test'>Hello</a></div>";
-/// let queries = &[Query::all("a", Save::all())
-///     .expect("valid selector")
-///     .build()];
-/// let store = parse_fused(html, queries);
-///
-/// let links: Vec<_> = store.get("a").unwrap().collect();
-/// assert_eq!(links.len(), 1);
-/// assert_eq!(links[0].name, "a");
-/// assert_eq!(links[0].attribute(&store, "href"), Some("link"));
-/// ```
-pub fn parse_fused<'a: 'query, 'html: 'query, 'query: 'html, Q>(
-    html: &'html str,
-    queries: &'a [Q],
-) -> Store<'html, 'query>
-where
-    Q: QuerySpec<'query>,
-{
-    if let Some(store) = html::simple_tag_parser::parse_if_simple_tag(html, queries) {
-
-        return store;
-
-    }
-
-
-
-    let selectors = QueryMultiplexer::new(queries);
-    let parser = if selectors.requires_text_content() {
-        TapeParser::with_capacity(selectors, html.as_bytes(), html.len())
-    } else {
-        TapeParser::new(selectors, html.as_bytes())
-    };
-
-    parser.parse_fused()
-}
-
-/// Build a structural index from HTML input using SIMD acceleration
-///
-/// This function exposes Stage 1 of the two-stage pipeline for testing
-/// and benchmarking purposes.
-///
-/// # Arguments
-///
-/// * `html` - The HTML source string
-///
-/// # Returns
-///
-/// A [`StructuralIndex`] containing positions of all structural characters
-///
-/// # Example
-///
-/// ```rust
-/// use scah::index_html;
-///
-/// let html = "<div class='test'>Hello</div>";
-/// let index = index_html(html);
-///
-/// println!("Found {} structural characters", index.len());
-/// for pos in index.iter() {
-///     println!("  Position {}: '{}'", pos, html.as_bytes()[pos as usize] as char);
-/// }
-/// ```
-pub fn index_html(html: &str) -> StructuralIndex {
-    StructuralIndex::build(html.as_bytes())
 }

@@ -3,7 +3,6 @@ use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
 use crate::{QuerySpec, Reader};
-use scah_query_ir::TagFilter;
 
 pub(crate) struct DocumentPosition {
     pub reader_position: usize,
@@ -18,12 +17,10 @@ pub(crate) struct SaveHit {
     pub save_text_content: bool,
 }
 
-//type Runner<'query, Q> = SmallVec<[QueryExecutor<'query, Q>; 1]>;
 type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
 
 pub struct QueryMultiplexer<'query, Q> {
     runners: Runner<'query, Q>,
-    tag_filter: Option<TagFilter>,
 }
 
 impl<'html, 'query: 'html, Q> QueryMultiplexer<'query, Q>
@@ -31,23 +28,13 @@ where
     Q: QuerySpec<'query>,
 {
     pub fn new(queries: &'query [Q]) -> Self {
-        let tag_filter = TagFilter::from_queries(queries);
         Self {
             #[allow(clippy::redundant_closure)]
             runners: queries
                 .iter()
                 .map(|query| QueryExecutor::new(query))
                 .collect::<Runner<'query, Q>>(),
-            tag_filter,
         }
-    }
-
-    /// Returns the tag filter for query-guided lazy parsing, if active.
-    ///
-    /// `None` means the optimization is unavailable — all tags must be
-    /// fully tokenized (e.g., a universal `*` selector is present).
-    pub fn tag_filter(&self) -> Option<&TagFilter> {
-        self.tag_filter.as_ref()
     }
 
     pub(crate) fn requires_text_content(&self) -> bool {
@@ -85,9 +72,6 @@ where
             let early_exit_previous = session.early_exit();
             let back = session.back(index, xhtml_element, position, store);
 
-            // Remove a first-match runner only when it had already completed
-            // before close handling; `back()` can move a child section into
-            // the exit section while parent content still needs to be saved.
             if back && early_exit_previous {
                 remove_indices.push(index);
             }

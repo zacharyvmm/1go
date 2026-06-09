@@ -1,6 +1,5 @@
 use super::tokenizer::ElementAttributeToken;
 use crate::Reader;
-use crate::html::tape::CompactAttrEntry;
 use scah_query_ir::{Attribute, IElement};
 
 /// LUT for whitespace + '<' — used by `XHtmlTag::from` to skip the
@@ -188,95 +187,6 @@ impl<'html> XHtmlElement<'html> {
         //  1) assigning after adding the Attributes
         //  and 2) either transforming it into a Range in Store or removing them
         //  their is no risk when doing this unsafely
-        self.attributes = unsafe {
-            std::slice::from_raw_parts(
-                attribute_tape.as_ptr().add(start_len),
-                attribute_tape.len() - start_len,
-            )
-        };
-    }
-
-    /// Build an XHtmlElement from pre-tokenized tape entries.
-    ///
-    /// This slices attributes directly from the compact attribute entries
-    /// in the tape without re-scanning through the Reader+tokenizer.
-    ///
-    /// # Arguments
-    /// * `tape_entry` - The tape entry for this tag
-    /// * `source` - The HTML source bytes
-    /// * `compact_attrs` - Slice of pre-tokenized compact attribute entries
-    /// * `attr_range` - Range of attribute indices for this tag
-    /// * `attribute_tape` - Mutable reference to store the resulting Attribute entries
-    pub fn from_tape(
-        &mut self,
-        tape_entry: &crate::html::tape::TapeEntry,
-        source: &'html [u8],
-        compact_attrs: &[CompactAttrEntry],
-        attr_range: std::ops::Range<usize>,
-        attribute_tape: &mut Vec<Attribute<'html>>,
-    ) {
-        let start_len = attribute_tape.len();
-        let tag_slice = tape_entry.slice(source);
-        let tag_bytes = tag_slice.as_bytes();
-
-        // Parse tag name from the tag slice
-        // Skip '<' and optional '/'
-        let mut name_start = 1;
-        if name_start < tag_bytes.len() && tag_bytes[name_start] == b'/' {
-            name_start += 1;
-        }
-
-        // Find end of tag name
-        let mut name_end = name_start;
-        while name_end < tag_bytes.len() {
-            match tag_bytes[name_end] {
-                b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' | b'>' | b'/' => break,
-                _ => name_end += 1,
-            }
-        }
-
-        // Set the tag name (adjust offsets relative to source)
-        let name_offset = tape_entry.offset as usize + name_start;
-        let name_len = name_end - name_start;
-        if name_len > 0 {
-            self.name = unsafe {
-                std::str::from_utf8_unchecked(&source[name_offset..name_offset + name_len])
-            };
-        }
-
-        // Process compact attributes
-        for &compact_attr in &compact_attrs[attr_range] {
-            // Copy fields to avoid issues with packed struct references
-            let key_offset = compact_attr.key_offset as usize;
-            let key_length = compact_attr.key_length as usize;
-            let key: &str = unsafe {
-                std::str::from_utf8_unchecked(&source[key_offset..key_offset + key_length])
-            };
-            let value: Option<&str> = if compact_attr.has_value() {
-                let val_offset = compact_attr.value_offset as usize;
-                let val_length = compact_attr.value_length as usize;
-                Some(unsafe {
-                    std::str::from_utf8_unchecked(&source[val_offset..val_offset + val_length])
-                })
-            } else {
-                None
-            };
-
-            // Handle id and class specially
-            if key == "class" && value.is_some() {
-                self.class = value;
-            } else if key == "id" && value.is_some() {
-                self.id = value;
-            } else {
-                attribute_tape.push(Attribute { key, value });
-            }
-        }
-
-        // Build the attributes slice
-        // Since we are
-        //  1) assigning after adding the Attributes
-        //  and 2) either transforming it into a Range in Store or removing them
-        //  there is no risk when doing this unsafely
         self.attributes = unsafe {
             std::slice::from_raw_parts(
                 attribute_tape.as_ptr().add(start_len),

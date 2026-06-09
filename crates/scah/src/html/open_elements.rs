@@ -52,34 +52,6 @@ impl<'html> OpenElementStack<'html> {
     /// Returns `true` if any open element has saved content (inner_html or
     /// text_content being tracked). When true, we must not skip descendant
     /// tags even if they don't match the query, because their content belongs
-    /// to a matching ancestor's inner_html.
-    pub(crate) fn has_saved_content(&self) -> bool {
-        self.entries.iter().any(|e| !e.saved.is_empty())
-    }
-
-    /// Returns `true` if any open element has the given tag name
-    /// (case-insensitive). Used by TagFilter for descendant combinator checks.
-    #[inline]
-    pub(crate) fn contains_tag(&self, tag_name: &str) -> bool {
-        self.entries
-            .iter()
-            .any(|e| e.name.eq_ignore_ascii_case(tag_name))
-    }
-
-    /// Returns the tag name of the innermost open element (direct parent),
-    /// or `None` if the stack is empty. Used by TagFilter for child
-    /// combinator checks.
-    #[inline]
-    pub(crate) fn top_tag(&self) -> Option<&str> {
-        self.entries.last().map(|e| e.name)
-    }
-
-    /// Returns the tag names of all open elements as a `Vec<String>`.
-    /// Used by TagFilter for context-dependent matching.
-    pub(crate) fn tag_names(&self) -> Vec<String> {
-        self.entries.iter().map(|e| e.name.to_string()).collect()
-    }
-
     pub fn attach_saved(
         &mut self,
         element_id: ElementId,

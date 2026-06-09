@@ -16,7 +16,6 @@ lexbor_css = { git = "https://github.com/zacharyvmm/lexbor-rust-css-selection.gi
 lxml = { package = "rlibxml", version="0.1.1", git = "https://github.com/zacharyvmm/rlibxml.git", features = ["vendored"] }
 scraper = "0.25.0"
 tl = "0.7.8"
-# tl = { version = "0.7.8", features = ["simd"] }
 lol_html = "2.7.1"
 
 [features]
@@ -48,17 +47,6 @@ name = "speed_bench_simple_first"
 path = "simple/first/speed_bench.rs"
 harness = false
 
-# [[bench]]
-# name = "speed_bench_macro_queries"
-# path = "macro/speed_bench.rs"
-# harness = false
-
-# [[bench]]
-# name = "memory_bench_macro_queries"
-# path = "macro/memory_bench.rs"
-# harness = false
-# required-features = ["linux-memory-benches"]
-
 [[bench]]
 name = "speed_bench_nested_queries"
 path = "nested/speed_bench.rs"
@@ -73,24 +61,4 @@ required-features = ["linux-memory-benches"]
 [[bench]]
 name = "speed_bench_spec_all_links"
 path = "spec/speed_bench.rs"
-harness = false
-
-[[bench]]
-name = "speed_bench_attribute_heavy"
-path = "attributes/speed_bench.rs"
-harness = false
-
-[[bench]]
-name = "speed_bench_simd"
-path = "simd/speed_bench.rs"
-harness = false
-
-[[bench]]
-name = "speed_bench_fused_tape"
-path = "fused_tape/speed_bench.rs"
-harness = false
-
-[[bench]]
-name = "speed_bench_scah_modes"
-path = "scah_modes/speed_bench.rs"
 harness = false

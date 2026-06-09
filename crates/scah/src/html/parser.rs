@@ -1,6 +1,5 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
-use super::tag_utils::{find_tag_end, is_raw_text_tag, tag_info, tag_name_str};
 use crate::QuerySpec;
 use crate::Reader;
 use crate::XHtmlElement;
@@ -9,16 +8,6 @@ use crate::debug::ImpliedCloseReason;
 use crate::debug::TraceEvent;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer};
 use crate::store::Store;
-use scah_query_ir::TagFilter;
-
-/// Parser operating mode.
-enum ParseMode {
-    /// Full tokenization of every tag (current behavior, always correct).
-    Full,
-    /// Lazy mode: skip non-matching tags before full tokenization using the
-    /// query-compiler-supplied TagFilter.
-    Lazy(TagFilter),
-}
 
 /// Returns `true` if the element's content must be treated as raw text
 /// and not parsed as HTML (script, style, textarea, title).
@@ -48,8 +37,6 @@ pub struct XHtmlParser<'html, 'query, Q> {
     /// everything until the matching closing tag.
     raw_text_tag: Option<&'html str>,
     eof_drained: bool,
-    /// Parser operating mode: full vs lazy with TagFilter.
-    mode: ParseMode,
 }
 
 impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
@@ -58,16 +45,6 @@ where
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
         let capture_text_content = selectors.requires_text_content();
-        // Lazy mode is gated to release builds: in debug/test, trace events
-        // must record every tag. In release, we skip non-matching tags for
-        // maximum throughput.
-        #[cfg(not(any(debug_assertions, test)))]
-        let mode = match selectors.tag_filter().cloned() {
-            Some(filter) => ParseMode::Lazy(filter),
-            None => ParseMode::Full,
-        };
-        #[cfg(any(debug_assertions, test))]
-        let mode = ParseMode::Full;
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -84,19 +61,11 @@ where
             raw_text_tag: None,
             eof_drained: false,
             store: Store::default(),
-            mode,
         }
     }
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
         let capture_text_content = selectors.requires_text_content();
-        #[cfg(not(any(debug_assertions, test)))]
-        let mode = match selectors.tag_filter().cloned() {
-            Some(filter) => ParseMode::Lazy(filter),
-            None => ParseMode::Full,
-        };
-        #[cfg(any(debug_assertions, test))]
-        let mode = ParseMode::Full;
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -113,7 +82,6 @@ where
             raw_text_tag: None,
             eof_drained: false,
             store: Store::with_capacity(capacity),
-            mode,
         }
     }
 
@@ -179,49 +147,6 @@ where
         if reader.peek().is_none() {
             self.drain_open_elements(reader);
             return false;
-        }
-
-        // --- Lazy mode: tag-name early skip ---
-        // Before full tokenization, check if this tag can possibly match.
-        // For non-matching open tags: do a lightweight push to the open element
-        // stack (name only, no attribute parsing) so implied close processing
-        // stays correct. Close tags and raw-text elements always pass through.
-        if let ParseMode::Lazy(ref filter) = self.mode {
-            let pos = reader.get_position();
-            let source = reader.source_bytes();
-            if let Some(end) = find_tag_end(source, pos + 1) {
-                if let Some(info) = tag_info(source, pos, end) {
-                    if info.is_close || is_raw_text_tag(source, &info.name) {
-                        // Pass through: close tags affect DOM structure,
-                        // raw text elements need the specialized scanner.
-                    } else if self.open_elements.has_saved_content() {
-                        // We're inside a matching element that's tracking
-                        // inner_html or text_content. Don't skip — descendant
-                        // content belongs to the matching ancestor.
-                    } else {
-                        let name_str = tag_name_str(source, &info.name);
-                        // Use context-aware check: for hierarchical selectors,
-                        // a tag must not only be interesting but also have the
-                        // right ancestors on the stack.
-                        let tag_names = self.open_elements.tag_names();
-                        let top_tag = self.open_elements.top_tag();
-                        if !filter.could_match_in_context(name_str, &tag_names, top_tag) {
-                            // Lightweight push: track this tag on the open
-                            // element stack for correct implied close processing,
-                            // but skip attribute tokenization and query matching.
-                            if info.is_self_closing {
-                                self.position.element_depth =
-                                    self.open_elements.depth().saturating_add(1);
-                            } else {
-                                self.open_elements.push(name_str);
-                                self.position.element_depth = self.open_elements.depth();
-                            }
-                            reader.set_position(end + 1);
-                            return true;
-                        }
-                    }
-                }
-            }
         }
 
         let tag = {
