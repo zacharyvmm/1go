@@ -6,7 +6,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use lexbor_css::HtmlDocument;
 use lol_html::{HtmlRewriter, Settings, element};
 use lxml::HtmlDocument as LxmlDocument;
-use scah::{Query, Save, parse, parse_fused};
+use scah::{Query, Save, parse};
 use scraper::{Html, Selector};
 use std::hint::black_box;
 use tl::ParserOptions;
@@ -50,7 +50,7 @@ fn bench_spec_links(c: &mut Criterion) {
 
     group.bench_function("scah_fused_parse_prebuilt_save_none", |b| {
         b.iter(|| {
-            let store = parse_fused(black_box(&content), black_box(save_none_queries));
+            let store = parse(black_box(&content), black_box(save_none_queries));
             black_box(store);
         })
     });
@@ -67,7 +67,7 @@ fn bench_spec_links(c: &mut Criterion) {
 
     group.bench_function("scah_fused_parse_prebuilt_save_inner_html", |b| {
         b.iter(|| {
-            let store = parse_fused(black_box(&content), black_box(save_inner_html_queries));
+            let store = parse(black_box(&content), black_box(save_inner_html_queries));
             black_box(store);
         })
     });
@@ -84,7 +84,7 @@ fn bench_spec_links(c: &mut Criterion) {
 
     group.bench_function("scah_fused_parse_prebuilt_save_text", |b| {
         b.iter(|| {
-            let store = parse_fused(black_box(&content), black_box(save_text_queries));
+            let store = parse(black_box(&content), black_box(save_text_queries));
             consume_scah_results(black_box(&store));
         })
     });
@@ -101,7 +101,7 @@ fn bench_spec_links(c: &mut Criterion) {
 
     group.bench_function("scah_fused_parse_prebuilt_save_all", |b| {
         b.iter(|| {
-            let store = parse_fused(black_box(&content), black_box(save_all_queries));
+            let store = parse(black_box(&content), black_box(save_all_queries));
             consume_scah_results(black_box(&store));
         })
     });
@@ -126,7 +126,7 @@ fn bench_spec_links(c: &mut Criterion) {
             let queries = &[Query::all(QUERY, Save::all())
                 .expect("spec selector should parse")
                 .build()];
-            let store = parse_fused(&content, queries);
+            let store = parse(&content, queries);
 
             for element in store.get(QUERY).unwrap() {
                 black_box(&element.attributes(&store));

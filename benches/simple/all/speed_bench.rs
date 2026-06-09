@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use lexbor_css::HtmlDocument;
 use lol_html::{HtmlRewriter, Settings, element};
 use lxml::HtmlDocument as LxmlDocument;
-use scah::{Query, Save, parse, parse_fused};
+use scah::{Query, Save, parse};
 use scraper::{Html, Selector};
 use std::hint::black_box;
 use tl::ParserOptions;
@@ -72,7 +72,7 @@ fn bench_comparison(c: &mut Criterion) {
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse_fused(black_box(html), black_box(save_none_queries));
+                    let store = parse(black_box(html), black_box(save_none_queries));
                     black_box(store);
                 })
             },
@@ -125,7 +125,7 @@ fn bench_comparison(c: &mut Criterion) {
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse_fused(black_box(html), black_box(save_all_queries));
+                    let store = parse(black_box(html), black_box(save_all_queries));
                     consume_scah_results(black_box(&store));
                 })
             },
@@ -151,7 +151,7 @@ fn bench_comparison(c: &mut Criterion) {
                 let queries = &[Query::all(QUERY, Save::all())
                     .expect("simple bench selector should parse")
                     .build()];
-                let store = parse_fused(black_box(html), black_box(queries));
+                let store = parse(black_box(html), black_box(queries));
 
                 consume_scah_results(black_box(&store));
             })
