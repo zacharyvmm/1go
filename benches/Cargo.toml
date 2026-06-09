@@ -43,6 +43,16 @@ path = "simple/all/speed_bench.rs"
 harness = false
 
 [[bench]]
+name = "speed_bench_simple_id"
+path = "simple/all/speed_bench_id.rs"
+harness = false
+
+[[bench]]
+name = "speed_bench_simple_class"
+path = "simple/all/speed_bench_class.rs"
+harness = false
+
+[[bench]]
 name = "speed_bench_simple_first"
 path = "simple/first/speed_bench.rs"
 harness = false
