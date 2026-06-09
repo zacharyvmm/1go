@@ -12,11 +12,16 @@ two-stage HTML parsing pipeline, inspired by simdjson's architecture.
 │   HTML Input     │────▶│  Structural     │────▶│  Tape-Based      │
 │   (bytes)        │     │  Index (SIMD)   │     │  DOM Builder     │
 └─────────────────┘     └─────────────────┘     └──────────────────┘
-                                │                         │
-                                ▼                         ▼
-                         Vec<u32> positions        QueryMultiplexer
-                                                  + Store
+                               │                         │
+                               ▼                         ▼
+                        Vec<u32> positions        QueryMultiplexer
+                                                 + Store
 ```
+
+> **Note:** The parallel path (rayon-based chunked processing) has been removed.
+> It was 4–6× slower than the streaming parser on real hardware due to chunk
+> splitting, thread spawning, boundary fixup, and tape merging overhead.
+> The sequential fused path is retained as a development backend.
 
 ## Components
 
@@ -42,7 +47,6 @@ Flat tape representation of parsed HTML elements.
 - `Comment` - HTML comments `<!-- ... -->`
 - `Doctype` - DOCTYPE declarations
 - `Text` - Text content between tags
-- `AttributeKey`, `AttributeValue`, `AttributeBool` - Attribute components
 
 ### 3. TapeParser (`tape_parser.rs`)
 
@@ -50,17 +54,27 @@ Stage 2 of the pipeline: consumes the structural index to build a flat tape,
 then drives the existing `QueryMultiplexer` for DOM construction.
 
 **Key features:**
-- Separates structural indexing (parallel) from DOM construction (sequential)
+- Separates structural indexing from DOM construction
 - Cache-friendly sequential tape access
 - Compatible with existing `QueryMultiplexer` and `Store` infrastructure
 - Proper text content handling
 - Support for malformed HTML
 
+### 4. FusedTapeBuilder (`structural_scanner.rs`)
+
+Single-pass SIMD-driven tape builder that combines structural scanning with
+attribute tokenization, eliminating the redundant attribute re-scan of the
+3-stage pipeline.
+
 ## Public API
 
-### `parse_tape(html, queries)`
+### `parse_tape(html, queries)` — DEPRECATED
 
-Alternative to `parse()` that uses the two-stage pipeline:
+> **⚠️ Deprecated.** Use [`parse_fused`] or the streaming [`parse`] instead.
+> The 3-stage tape pipeline is 79% slower than streaming due to double-tokenization
+> (SIMD structural scan → tape construction → Reader-based DOM re-tokenization).
+> The 2-stage fused path avoids this by combining scanning and tokenization in
+> one pass. This function is retained for benchmark comparison only.
 
 ```rust
 use scah::{Query, Save, parse_tape};
@@ -68,6 +82,18 @@ use scah::{Query, Save, parse_tape};
 let html = "<div><a href='link'>Hello</a></div>";
 let queries = &[Query::all("a", Save::all()).unwrap().build()];
 let store = parse_tape(html, queries);
+```
+
+### `parse_fused(html, queries)`
+
+Uses the fused single-pass tape builder for attribute-heavy HTML:
+
+```rust
+use scah::{Query, Save, parse_fused};
+
+let html = "<div><a href='link' class='test'>Hello</a></div>";
+let queries = &[Query::all("a", Save::all()).unwrap().build()];
+let store = parse_fused(html, queries);
 ```
 
 ### `index_html(html)`
@@ -88,10 +114,13 @@ for pos in index.iter() {
 
 ## When to Use
 
-The tape-based parser is optimized for:
-- Large documents where SIMD scanning provides significant speedup
-- Documents with many structural characters (tags, attributes)
-- Scenarios where cache-friendly sequential access is beneficial
+The **streaming parser** (`parse()`) is the recommended path — it's the fastest
+on real hardware (55 ms vs 70 ms for fused, 98 ms for 3-stage tape).
+
+The tape-based parser is retained for:
+- Development and benchmarking
+- Comparing parser architectures
+- Future query-guided lazy parsing integration
 
 ## Testing
 
@@ -107,7 +136,7 @@ cargo test
 
 ## Future Improvements
 
-1. **Parallel Stage 1**: Use rayon to parallelize structural indexing for very large documents
+1. **Query-guided lazy parsing**: Only build tape entries for regions that match
+   active queries, eliminating wasted work on unmatched subtrees.
 2. **Tape Compression**: Encode common patterns (like `<div>`) more compactly
-3. **Prefetching**: Add software prefetch hints for Stage 2 tape consumption
-4. **AVX-512 Support**: Use 512-bit SIMD for even faster structural scanning
+3. **AVX-512 Support**: Use 512-bit SIMD for even faster structural scanning

@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 #[cfg(debug_assertions)]
 use scah::debug;
-use scah::{Attribute, Query, QuerySpec, Save, Store, parse, parse_tape, query};
+use scah::{Attribute, Query, QuerySpec, Save, Store, parse, parse_fused, query};
 const HTML: &str = r#"
 <!DOCTYPE html>
 <html>
@@ -743,7 +743,7 @@ fn test_attr_selector_missing_equals() {
 fn test_simple_tag_parser_style_raw_text() {
     let html = r#"<style>div { content: "<a>"; }</style><a href="real">link</a>"#;
     let queries = &[Query::all("a", Save::all()).unwrap().build()];
-    let store = parse_tape(html, queries);
+    let store = parse_fused(html, queries);
     let links: Vec<_> = store.get("a").unwrap().collect();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].attribute(&store, "href"), Some("real"));
@@ -754,7 +754,7 @@ fn test_simple_tag_parser_style_raw_text() {
 fn test_simple_tag_parser_textarea_raw_text() {
     let html = r#"<textarea><a>not an element</a></textarea><a href="real">link</a>"#;
     let queries = &[Query::all("a", Save::all()).unwrap().build()];
-    let store = parse_tape(html, queries);
+    let store = parse_fused(html, queries);
     let links: Vec<_> = store.get("a").unwrap().collect();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].attribute(&store, "href"), Some("real"));
@@ -765,7 +765,7 @@ fn test_simple_tag_parser_textarea_raw_text() {
 fn test_simple_tag_parser_title_raw_text() {
     let html = r#"<title><a>not an element</a></title><a href="real">link</a>"#;
     let queries = &[Query::all("a", Save::all()).unwrap().build()];
-    let store = parse_tape(html, queries);
+    let store = parse_fused(html, queries);
     let links: Vec<_> = store.get("a").unwrap().collect();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].attribute(&store, "href"), Some("real"));
