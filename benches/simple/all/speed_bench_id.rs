@@ -1,8 +1,7 @@
-//! Benchmarks for ID selector performance across scah and competitor libraries.
+//! Benchmarks for bare ID selector performance.
 //!
-//! Each element has a unique `id` attribute. The query `a[id]` selects all
-//! anchor tags that have an ID (all of them), testing attribute-presence
-//! selection throughput.
+//! Each element has a unique `id`. The query `#link-0` matches exactly one
+//! element, testing ID lookup speed (single-element match path).
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use lexbor_css::HtmlDocument;
@@ -13,7 +12,7 @@ use scraper::{Html, Selector};
 use std::hint::black_box;
 use tl::ParserOptions;
 
-const QUERY: &str = "a[id]";
+const QUERY: &str = "#link-0";
 
 fn generate_html(count: usize) -> String {
     let mut html = String::with_capacity(count * 100);

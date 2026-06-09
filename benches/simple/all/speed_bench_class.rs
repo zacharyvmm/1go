@@ -1,7 +1,7 @@
-//! Benchmarks for class selector performance across scah and competitor libraries.
+//! Benchmarks for bare class selector performance.
 //!
-//! Each anchor tag has `class="link"`. The query `a.link` selects all
-//! anchor tags with that class, testing class-based selection throughput.
+//! Each anchor tag has `class="link"`. The query `.link` selects all
+//! elements with that class, testing class-based selection throughput.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use lexbor_css::HtmlDocument;
@@ -12,7 +12,7 @@ use scraper::{Html, Selector};
 use std::hint::black_box;
 use tl::ParserOptions;
 
-const QUERY: &str = "a.link";
+const QUERY: &str = ".link";
 
 fn generate_html(count: usize) -> String {
     let mut html = String::with_capacity(count * 100);
