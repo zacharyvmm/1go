@@ -70,16 +70,11 @@ impl<'html> XHtmlElement<'html> {
         attribute: Attribute<'html>,
         attribute_tape: &mut Vec<Attribute<'html>>,
     ) {
-        // Branch 1: first call — capture tag name, strip trailing solidus.
+        // Branch 1: first call — capture tag name.
         if self.name.is_empty() && attribute.value.is_none() {
-            let name = attribute.key;
-            // Direct last-byte check avoids Pattern trait overhead from
-            // `ends_with(char)`.  Compiles to: load len, load last byte, cmp.
-            self.name = if name.as_bytes().last() == Some(&b'/') {
-                &name[..name.len() - 1]
-            } else {
-                name
-            };
+            // / is in UNQUOTED_BOUNDARIES on both scalar and SIMD paths,
+            // so the tokenizer always stops before it — no stripping needed.
+            self.name = attribute.key;
         } else if attribute.value.is_some() {
             // Branch 2/3: classify known value-bearing attributes.
             // `value.is_some()` hoisted here so we don't check it twice.
@@ -174,20 +169,11 @@ impl<'html> XHtmlElement<'html> {
             }
         }
 
-        // Detect trailing solidus: if the last "attribute" is a lone "/"
-        // treat it as a trailing solidus, not as an attribute (HTML-compatible behavior).
+        // / is in UNQUOTED_BOUNDARIES, so the tokenizer always emits it as a
+        // separate String("/") token.  If it's the last token before '>',
+        // skip it (it's a trailing solidus, not a real attribute).
         if let Some(k) = key {
-            if k == "/" {
-                // Trailing solidus — skip it, don't add as attribute.
-                // Also remove any "/" attribute that may have been pushed with a value.
-                let tape_len = attribute_tape.len();
-                if tape_len > start_len {
-                    let last = &attribute_tape[tape_len - 1];
-                    if last.key == "/" {
-                        attribute_tape.truncate(tape_len - 1);
-                    }
-                }
-            } else {
+            if k != "/" {
                 self.add_to_element(
                     Attribute {
                         key: k,

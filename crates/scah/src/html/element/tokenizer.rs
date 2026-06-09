@@ -11,7 +11,8 @@ const DOUBLEQUOTE: u8 = b'"';
 const SINGLEQUOTE: u8 = b'\'';
 const EQUAL: u8 = b'=';
 const END_OF_ELEMENT: u8 = b'>';
-const UNQUOTED_BOUNDARIES: [u8; 9] = [
+const SLASH: u8 = b'/';
+const UNQUOTED_BOUNDARIES: [u8; 10] = [
     b' ',
     b'\t',
     b'\n',
@@ -21,10 +22,11 @@ const UNQUOTED_BOUNDARIES: [u8; 9] = [
     SINGLEQUOTE,
     EQUAL,
     END_OF_ELEMENT,
+    SLASH,
 ];
 
 /// Precomputed 256-byte LUT: `UNQUOTED_BOUNDARY_LUT[b as usize]` is `true`
-/// iff `b` is one of the 9 boundary characters.  Eliminates the linear
+/// iff `b` is one of the boundary characters.  Eliminates the linear
 /// scan of `UNQUOTED_BOUNDARIES.contains(b)` in the hot path — replaces
 /// ~4 comparisons/byte with a single L1-cache lookup.
 static UNQUOTED_BOUNDARY_LUT: [bool; 256] = {
