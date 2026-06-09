@@ -94,3 +94,8 @@ harness = false
 name = "speed_bench_parallel_fused"
 path = "parallel_fused/speed_bench.rs"
 harness = false
+
+[[bench]]
+name = "speed_bench_scah_modes"
+path = "scah_modes/speed_bench.rs"
+harness = false

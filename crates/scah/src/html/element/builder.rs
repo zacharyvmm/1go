@@ -363,25 +363,32 @@ impl<'a> XHtmlTag<'a> {
                     reader.skip(); // skip first '-'
                     reader.skip(); // skip second '-'
                     loop {
-                        // Check for abrupt close before scanning: <!--> or <!-->
+                        // Check for abrupt close: <!--> or <!-->
                         if reader.peek() == Some(b'>') {
-                            // HTML spec: "<!-->" is an abruptly-closed comment.
                             reader.skip();
                             break;
                         }
                         reader.next_until(b'-');
-                        if reader.peek() == Some(b'-') {
-                            reader.skip();
-                            if reader.peek() == Some(b'>') {
-                                reader.skip();
-                                break;
-                            }
-                        } else if reader.peek().is_none() {
-                            // EOF inside comment — stop
+
+                        let pos = reader.get_position();
+                        let src = reader.source_bytes();
+                        let len = src.len();
+
+                        // After next_until(b'-'), we're either at a '-' or EOF.
+                        if pos >= len || src[pos] != b'-' {
+                            // EOF (no '-' found) — unterminated comment
                             break;
-                        } else {
-                            reader.skip();
                         }
+
+                        // Check for the proper close sequence: -->
+                        // We need TWO dashes followed by '>', not just '->'.
+                        if pos + 2 < len && src[pos + 1] == b'-' && src[pos + 2] == b'>' {
+                            reader.set_position(pos + 3);
+                            break;
+                        }
+
+                        // Not a close sequence — consume this lone '-' and continue
+                        reader.skip();
                     }
                 } else {
                     // Other SGML markup like <!DOCTYPE ...>
@@ -530,7 +537,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Known issue: Escapes are not handled"]
     fn test_key_no_quote_and_escaped_space_value() {
         let mut reader = Reader::new("p key = hello\\ world");
         let mut element = XHtmlElement::default();
@@ -585,7 +591,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Known issue: Escapes are not handled"]
     fn test_long_key_with_spaces_and_real_same_quote_inside() {
         let mut reader = Reader::new(r#"p "long key\"s with spaces"="value""#);
         let mut element = XHtmlElement::default();
@@ -604,7 +609,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Known issue: Escapes are not handled"]
     fn test_long_key_and_value_with_spaces_and_real_same_quote_inside() {
         let mut reader = Reader::new(
             r#"p "long key\"s with spaces"="value\"s of an other person \\\\\\ \\\\\ \ \  \"""#,

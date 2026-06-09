@@ -128,6 +128,75 @@ impl<'a> Reader<'a> {
         self.position += memchr::memchr(character, remaining).unwrap_or(remaining.len());
     }
 
+    /// Advance position to the first *unescaped* occurrence of `quote_char`,
+    /// respecting backslash escapes.
+    ///
+    /// This handles the full backslash-escape semantics of HTML attributes:
+    /// - `\\` → literal backslash (escaped backslash)
+    /// - `\"` → literal double-quote (escaped quote) — when `quote_char = '"'`
+    /// - `\'` → literal single-quote (escaped quote) — when `quote_char = '\''`
+    ///
+    /// The reader position is advanced to point at the first unescaped closing
+    /// quote. Unlike `next_until`, which would stop at *any* instance of the
+    /// byte, this correctly skips escaped quotes.
+    ///
+    /// ## Algorithm
+    ///
+    /// simdjson-inspired lazy backslash counting:
+    ///
+    /// 1. Use `memchr` to find the next quote (fast, SIMD-accelerated).
+    /// 2. Check the byte *immediately before* the quote. If it's not `\`, the
+    ///    quote is unescaped — done (99%+ of cases, zero overhead vs `next_until`).
+    /// 3. If it is `\`, count consecutive backslashes backward. An odd count
+    ///    means the quote is escaped (the last backslash escapes it); an even
+    ///    count means the backslashes escape each other and the quote is real.
+    /// 4. If escaped, advance past the quote and loop.
+    ///
+    /// ```text
+    /// Input:   a b c " d e "          → step 2: prev='c', not `\` → DONE
+    /// Input:   a \ \ " b "            → step 2: prev='\', count=2 (even) → DONE
+    /// Input:   a \ " b "              → step 2: prev='\', count=1 (odd) → skip, loop
+    /// ```
+    #[inline]
+    pub fn next_until_unescaped_quote(&mut self, quote_char: u8) {
+        let src = self.source;
+        let len = src.len();
+        let mut pos = self.position;
+
+        // Escaped-quote sequences are extremely rare — optimize for the
+        // common case with a fast two-level check.
+        loop {
+            let remaining = &src[pos..];
+            let quote_pos = match memchr::memchr(quote_char, remaining) {
+                None => {
+                    self.position = len;
+                    return;
+                }
+                Some(offset) => pos + offset,
+            };
+
+            // Check if quote is escaped: count consecutive backslashes
+            // immediately before the quote. Odd count → escaped.
+            if quote_pos > 0 && src[quote_pos - 1] == b'\\' {
+                let mut bs_count = 1u32;
+                let mut p = quote_pos - 1;
+                while p > 0 && src[p - 1] == b'\\' {
+                    bs_count += 1;
+                    p -= 1;
+                }
+                if bs_count & 1 == 1 {
+                    // Odd backslash count — quote is escaped, skip it
+                    pos = quote_pos + 1;
+                    continue;
+                }
+            }
+
+            // Quote is unescaped (even backslash count or no preceding backslash)
+            self.position = quote_pos;
+            return;
+        }
+    }
+
     pub fn skip(&mut self) {
         if self.position < self.source.len() {
             self.position += 1;
