@@ -3,7 +3,10 @@ use crate::{
     Combinator, QuerySection, QuerySpec, Reader, Save, SelectionKind, Store, TransitionId,
     XHtmlElement,
 };
-use scah_reader::simd::find_tag_open_scalar;
+use super::tag_utils::{
+    find_next_tag, find_tag_end, is_raw_text_tag, tag_info, tag_name_eq,
+    tag_name_eq_ignore_ascii_case, tag_name_str,
+};
 use std::ops::Range;
 
 #[derive(Clone, Copy)]
@@ -17,12 +20,6 @@ struct OpenCapture {
     element_id: ElementId,
     inner_html_start: usize,
     text_content_start: usize,
-}
-
-struct TagInfo {
-    name: Range<usize>,
-    is_close: bool,
-    is_self_closing: bool,
 }
 
 pub(crate) fn parse_if_simple_tag<'html: 'query, 'query: 'html, Q>(
@@ -251,95 +248,6 @@ fn push_text_segment<'html>(
         store.text_content.set_start(start);
         let _ = store.text_content.push(reader, end);
     }
-}
-
-#[inline]
-fn find_next_tag(input: &[u8], start: usize) -> Option<usize> {
-    let position = find_tag_open_scalar(input, start);
-    (position < input.len()).then_some(position)
-}
-
-fn find_tag_end(input: &[u8], mut position: usize) -> Option<usize> {
-    let mut quote = None;
-    while position < input.len() {
-        match (input[position], quote) {
-            (b'"', None) => quote = Some(b'"'),
-            (b'\'', None) => quote = Some(b'\''),
-            (byte, Some(open_quote)) if byte == open_quote => quote = None,
-            (b'>', None) => return Some(position),
-            _ => {}
-        }
-        position += 1;
-    }
-    None
-}
-
-fn tag_info(input: &[u8], tag_start: usize, tag_end: usize) -> Option<TagInfo> {
-    let mut position = tag_start + 1;
-    while position < tag_end
-        && (input[position] == b'<' || matches!(input[position], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C'))
-    {
-        position += 1;
-    }
-
-    if position >= tag_end || matches!(input[position], b'!' | b'?') {
-        return None;
-    }
-
-    let is_close = input[position] == b'/';
-    if is_close {
-        position += 1;
-        while position < tag_end && matches!(input[position], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C') {
-            position += 1;
-        }
-    }
-
-    let name_start = position;
-    while position < tag_end {
-        match input[position] {
-            b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' | b'/' => break,
-            _ => position += 1,
-        }
-    }
-
-    if position == name_start {
-        return None;
-    }
-
-    let mut before_end = tag_end;
-    while before_end > name_start && matches!(input[before_end - 1], b' ' | b'\t' | b'\n' | b'\r' | b'\x0C') {
-        before_end -= 1;
-    }
-
-    Some(TagInfo {
-        name: name_start..position,
-        is_close,
-        is_self_closing: !is_close && before_end > name_start && input[before_end - 1] == b'/',
-    })
-}
-
-#[inline]
-fn tag_name_eq(input: &[u8], range: &Range<usize>, tag: &str) -> bool {
-    input[range.clone()] == *tag.as_bytes()
-}
-
-#[inline]
-fn tag_name_eq_ignore_ascii_case(input: &[u8], range: &Range<usize>, tag: &str) -> bool {
-    input[range.clone()].eq_ignore_ascii_case(tag.as_bytes())
-}
-
-#[inline]
-fn is_raw_text_tag(input: &[u8], range: &Range<usize>) -> bool {
-    let name = &input[range.clone()];
-    matches!(
-        name.to_ascii_lowercase().as_slice(),
-        b"script" | b"style" | b"textarea" | b"title"
-    )
-}
-
-#[inline]
-fn tag_name_str<'a>(input: &'a [u8], range: &Range<usize>) -> &'a str {
-    unsafe { std::str::from_utf8_unchecked(&input[range.clone()]) }
 }
 
 fn find_raw_text_close(input: &[u8], tag: &str, mut search_pos: usize) -> Option<(usize, usize)> {
