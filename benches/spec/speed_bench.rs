@@ -48,12 +48,6 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("scah_fused_parse_prebuilt_save_none", |b| {
-        b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_none_queries));
-            black_box(store);
-        })
-    });
 
     let save_inner_html_queries = &[Query::all(QUERY, Save::only_inner_html())
         .expect("spec selector should parse")
@@ -65,12 +59,6 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("scah_fused_parse_prebuilt_save_inner_html", |b| {
-        b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_inner_html_queries));
-            black_box(store);
-        })
-    });
 
     let save_text_queries = &[Query::all(QUERY, Save::only_text_content())
         .expect("spec selector should parse")
@@ -82,12 +70,6 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("scah_fused_parse_prebuilt_save_text", |b| {
-        b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_text_queries));
-            consume_scah_results(black_box(&store));
-        })
-    });
 
     let save_all_queries = &[Query::all(QUERY, Save::all())
         .expect("spec selector should parse")
@@ -99,12 +81,6 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("scah_fused_parse_prebuilt_save_all", |b| {
-        b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_all_queries));
-            consume_scah_results(black_box(&store));
-        })
-    });
 
     group.bench_function("scah", |b| {
         b.iter(|| {
@@ -121,20 +97,6 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("scah_fused", |b| {
-        b.iter(|| {
-            let queries = &[Query::all(QUERY, Save::all())
-                .expect("spec selector should parse")
-                .build()];
-            let store = parse(&content, queries);
-
-            for element in store.get(QUERY).unwrap() {
-                black_box(&element.attributes(&store));
-                black_box(&element.inner_html);
-                black_box(&element.text_content(&store));
-            }
-        })
-    });
 
     group.bench_function("tl", |b| {
         b.iter(|| {
