@@ -130,7 +130,7 @@ fn bench_spec_links(c: &mut Criterion) {
 
     group.bench_function("lexbor", |b| {
         b.iter(|| {
-            let doc = HtmlDocument::new(content.as_str()).expect("Failed to parse HTML");
+            let doc = HtmlDocument::parse(content.as_str()).expect("Failed to parse HTML");
             let nodes = doc.select(QUERY);
 
             for node in nodes.iter() {
@@ -157,13 +157,11 @@ fn bench_spec_links(c: &mut Criterion) {
     group.bench_function("lol_html", |b| {
         b.iter(|| {
             let mut rewriter = HtmlRewriter::new(
-                Settings {
-                    element_content_handlers: vec![element!(QUERY, |el| {
+                Settings::new()
+                    .append_element_content_handler(element!(QUERY, |el| {
                         black_box(el.get_attribute("href"));
                         Ok(())
-                    })],
-                    ..Settings::default()
-                },
+                    })),
                 |_: &[u8]| {},
             );
             rewriter.write(content.as_bytes()).unwrap();

@@ -89,7 +89,7 @@ fn bench_comparison(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("lexbor", size), &content, |b, html| {
             b.iter(|| {
-                let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+                let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
                 let nodes = doc.select(QUERY);
 
                 let node = nodes.first().unwrap();
@@ -115,13 +115,11 @@ fn bench_comparison(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("lol_html", size), &content, |b, html| {
             b.iter(|| {
                 let mut rewriter = HtmlRewriter::new(
-                    Settings {
-                        element_content_handlers: vec![element!(QUERY, |el| {
+                    Settings::new()
+                        .append_element_content_handler(element!(QUERY, |el| {
                             black_box(el.get_attribute("href"));
                             Err(Box::new(StopParsing))
-                        })],
-                        ..Settings::default()
-                    },
+                        })),
                     |_: &[u8]| {},
                 );
                 let res = rewriter.write(html.as_bytes());

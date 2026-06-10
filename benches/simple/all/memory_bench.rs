@@ -79,7 +79,7 @@ use lexbor_css::HtmlDocument;
 #[library_benchmark]
 #[bench::lexbor(setup_html())]
 fn bench_lexbor(html: String) {
-    let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+    let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
     let nodes = doc.select(QUERY);
     let iterator = nodes.iter();
 
@@ -110,13 +110,11 @@ use lol_html::{HtmlRewriter, Settings, element};
 #[bench::lol_html(setup_html())]
 fn bench_lol_html(html: String) {
     let mut rewriter = HtmlRewriter::new(
-        Settings {
-            element_content_handlers: vec![element!(QUERY, |el| {
+        Settings::new()
+            .append_element_content_handler(element!(QUERY, |el| {
                 black_box(el.get_attribute("href"));
                 Ok(())
-            })],
-            ..Settings::default()
-        },
+            })),
         |_: &[u8]| {},
     );
     rewriter.write(html.as_bytes()).unwrap();
