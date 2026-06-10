@@ -7,6 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use lexbor_css::HtmlDocument;
 use lol_html::{HtmlRewriter, Settings, element};
 use lxml::HtmlDocument as LxmlDocument;
+use lxml::css::CssSelector;
 use scah::{Query, Save, parse};
 use scraper::{Html, Selector};
 use std::hint::black_box;
@@ -172,9 +173,10 @@ fn bench_comparison(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("lxml", size), &content, |b, html| {
+            let sel = CssSelector::compile(QUERY).expect("Failed to compile CSS selector");
             b.iter(|| {
                 let doc = LxmlDocument::new(html).expect("Failed to parse HTML");
-                let nodes = doc.select(QUERY);
+                let nodes = doc.select_compiled(&sel);
 
                 for node in nodes.iter() {
                     black_box(node.get_attribute("href"));

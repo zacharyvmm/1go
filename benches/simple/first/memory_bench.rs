@@ -1,6 +1,12 @@
 use gungraun::{library_benchmark, library_benchmark_group, main};
 use lol_html::errors::RewritingError;
 use lxml::HtmlDocument as LxmlDocument;
+use lxml::css::CssSelector;
+use std::sync::LazyLock;
+
+static LXML_SEL: LazyLock<CssSelector> = LazyLock::new(|| {
+    CssSelector::compile(QUERY).expect("Failed to compile CSS selector")
+});
 use std::error::Error;
 use std::fmt;
 use std::hint::black_box;
@@ -97,7 +103,7 @@ fn bench_lexbor(html: String) {
 #[bench::lxml(setup_html())]
 fn bench_lxml(html: String) {
     let doc = LxmlDocument::new(&html).expect("Failed to parse HTML");
-    let nodes = doc.select(QUERY);
+    let nodes = doc.select_compiled(&LXML_SEL);
     let node = nodes.iter().next().unwrap();
 
     black_box(node.get_attribute("href"));
