@@ -37,6 +37,13 @@ impl<'a> Reader<'a> {
         self.source.get(self.position).copied()
     }
 
+    /// Peek at the byte `offset` positions ahead of the cursor without
+    /// advancing. Returns `None` when the position is past the end of input.
+    #[inline]
+    pub fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.source.get(self.position + offset).copied()
+    }
+
     #[inline]
     pub fn next_while_list(&mut self, characters: &[u8]) {
         let len = self.source.len();

@@ -19,8 +19,37 @@ pub struct XHtmlParser<'html, 'query, Q> {
     implied_closes: Vec<OpenElement<'html>>,
     save_hits: Vec<crate::engine::multiplexer::SaveHit>,
     capture_text_content: bool,
-    in_script: bool,
+    raw_text_close: Option<&'static str>,
     eof_drained: bool,
+}
+
+/// Returns the closing-tag prefix (`</name`, without the terminating `>`) for
+/// an HTML raw-text / RCDATA element whose contents must not be parsed as
+/// markup. Matching is ASCII-case-insensitive, so `<SCRIPT>` and `<Style>` are
+/// handled the same as their lowercase forms.
+fn raw_text_close_tag(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("script") {
+        Some("</script")
+    } else if name.eq_ignore_ascii_case("style") {
+        Some("</style")
+    } else if name.eq_ignore_ascii_case("textarea") {
+        Some("</textarea")
+    } else if name.eq_ignore_ascii_case("title") {
+        Some("</title")
+    } else {
+        None
+    }
+}
+
+/// A raw-text end tag is only "appropriate" when the tag name is immediately
+/// followed by HTML whitespace, a `/`, or `>` (or end of input). This prevents
+/// a longer name such as `</styles>` from prematurely closing `<style>`.
+#[inline]
+fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
+    matches!(
+        byte,
+        None | Some(b' ' | b'\t' | b'\n' | 0x0C | b'\r' | b'/' | b'>')
+    )
 }
 
 impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
@@ -42,7 +71,7 @@ where
             implied_closes: Vec::new(),
             save_hits: Vec::new(),
             capture_text_content,
-            in_script: false,
+            raw_text_close: None,
             eof_drained: false,
             store: Store::default(),
         }
@@ -63,14 +92,14 @@ where
             implied_closes: Vec::new(),
             save_hits: Vec::new(),
             capture_text_content,
-            in_script: false,
+            raw_text_close: None,
             eof_drained: false,
             store: Store::with_capacity(capacity),
         }
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
-        if self.in_script {
+        if let Some(close_tag) = self.raw_text_close {
             loop {
                 reader.next_until(b'<');
                 if reader.peek().is_none() {
@@ -78,7 +107,14 @@ where
                     return false;
                 }
 
-                if reader.match_ignore_case("</script>") {
+                // `close_tag` is the `</name` prefix. It is only the real end
+                // tag when the name is followed by an appropriate terminator
+                // (HTML whitespace, `/`, or `>`), so `</styles>` does not close
+                // `<style>` and `</style >` does. This only peeks — the normal
+                // Close-tag path below consumes the tag and pops the stack.
+                if reader.match_ignore_case(close_tag)
+                    && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
+                {
                     if self.capture_text_content
                         && self.store.text_content.text_start.is_some()
                         && let Some(position) =
@@ -86,7 +122,7 @@ where
                     {
                         self.position.text_content_position = position;
                     }
-                    self.in_script = false;
+                    self.raw_text_close = None;
                     break;
                 } else {
                     reader.skip();
@@ -147,8 +183,8 @@ where
 
         match tag {
             XHtmlTag::Open => {
-                if self.element.name.eq_ignore_ascii_case("script") {
-                    self.in_script = true;
+                if let Some(close_tag) = raw_text_close_tag(self.element.name) {
+                    self.raw_text_close = Some(close_tag);
                 }
 
                 self.position.reader_position = tag_start_position;
@@ -348,13 +384,14 @@ where
                 .map(|start_idx| reader.slice(start_idx..self.position.reader_position));
 
             let text_content = saved.text_content_start.and_then(|start_idx| {
+                // `get_position()` asserts the buffer is non-empty, so guard
+                // empty/whitespace-only elements here to avoid a panic.
+                if self.store.text_content.is_empty() {
+                    return None;
+                }
                 let end = self.store.text_content.get_position();
                 if start_idx == usize::MAX {
-                    if self.store.text_content.is_empty() {
-                        None
-                    } else {
-                        Some(0..end)
-                    }
+                    Some(0..end)
                 } else if start_idx == end {
                     None
                 } else {
@@ -1264,16 +1301,10 @@ mod tests {
 
         assert_eq!(
             store.attributes.deref().clone(),
-            vec![
-                Attribute {
-                    key: "src",
-                    value: Some("https://example.com/p1.png")
-                },
-                Attribute {
-                    key: "/",
-                    value: None
-                }
-            ]
+            vec![Attribute {
+                key: "src",
+                value: Some("https://example.com/p1.png")
+            }]
         );
 
         let products_sections: Vec<&Element> = store.get("#products").unwrap().collect();
@@ -1367,16 +1398,8 @@ mod tests {
                     value: Some("https://example.com/p1.png")
                 },
                 Attribute {
-                    key: "/",
-                    value: None
-                },
-                Attribute {
                     key: "src",
                     value: Some("https://example.com/p2.png")
-                },
-                Attribute {
-                    key: "/",
-                    value: None
                 },
             ]
         );
