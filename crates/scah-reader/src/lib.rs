@@ -79,6 +79,7 @@ impl<'a> Reader<'a> {
         }
     }
 
+    #[inline]
     pub fn eof(&self) -> bool {
         if self.position >= self.source.len() {
             return true;
@@ -87,6 +88,15 @@ impl<'a> Reader<'a> {
         self.source[self.position..]
             .iter()
             .all(|b| b.is_ascii_whitespace())
+    }
+
+    /// Check whether the bytes immediately before the cursor match `suffix`,
+    /// without interpreting them as UTF-8. Safe to call when the cursor sits
+    /// in the middle of a multibyte character.
+    #[inline]
+    pub fn preceding_bytes_eq(&self, suffix: &[u8]) -> bool {
+        let position = self.position;
+        position >= suffix.len() && &self.source[position - suffix.len()..position] == suffix
     }
 
     pub fn match_ignore_case(&self, s: &str) -> bool {

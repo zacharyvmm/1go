@@ -482,6 +482,24 @@ fn unquoted_url_value_with_slashes_is_preserved() {
     assert_eq!(links[0].attribute(&store, "href"), Some("/a/b/c"));
 }
 
+// ===========================================================================
+// Comment-skipping UTF-8 safety (PR #24 review finding)
+// ===========================================================================
+
+/// A comment containing a multibyte character before `>` must not leak the
+/// elements inside the comment. The parser must use byte-level comparison,
+/// not `Reader::slice`, to avoid creating invalid `&str` slices.
+#[test]
+fn comment_with_multibyte_char_before_gt_does_not_leak_elements() {
+    let html = r#"<!--€><a href="fake">bad</a>--><a href="real">ok</a>"#;
+    let store = parse_all(html, &["a"]);
+    let links = elements(&store, "a");
+
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].attribute(&store, "href"), Some("real"));
+    assert_eq!(links[0].text_content(&store), Some("ok"));
+}
+
 #[test]
 fn void_elements_do_not_capture_trailing_text_variants() {
     let html = "<div>Line1<br/>Line2<img src='x'/>Line3</div>";

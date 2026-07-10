@@ -37,6 +37,16 @@ impl<'html> Default for OpenElementStack<'html> {
     }
 }
 
+#[inline]
+fn tag_eq(name: &str, expected: &str) -> bool {
+    name.eq_ignore_ascii_case(expected)
+}
+
+#[inline]
+fn tag_in(name: &str, expected: &[&str]) -> bool {
+    expected.iter().any(|item| name.eq_ignore_ascii_case(item))
+}
+
 impl<'html> OpenElementStack<'html> {
     pub fn depth(&self) -> DepthSize {
         self.entries.len().try_into().unwrap_or(DepthSize::MAX)
@@ -78,20 +88,21 @@ impl<'html> OpenElementStack<'html> {
             self.pop_matching_in_scope_into(&["p"], ScopeKind::Default, popped);
         }
 
-        match name {
-            "button" => self.pop_matching_in_scope_into(&["button"], ScopeKind::Button, popped),
-            "li" => self.pop_matching_in_scope_into(&["li"], ScopeKind::ListItem, popped),
-            "dt" | "dd" => {
-                self.pop_matching_in_scope_into(&["dt", "dd"], ScopeKind::ListItem, popped)
-            }
-            "option" => self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped),
-            "optgroup" => {
-                self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
-                self.pop_matching_in_scope_into(&["optgroup"], ScopeKind::Select, popped);
-            }
-            "tr" => self.pop_matching_in_scope_into(&["tr"], ScopeKind::Table, popped),
-            "td" | "th" => self.pop_matching_in_scope_into(&["td", "th"], ScopeKind::Table, popped),
-            _ => {}
+        if tag_eq(name, "button") {
+            self.pop_matching_in_scope_into(&["button"], ScopeKind::Button, popped);
+        } else if tag_eq(name, "li") {
+            self.pop_matching_in_scope_into(&["li"], ScopeKind::ListItem, popped);
+        } else if tag_in(name, &["dt", "dd"]) {
+            self.pop_matching_in_scope_into(&["dt", "dd"], ScopeKind::ListItem, popped);
+        } else if tag_eq(name, "option") {
+            self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
+        } else if tag_eq(name, "optgroup") {
+            self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
+            self.pop_matching_in_scope_into(&["optgroup"], ScopeKind::Select, popped);
+        } else if tag_eq(name, "tr") {
+            self.pop_matching_in_scope_into(&["tr"], ScopeKind::Table, popped);
+        } else if tag_in(name, &["td", "th"]) {
+            self.pop_matching_in_scope_into(&["td", "th"], ScopeKind::Table, popped);
         }
     }
 
@@ -183,70 +194,76 @@ impl<'html> OpenElementStack<'html> {
 }
 
 fn close_scope(name: &str) -> ScopeKind {
-    match name {
-        "li" | "dt" | "dd" => ScopeKind::ListItem,
-        "button" => ScopeKind::Button,
-        "tr" | "td" | "th" | "thead" | "tbody" | "tfoot" | "caption" | "colgroup" => {
-            ScopeKind::Table
-        }
-        "option" | "optgroup" => ScopeKind::Select,
-        _ => ScopeKind::Default,
+    if tag_in(name, &["li", "dt", "dd"]) {
+        ScopeKind::ListItem
+    } else if tag_eq(name, "button") {
+        ScopeKind::Button
+    } else if tag_in(
+        name,
+        &[
+            "tr", "td", "th", "thead", "tbody", "tfoot", "caption", "colgroup",
+        ],
+    ) {
+        ScopeKind::Table
+    } else if tag_in(name, &["option", "optgroup"]) {
+        ScopeKind::Select
+    } else {
+        ScopeKind::Default
     }
 }
 
 fn closes_open_p(name: &str) -> bool {
-    matches!(
+    tag_in(
         name,
-        "address"
-            | "article"
-            | "aside"
-            | "blockquote"
-            | "div"
-            | "dl"
-            | "fieldset"
-            | "footer"
-            | "form"
-            | "h1"
-            | "h2"
-            | "h3"
-            | "h4"
-            | "h5"
-            | "h6"
-            | "header"
-            | "hr"
-            | "main"
-            | "nav"
-            | "ol"
-            | "p"
-            | "pre"
-            | "section"
-            | "table"
-            | "ul"
+        &[
+            "address",
+            "article",
+            "aside",
+            "blockquote",
+            "div",
+            "dl",
+            "fieldset",
+            "footer",
+            "form",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "header",
+            "hr",
+            "main",
+            "nav",
+            "ol",
+            "p",
+            "pre",
+            "section",
+            "table",
+            "ul",
+        ],
     )
 }
 
 fn is_scope_barrier(name: &str, scope: ScopeKind) -> bool {
-    if matches!(name, "html" | "template") {
+    if tag_in(name, &["html", "template"]) {
         return true;
     }
 
     match scope {
-        ScopeKind::Default => matches!(
+        ScopeKind::Default => tag_in(name, &["applet", "marquee", "object", "table", "td", "th"]),
+        ScopeKind::ListItem => tag_in(
             name,
-            "applet" | "marquee" | "object" | "table" | "td" | "th"
+            &[
+                "applet", "marquee", "object", "table", "td", "th", "ol", "ul",
+            ],
         ),
-        ScopeKind::ListItem => matches!(
+        ScopeKind::Button => tag_in(
             name,
-            "applet" | "marquee" | "object" | "table" | "td" | "th" | "ol" | "ul"
+            &["applet", "marquee", "object", "table", "td", "th", "button"],
         ),
-        ScopeKind::Button => {
-            matches!(
-                name,
-                "applet" | "marquee" | "object" | "table" | "td" | "th" | "button"
-            )
-        }
-        ScopeKind::Table => matches!(name, "html" | "table" | "template"),
-        ScopeKind::Select => !matches!(name, "option" | "optgroup"),
+        ScopeKind::Table => tag_in(name, &["html", "table", "template"]),
+        ScopeKind::Select => !tag_in(name, &["option", "optgroup"]),
     }
 }
 

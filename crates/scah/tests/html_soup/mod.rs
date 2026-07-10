@@ -1,3 +1,4 @@
+mod case_insensitive_stack_rules_test;
 mod eof_recovery_test;
 mod helpers;
 mod implied_close_test;

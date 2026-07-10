@@ -256,9 +256,7 @@ fn skip_html_comment(reader: &mut Reader<'_>) {
             return;
         }
 
-        let pos = reader.get_position();
-        let closed = (pos >= 2 && reader.slice(pos - 2..pos) == "--")
-            || (pos >= 3 && reader.slice(pos - 3..pos) == "--!");
+        let closed = reader.preceding_bytes_eq(b"--") || reader.preceding_bytes_eq(b"--!");
         reader.skip(); // consume the '>'
 
         if closed {
