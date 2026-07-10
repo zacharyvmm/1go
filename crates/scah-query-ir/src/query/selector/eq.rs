@@ -74,7 +74,7 @@ impl<'a> ElementPredicate<'a> {
 
     pub fn matches_element<'b, E: IElement<'b>>(&self, other: &E) -> bool {
         if let Some(name) = self.name
-            && name != other.name()
+            && !name.eq_ignore_ascii_case(other.name())
         {
             return false;
         }

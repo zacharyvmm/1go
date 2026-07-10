@@ -340,6 +340,24 @@ fn raw_text_close_tag_whitespace_is_case_insensitive() {
     assert_eq!(links[0].attribute(&store, "href"), Some("ok"));
 }
 
+/// Once an appropriate raw-text end-tag name is followed by whitespace, the
+/// parser tolerates the remaining garbage through `>` and closes the element.
+/// The following link must therefore be a child of the surrounding `<div>`,
+/// not of the now-closed `<style>`.
+#[test]
+fn raw_text_close_tag_tolerates_trailing_garbage_after_whitespace() {
+    let html = r#"<div><style>body { color: red; }</style ignored><a href="tail">tail</a></div>"#;
+    let store = parse_all(html, &["style", "div > a", "style > a"]);
+
+    assert_eq!(texts(&store, "style"), vec![Some("body { color: red; }")]);
+    assert_eq!(elements(&store, "div > a").len(), 1);
+    assert_eq!(attr(&store, "div > a", "href"), vec![Some("tail")]);
+    assert!(
+        elements(&store, "style > a").is_empty(),
+        "the trailing <a> must not remain beneath the closed <style>"
+    );
+}
+
 /// A near-miss end tag (`</styles>`) must NOT terminate raw text: the name has
 /// to be followed by an appropriate terminator, not more name characters.
 #[test]
@@ -353,6 +371,20 @@ fn raw_text_near_miss_close_tag_does_not_terminate() {
         "`</styles>` is not a valid <style> end tag and must stay raw text"
     );
     assert_eq!(links[0].attribute(&store, "href"), Some("real"));
+}
+
+/// A longer name remains raw text even when it has trailing garbage. The later
+/// tolerated `</style ignored>` is the only closing tag in this document.
+#[test]
+fn raw_text_near_miss_with_trailing_garbage_does_not_terminate() {
+    let html = r#"<div><style>x</styles ignored><a href="fake">fake</a></style ignored><a href="real">real</a></div>"#;
+    let store = parse_all(html, &["div > a", "style > a"]);
+
+    assert_eq!(attr(&store, "div > a", "href"), vec![Some("real")]);
+    assert!(
+        elements(&store, "style > a").is_empty(),
+        "the near-miss </styles ignored> must stay literal raw text"
+    );
 }
 
 // ===========================================================================

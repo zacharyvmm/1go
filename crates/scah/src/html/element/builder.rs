@@ -56,9 +56,15 @@ impl<'html> XHtmlElement<'html> {
     ) {
         if self.name.is_empty() && attribute.value.is_none() {
             self.name = attribute.key;
-        } else if self.class.is_none() && attribute.key == "class" && attribute.value.is_some() {
+        } else if self.class.is_none()
+            && attribute.key.eq_ignore_ascii_case("class")
+            && attribute.value.is_some()
+        {
             self.class = attribute.value;
-        } else if self.id.is_none() && attribute.key == "id" && attribute.value.is_some() {
+        } else if self.id.is_none()
+            && attribute.key.eq_ignore_ascii_case("id")
+            && attribute.value.is_some()
+        {
             self.id = attribute.value;
         } else {
             attribute_tape.push(attribute);
@@ -71,23 +77,12 @@ impl<'html> XHtmlElement<'html> {
         // ignored (it does not make the element self-closing), so tag name is
         // the only signal here. The trailing solidus is stripped during
         // tokenization and never reaches the attribute list.
-        matches!(
-            self.name,
-            "area"
-                | "base"
-                | "br"
-                | "col"
-                | "embed"
-                | "hr"
-                | "img"
-                | "input"
-                | "link"
-                | "meta"
-                | "param"
-                | "source"
-                | "track"
-                | "wbr"
-        )
+        [
+            "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+            "source", "track", "wbr",
+        ]
+        .iter()
+        .any(|void_name| self.name.eq_ignore_ascii_case(void_name))
     }
 
     pub fn clear(&mut self) {

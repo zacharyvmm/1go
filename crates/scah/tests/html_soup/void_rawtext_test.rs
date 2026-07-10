@@ -29,6 +29,31 @@ fn void_syntax_and_plain_void_behavior_match() {
 }
 
 #[test]
+fn html_tag_and_id_class_attribute_names_are_ascii_case_insensitive() {
+    let html = "<DIV ID='hero' CLASS='card featured'>Hello</DIV>";
+    let store = parse_with_saves(
+        html,
+        &[
+            ("div#hero.card", Save::only_text_content()),
+            ("DIV#hero.featured", Save::only_text_content()),
+        ],
+    );
+
+    assert_eq!(texts(&store, "div#hero.card"), vec![Some("Hello")]);
+    assert_eq!(texts(&store, "DIV#hero.featured"), vec![Some("Hello")]);
+}
+
+#[test]
+fn mixed_case_void_elements_do_not_capture_following_text() {
+    let html = "<DIV>before<Br>middle<IMg src='x'>after</DIV>";
+    let store = parse_all(html, &["div", "br", "img"]);
+
+    assert_eq!(texts(&store, "br"), vec![None]);
+    assert_eq!(texts(&store, "img"), vec![None]);
+    assert_eq!(texts(&store, "div"), vec![Some("before middle after")]);
+}
+
+#[test]
 fn script_contents_do_not_emit_false_selector_matches() {
     let html = "<div></div><script>const x = \"<div><a href='x'>bad</a></div>\";</script><a href='ok'>good</a>";
     let store = parse_with_saves(

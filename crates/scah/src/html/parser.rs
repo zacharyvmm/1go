@@ -110,8 +110,11 @@ where
                 // `close_tag` is the `</name` prefix. It is only the real end
                 // tag when the name is followed by an appropriate terminator
                 // (HTML whitespace, `/`, or `>`), so `</styles>` does not close
-                // `<style>` and `</style >` does. This only peeks — the normal
-                // Close-tag path below consumes the tag and pops the stack.
+                // `<style>` and `</style >` does. Consume an appropriate raw
+                // end tag here instead of delegating to `XHtmlTag::from`: that
+                // parser intentionally keeps text after `/` as part of the
+                // closing tag name, which would leave `<style>` open for a
+                // tolerated form such as `</style ignored>`.
                 if reader.match_ignore_case(close_tag)
                     && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
                 {
@@ -123,7 +126,33 @@ where
                         self.position.text_content_position = position;
                     }
                     self.raw_text_close = None;
-                    break;
+
+                    let closing_tag = &close_tag[2..];
+                    self.position.reader_position = reader.get_position();
+                    reader.next_until(b'>');
+                    reader.skip();
+
+                    if self.capture_text_content {
+                        self.store.text_content.set_start(reader.get_position());
+                    }
+
+                    crate::scah_trace!(
+                        self.store,
+                        TraceEvent::CloseTag {
+                            tag: closing_tag,
+                            depth: self.position.element_depth,
+                            reader_position: self.position.reader_position,
+                        }
+                    );
+
+                    self.open_elements
+                        .close_by_end_tag_into(closing_tag, &mut self.closing_elements);
+                    let early_exit = self.pop_closing_elements(
+                        reader,
+                        Some(ImpliedCloseReason::MismatchedEndTag),
+                        Some(closing_tag),
+                    );
+                    return !early_exit && !reader.eof();
                 } else {
                     reader.skip();
                 }
