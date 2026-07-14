@@ -197,3 +197,30 @@ where
 
     Ok(parser.finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_query_slice_returns_error() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries: &[Query] = &[];
+
+        let result = parse(html, queries);
+
+        assert!(matches!(result, Err(ParseError::EmptyQueries)));
+    }
+
+    #[test]
+    fn non_empty_query_slice_succeeds() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries = &[Query::all("a", Save::all())
+            .expect("valid selector")
+            .build()];
+
+        let store = parse(html, queries).expect("parse succeeds");
+
+        assert_eq!(store.get("a").unwrap().count(), 1);
+    }
+}
