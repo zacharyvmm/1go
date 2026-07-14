@@ -1529,7 +1529,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "rlibxml"
 version = "0.1.1"
-source = "git+https://github.com/zacharyvmm/rlibxml.git#c75a5abe523408dc2793fe8d345120b85e35e6f4"
+source = "git+https://github.com/zacharyvmm/rlibxml.git#b6f7de0f78fcc85283cd32545508a44b180f9c58"
 dependencies = [
  "bindgen",
  "pkg-config",
