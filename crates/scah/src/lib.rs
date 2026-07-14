@@ -164,12 +164,10 @@ where
     Q: QuerySpec<'query>,
 {
     let selectors = QueryMultiplexer::new(queries);
+    let reserve_text_content = selectors.requires_text_content();
 
-    let mut parser = if selectors.requires_text_content() {
-        XHtmlParser::with_capacity(selectors, html.len())
-    } else {
-        XHtmlParser::new(selectors)
-    };
+    let mut parser =
+        XHtmlParser::with_capacity_options(selectors, html.len(), reserve_text_content);
 
     let mut reader = Reader::new(html);
     parser.trace_parse_started(html.len(), queries.len());

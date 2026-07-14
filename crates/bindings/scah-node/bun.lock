@@ -25,11 +25,11 @@
         "typescript": "^5.9.2",
       },
       "optionalDependencies": {
-        "@zacharymm/scah-darwin-arm64": "0.0.17",
-        "@zacharymm/scah-darwin-x64": "0.0.17",
-        "@zacharymm/scah-linux-arm64-gnu": "0.0.17",
-        "@zacharymm/scah-linux-x64-gnu": "0.0.17",
-        "@zacharymm/scah-win32-x64-msvc": "0.0.17",
+        "@zacharymm/scah-darwin-arm64": "0.0.20",
+        "@zacharymm/scah-darwin-x64": "0.0.20",
+        "@zacharymm/scah-linux-arm64-gnu": "0.0.20",
+        "@zacharymm/scah-linux-x64-gnu": "0.0.20",
+        "@zacharymm/scah-win32-x64-msvc": "0.0.20",
       },
     },
   },
@@ -276,15 +276,15 @@
 
     "@types/ws": ["@types/ws@8.18.1", "", { "dependencies": { "@types/node": "*" } }, "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg=="],
 
-    "@zacharymm/scah-darwin-arm64": ["@zacharymm/scah-darwin-arm64@0.0.17", "", { "os": "darwin", "cpu": "arm64" }, "sha512-ABTjp4fCP/2RVd9Tj2Vc6fNbLDNexqC4y7n9JWCqaHK0nxDRJ9VbtIH0dWyqj0Skfji2PWQNsuY+w/UdqKO98Q=="],
+    "@zacharymm/scah-darwin-arm64": ["@zacharymm/scah-darwin-arm64@0.0.20", "", { "os": "darwin", "cpu": "arm64" }, "sha512-zcy3JxvgrCQlj6M4zV0PBIMIwdHC5wWvzOSS5mZb1LJ3ykFjYEoVynq8KxxtUwYZC7HhcyuUaSSRC5l1qELWdA=="],
 
-    "@zacharymm/scah-darwin-x64": ["@zacharymm/scah-darwin-x64@0.0.17", "", { "os": "darwin", "cpu": "x64" }, "sha512-IHf0cHlo21xR1HgH6ceFVUOgw6gF7yWPmWv1HdLEGzeChO4yJpu+VVaN9jR7q+1yqabAnfwXTQosRbLnRdnzwg=="],
+    "@zacharymm/scah-darwin-x64": ["@zacharymm/scah-darwin-x64@0.0.20", "", { "os": "darwin", "cpu": "x64" }, "sha512-s+h+erCq292/OvaezuwxgTSdsZ4prQrTTMeLKMpxb59Wj5kvONJOg9q6Fs8ElQ9XPcE7BOgVgi5nDn7C2q4oEA=="],
 
-    "@zacharymm/scah-linux-arm64-gnu": ["@zacharymm/scah-linux-arm64-gnu@0.0.17", "", { "os": "linux", "cpu": "arm64" }, "sha512-KOP8fk+8b8FKRUE2XiLxnolJ4fB4GQw9GpwMyZF5MHD1Lxs4l4P1O3i3uQvqBvGr/6xJNVbZlgdUPfXPRLoWqA=="],
+    "@zacharymm/scah-linux-arm64-gnu": ["@zacharymm/scah-linux-arm64-gnu@0.0.20", "", { "os": "linux", "cpu": "arm64" }, "sha512-bk8zL3x9RUwFXtpu6EwJR27hDUG227ZngfFSjZpRviVcV3AJh+kS4UJbzHw5VDtlmLPGv6+EldJ7CQry5eTPzA=="],
 
-    "@zacharymm/scah-linux-x64-gnu": ["@zacharymm/scah-linux-x64-gnu@0.0.17", "", { "os": "linux", "cpu": "x64" }, "sha512-/HW8r7GNbB9c8LM6TNad4ti2gTuws3qd3MVbEWl+1ccFcRaq+U1rMrDLs/B97xnaxgcNMJlPSjsyW01fyCH7Qw=="],
+    "@zacharymm/scah-linux-x64-gnu": ["@zacharymm/scah-linux-x64-gnu@0.0.20", "", { "os": "linux", "cpu": "x64" }, "sha512-mVyWypKtH0oRAjx2lkmrEsH3MNWnFP8LcsIWWt9w5VY0dzZqbrOlLXkxbf+VLFDtHa9gxKde83HaQR+fwv7m2w=="],
 
-    "@zacharymm/scah-win32-x64-msvc": ["@zacharymm/scah-win32-x64-msvc@0.0.17", "", { "os": "win32", "cpu": "x64" }, "sha512-4GMEjQUdCLRi3CBJIehS7DVR7l42gJdZtBu3BDQ3f4rV4LGsqjnLUHMvKt+FfRKLYMyQ8Oe9iwuNVxZPgxmo1A=="],
+    "@zacharymm/scah-win32-x64-msvc": ["@zacharymm/scah-win32-x64-msvc@0.0.20", "", { "os": "win32", "cpu": "x64" }, "sha512-izFG1yXna5at+OVMpyrkfZIg/7mLjhs4VhDDh8cspYPkqv6CjWUVUar5TX4kqCFDxYFkVbjbuvT0FqBzzm/7pw=="],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 

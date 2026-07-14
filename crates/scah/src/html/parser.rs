@@ -79,6 +79,21 @@ where
     }
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
+        let reserve_text = selectors.requires_text_content();
+        Self::with_capacity_options(selectors, capacity, reserve_text)
+    }
+
+    /// Like [`Self::with_capacity`], but allows the caller to override
+    /// text-content buffer reservation independently of arena reservation.
+    ///
+    /// Element and attribute arenas are always reserved using the ratios
+    /// derived from valgrind massif profiling. The text-content buffer is
+    /// only reserved when `reserve_text_content` is `true`.
+    pub fn with_capacity_options(
+        selectors: QueryMultiplexer<'query, Q>,
+        capacity: usize,
+        reserve_text_content: bool,
+    ) -> Self {
         let capture_text_content = selectors.requires_text_content();
         Self {
             position: DocumentPosition {
@@ -96,7 +111,7 @@ where
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
-            store: Store::with_capacity(capacity),
+            store: Store::with_capacity_options(capacity, reserve_text_content),
         }
     }
 

@@ -51,10 +51,26 @@ macro_rules! scah_trace {
 /// ascii_ci_tag_match!(name, "br", "hr", "img", "input")
 /// ```
 ///
-/// Strategy chosen from Criterion microbenchmarks in `benches/`:
-/// the exact-lowercase-match fast path outperforms a pure
-/// `eq_ignore_ascii_case` scan for typical lowercase HTML by ~3-8×,
-/// while the uppercase fallback has identical cost to the original scan.
+/// # Correctness constraint
+///
+/// **All `$tag` literals must be lowercase ASCII.** The macro uses an exact
+/// lowercase fast path before falling back to `eq_ignore_ascii_case()` only
+/// when the input name contains uppercase ASCII. Passing an uppercase literal
+/// such as `"DIV"` will silently break case-insensitive matching on that
+/// arm — the exact-match fast path will never hit for a lowercase input,
+/// and the uppercase fallback will not correct it because the literal itself
+/// is uppercase.
+///
+/// This is safe for all current internal call sites because the HTML
+/// specification defines tag names in lowercase.
+///
+/// Strategy chosen from comparative Criterion microbenchmarks in
+/// `benches/tag_classification/`: the exact-lowercase-match fast path
+/// outperforms a pure `eq_ignore_ascii_case` scan for typical lowercase
+/// HTML, while the uppercase fallback has identical cost to the original
+/// scan. The length-bucketed strategy was also measured; it trades a one-time
+/// bucket construction cost for faster misses on long candidate lists but
+/// showed no advantage for the short lists used in practice (≤25 tags).
 #[macro_export]
 macro_rules! ascii_ci_tag_match {
     ($name:expr, $($tag:literal),+ $(,)?) => {{

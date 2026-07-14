@@ -68,8 +68,17 @@ fn main() {
             |s| Query::all("div.card", s),
             Save::none()
         ),
+        "only-inner-html" => run_mode!(
+            sizes,
+            "only-inner-html",
+            tag_heavy_html,
+            |s| Query::all("div.card", s),
+            Save::only_inner_html()
+        ),
         _ => {
-            eprintln!("modes: text-heavy tag-heavy attribute-heavy wildcard first-match save-none")
+            eprintln!(
+                "modes: text-heavy tag-heavy attribute-heavy wildcard first-match save-none only-inner-html"
+            )
         }
     }
 }
