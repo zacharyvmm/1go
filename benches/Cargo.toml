@@ -11,7 +11,7 @@ scah = { path = "../crates/scah" }
 criterion = { version = "0.8.1", features = ["html_reports"] }
 
 # Competitor libraries
-lexbor_css = { git = "https://github.com/zacharyvmm/lexbor-rust-css-selection.git", features = ["vendor"] }
+lexbor_css = { git = "https://github.com/zacharyvmm/lexbor_css.git", rev = "d6aa234648c6d1883c3563431b62688a109e3142", features = ["vendor"] }
 lxml = { package = "rlibxml", version="0.1.1", git = "https://github.com/zacharyvmm/rlibxml.git", features = ["vendored"] }
 scraper = "0.25.0"
 tl = "0.7.8"
