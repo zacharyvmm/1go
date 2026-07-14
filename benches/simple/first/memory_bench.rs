@@ -84,7 +84,7 @@ use lexbor_css::HtmlDocument;
 #[library_benchmark]
 #[bench::lexbor(setup_html())]
 fn bench_lexbor(html: String) {
-    let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+    let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
     let nodes = doc.select(QUERY);
 
     let node = nodes.first().unwrap();

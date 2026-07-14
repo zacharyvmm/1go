@@ -156,7 +156,7 @@ fn bench_comparison(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("lexbor", size), &content, |b, html| {
             b.iter(|| {
-                let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+                let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
                 let nodes = doc.select(QUERY);
 
                 for node in nodes.iter() {

@@ -163,7 +163,7 @@ fn bench_nested_all(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("lexbor", size), &content, |b, html| {
             b.iter(|| {
-                let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+                let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
 
                 for product in doc.select(PRODUCT_SELECTOR).iter() {
                     let attrs = product.attributes();
@@ -379,7 +379,7 @@ fn bench_nested_first(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("lexbor", size), &content, |b, html| {
             b.iter(|| {
-                let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+                let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
 
                 let product = doc.select(PRODUCT_SELECTOR);
                 let product = product.first().unwrap();

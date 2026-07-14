@@ -125,7 +125,7 @@ fn bench_spec_links(c: &mut Criterion) {
 
     group.bench_function("lexbor", |b| {
         b.iter(|| {
-            let doc = HtmlDocument::new(content.as_str()).expect("Failed to parse HTML");
+            let doc = HtmlDocument::parse(content.as_str()).expect("Failed to parse HTML");
             let nodes = doc.select(QUERY);
 
             for node in nodes.iter() {

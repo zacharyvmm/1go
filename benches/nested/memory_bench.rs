@@ -160,7 +160,7 @@ fn bench_scraper_all(html: String) {
 #[library_benchmark]
 #[bench::lexbor_all(setup_html())]
 fn bench_lexbor_all(html: String) {
-    let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+    let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
 
     for product in doc.select(PRODUCT_SELECTOR).iter() {
         let attrs = product.attributes();
@@ -365,7 +365,7 @@ fn bench_scraper_first(html: String) {
 #[library_benchmark]
 #[bench::lexbor_first(setup_html())]
 fn bench_lexbor_first(html: String) {
-    let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+    let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
 
     let product = doc.select(PRODUCT_SELECTOR);
     let product = product.first().unwrap();
