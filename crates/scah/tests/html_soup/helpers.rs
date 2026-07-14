@@ -10,7 +10,7 @@ pub fn parse_all<'a>(html: &'a str, selectors: &[&'a str]) -> Store<'a, 'a> {
         .into_boxed_slice();
     let queries = Box::leak(queries);
 
-    parse(html, queries)
+    parse(html, queries).expect("parse succeeds")
 }
 
 pub fn parse_with_saves<'a>(html: &'a str, queries: &[(&'a str, Save)]) -> Store<'a, 'a> {
@@ -21,7 +21,7 @@ pub fn parse_with_saves<'a>(html: &'a str, queries: &[(&'a str, Save)]) -> Store
         .into_boxed_slice();
     let queries = Box::leak(queries);
 
-    parse(html, queries)
+    parse(html, queries).expect("parse succeeds")
 }
 
 pub fn elements<'a>(store: &'a Store<'a, 'a>, selector: &str) -> Vec<&'a Element<'a>> {

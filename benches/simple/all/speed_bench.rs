@@ -61,7 +61,7 @@ fn bench_comparison(c: &mut Criterion) {
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse(black_box(html), black_box(save_none_queries));
+                    let store = parse(black_box(html), black_box(save_none_queries)).unwrap();
                     black_box(store);
                 })
             },
@@ -75,7 +75,7 @@ fn bench_comparison(c: &mut Criterion) {
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse(black_box(html), black_box(save_inner_html_queries));
+                    let store = parse(black_box(html), black_box(save_inner_html_queries)).unwrap();
                     black_box(store);
                 })
             },
@@ -89,7 +89,7 @@ fn bench_comparison(c: &mut Criterion) {
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse(black_box(html), black_box(save_text_queries));
+                    let store = parse(black_box(html), black_box(save_text_queries)).unwrap();
                     consume_scah_results(black_box(&store));
                 })
             },
@@ -103,7 +103,7 @@ fn bench_comparison(c: &mut Criterion) {
             &content,
             |b, html| {
                 b.iter(|| {
-                    let store = parse(black_box(html), black_box(save_all_queries));
+                    let store = parse(black_box(html), black_box(save_all_queries)).unwrap();
                     consume_scah_results(black_box(&store));
                 })
             },
@@ -114,7 +114,7 @@ fn bench_comparison(c: &mut Criterion) {
                 let queries = &[Query::all(QUERY, Save::all())
                     .expect("simple bench selector should parse")
                     .build()];
-                let store = parse(html, queries);
+                let store = parse(html, queries).unwrap();
 
                 for element in store.get(QUERY).unwrap() {
                     black_box(&element.attributes(&store));

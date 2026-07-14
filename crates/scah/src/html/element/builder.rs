@@ -18,7 +18,7 @@ use scah_query_ir::{Attribute, IElement};
 /// let queries = &[Query::all("a", Save::all())
 ///     .expect("valid selector")
 ///     .build()];
-/// let store = parse(html, queries);
+/// let store = parse(html, queries).expect("parse succeeds");
 ///
 /// let a = store.get("a").unwrap().next().unwrap();
 /// let attrs = a.attributes(&store).unwrap();

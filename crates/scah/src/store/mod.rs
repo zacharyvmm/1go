@@ -34,7 +34,7 @@ pub use query_node::QueryNode;
 /// let queries = &[Query::all("a", Save::all())
 ///     .expect("valid selector")
 ///     .build()];
-/// let store = parse(html, queries);
+/// let store = parse(html, queries).expect("parse succeeds");
 ///
 /// // Retrieve all matched <a> elements
 /// let anchors: Vec<_> = store.get("a").unwrap().collect();
@@ -149,7 +149,7 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     /// let queries = &[Query::all("li", Save::only_text_content())
     ///     .expect("valid selector")
     ///     .build()];
-    /// let store = parse(html, queries);
+    /// let store = parse(html, queries).expect("parse succeeds");
     ///
     /// for li in store.get("li").unwrap() {
     ///     println!("{}", li.text_content(&store).unwrap_or_default());

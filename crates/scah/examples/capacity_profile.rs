@@ -15,7 +15,7 @@ macro_rules! run_mode {
             let html = $html_fn(size);
             let query = $sel($save).unwrap().build();
             let queries = [query];
-            let store = parse(&html, &queries);
+            let store = parse(&html, &queries).unwrap();
             report($label, size, &store);
         }
     };

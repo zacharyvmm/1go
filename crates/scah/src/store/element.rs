@@ -100,7 +100,7 @@ impl<'html> Element<'html> {
     /// let queries = &[Query::all("a", Save::all())
     ///     .expect("valid selector")
     ///     .build()];
-    /// let store = parse(html, queries);
+    /// let store = parse(html, queries).expect("parse succeeds");
     ///
     /// let a = store.get("a").unwrap().next().unwrap();
     /// assert_eq!(a.attribute(&store, "href"), Some("https://example.com"));

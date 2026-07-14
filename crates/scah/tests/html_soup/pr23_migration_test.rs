@@ -74,7 +74,7 @@ fn then_descendant_dedup_within_parent_scope() {
         .then(|s| Ok([s.all("div a", Save::only_text_content())?]))
         .unwrap()
         .build()];
-    let store = parse(html, queries);
+    let store = parse(html, queries).unwrap();
 
     let sections: Vec<_> = store.get("section").unwrap().collect();
     assert_eq!(sections.len(), 1);
@@ -95,7 +95,7 @@ fn then_same_element_appears_under_each_parent() {
         .then(|d| Ok([d.all("a", Save::only_text_content())?]))
         .unwrap()
         .build()];
-    let store = parse(html, queries);
+    let store = parse(html, queries).unwrap();
 
     let divs: Vec<_> = store.get("div").unwrap().collect();
     assert_eq!(divs.len(), 2);
@@ -116,7 +116,7 @@ fn then_first_completes_per_parent_scope() {
         .then(|d| Ok([d.first("> a", Save::only_text_content())?]))
         .unwrap()
         .build()];
-    let store = parse(html, queries);
+    let store = parse(html, queries).unwrap();
 
     let divs: Vec<_> = store.get("div").unwrap().collect();
     assert_eq!(divs.len(), 2);
@@ -204,7 +204,7 @@ fn empty_elements_do_not_panic() {
     let queries = &[Query::all("div", Save::only_text_content())
         .unwrap()
         .build()];
-    let store = parse(html, queries);
+    let store = parse(html, queries).unwrap();
     let divs: Vec<_> = store.get("div").unwrap().collect();
     assert_eq!(divs.len(), 3);
     for div in &divs {
@@ -236,7 +236,7 @@ fn abrupt_comment_close_does_not_swallow_document() {
 fn comment_open_only_at_eof_does_not_panic() {
     let html = "<!--";
     let queries = &[Query::all("div", Save::none()).unwrap().build()];
-    let store = parse(html, queries);
+    let store = parse(html, queries).unwrap();
     assert!(store.get("div").is_none());
 }
 
@@ -429,7 +429,7 @@ fn input_with_attribute_and_trailing_solidus_has_clean_attrs() {
 fn non_void_trailing_solidus_is_not_self_closing() {
     let html = "<div />after</div>";
     let queries = &[Query::all("div", Save::all()).unwrap().build()];
-    let store = parse(html, queries);
+    let store = parse(html, queries).unwrap();
     let divs: Vec<_> = store.get("div").unwrap().collect();
     assert_eq!(divs.len(), 1);
     assert_eq!(
@@ -455,7 +455,7 @@ fn non_void_trailing_solidus_is_not_self_closing() {
 fn unquoted_value_trailing_solidus_is_preserved() {
     let html = "<div data=/foo/>after</div>";
     let queries = &[Query::all("div", Save::all()).unwrap().build()];
-    let store = parse(html, queries);
+    let store = parse(html, queries).unwrap();
     let divs: Vec<_> = store.get("div").unwrap().collect();
     assert_eq!(divs.len(), 1);
     assert_eq!(

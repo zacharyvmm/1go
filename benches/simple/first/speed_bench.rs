@@ -50,7 +50,7 @@ fn bench_comparison(c: &mut Criterion) {
                     .expect("simple bench selector should parse")
                     .build()];
 
-                let store = parse(html, queries);
+                let store = parse(html, queries).unwrap();
 
                 let element = store.get(QUERY).unwrap().next().unwrap();
 

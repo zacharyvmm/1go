@@ -1283,7 +1283,7 @@ mod tests {
     #[test]
     fn save_none_does_not_accumulate_text_content() {
         let queries = &[Query::all("a", Save::none()).unwrap().build()];
-        let store = parse("<div><a>Hello <b>World</b></a></div>", queries);
+        let store = parse("<div><a>Hello <b>World</b></a></div>", queries).unwrap();
 
         let anchor = store.get("a").unwrap().next().unwrap();
         assert_eq!(anchor.text_content(&store), None);
@@ -1296,7 +1296,7 @@ mod tests {
             Query::all("a", Save::none()).unwrap().build(),
             Query::all("b", Save::only_text_content()).unwrap().build(),
         ];
-        let store = parse("<a>Hello <b>World</b></a>", queries);
+        let store = parse("<a>Hello <b>World</b></a>", queries).unwrap();
 
         let anchor = store.get("a").unwrap().next().unwrap();
         let bold = store.get("b").unwrap().next().unwrap();
@@ -1504,5 +1504,29 @@ mod tests {
         assert_eq!(p2_p.name, "p");
         assert!(p2_p.inner_html.is_some());
         assert!(p2_p.text_content(&store).is_some());
+    }
+
+    // --- parse() Result tests ---
+
+    #[test]
+    fn empty_query_list_returns_error() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries: Vec<Query> = Vec::new();
+
+        let result = parse(html, &queries);
+
+        assert!(matches!(result, Err(crate::ParseError::EmptyQueries)));
+    }
+
+    #[test]
+    fn non_empty_query_list_still_parses() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries = &[Query::all("a", Save::all())
+            .expect("valid selector")
+            .build()];
+
+        let store = parse(html, queries).expect("parse succeeds");
+
+        assert_eq!(store.get("a").unwrap().count(), 1);
     }
 }

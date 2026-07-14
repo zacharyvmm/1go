@@ -50,7 +50,7 @@ fn bench_scah_all(html: String) {
             first("> p.description", Save::all()),
         }
     }];
-    let store = parse(&html, queries);
+    let store = parse(&html, queries).unwrap();
 
     for product in store.get(PRODUCT_SELECTOR).unwrap() {
         black_box(product.attribute(&store, "class"));
@@ -254,7 +254,7 @@ fn bench_scah_first(html: String) {
             first("> p.description", Save::all()),
         }
     }];
-    let store = parse(&html, queries);
+    let store = parse(&html, queries).unwrap();
     let product = store.get(PRODUCT_SELECTOR).unwrap().next().unwrap();
 
     black_box(product.attribute(&store, "class"));

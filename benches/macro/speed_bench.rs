@@ -55,7 +55,7 @@ fn bench_macro_all(c: &mut Criterion) {
                 b.iter(|| {
                     let query = runtime_all_query();
                     let queries = [query];
-                    let store = parse(html, &queries);
+                    let store = parse(html, &queries).unwrap();
                     for article in store.get("main > article.post").unwrap() {
                         black_box(article.get(&store, "> section > a[href]").unwrap().count());
                         black_box(article.get(&store, "h1").unwrap().count());
@@ -78,7 +78,7 @@ fn bench_macro_all(c: &mut Criterion) {
                         }
                     };
                     let queries = [query];
-                    let store = parse(html, &queries);
+                    let store = parse(html, &queries).unwrap();
                     for article in store.get("main > article.post").unwrap() {
                         black_box(article.get(&store, "> section > a[href]").unwrap().count());
                         black_box(article.get(&store, "h1").unwrap().count());
@@ -106,7 +106,7 @@ fn bench_macro_first(c: &mut Criterion) {
                 b.iter(|| {
                     let query = runtime_first_query();
                     let queries = [query];
-                    let store = parse(html, &queries);
+                    let store = parse(html, &queries).unwrap();
                     let root = store
                         .get("main > article.post")
                         .unwrap()
@@ -131,7 +131,7 @@ fn bench_macro_first(c: &mut Criterion) {
                         }
                     };
                     let queries = [query];
-                    let store = parse(html, &queries);
+                    let store = parse(html, &queries).unwrap();
                     let root = store
                         .get("main > article.post")
                         .unwrap()

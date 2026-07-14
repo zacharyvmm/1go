@@ -38,7 +38,7 @@
 //!         .build()
 //! ];
 //!
-//! let store = parse(html, queries);
+//! let store = parse(html, queries).expect("parse succeeds");
 //!
 //! // Iterate over matched elements
 //! for element in store.get("main > section > a[href]").unwrap() {
@@ -67,7 +67,7 @@
 //!     .expect("valid child selectors")
 //!     .build()];
 //!
-//! let store = parse(html, queries);
+//! let store = parse(html, queries).expect("parse succeeds");
 //! ```
 //!
 //! ## Architecture
@@ -123,11 +123,34 @@ pub use scah_query_ir::{
 pub use scah_reader::Reader;
 pub use store::{Element, ElementId, Store};
 
+/// Errors that can occur during parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// The query slice passed to [`parse`] is empty.
+    /// At least one query is required.
+    EmptyQueries,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::EmptyQueries => write!(f, "parse requires at least one query"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
 /// Parse an HTML string against one or more pre-built [`Query`] objects and
-/// return a [`Store`] containing all matched elements.
+/// return a [`Result`] containing a [`Store`] with all matched elements.
 ///
 /// This is the main entry point of scah. It wires together the streaming
 /// [`XHtmlParser`], the [`QueryMultiplexer`], and the result [`Store`].
+///
+/// # Errors
+///
+/// Returns [`ParseError::EmptyQueries`] if the query slice is empty.
+/// At least one query is required.
 ///
 /// # Parameters
 ///
@@ -135,11 +158,6 @@ pub use store::{Element, ElementId, Store};
 ///   resulting [`Store`] borrow directly from this string (zero-copy).
 /// - `queries`: A slice of compiled [`Query`] objects. Each query is
 ///   executed concurrently against the same token stream in a single pass.
-///
-/// # Returns
-///
-/// A [`Store`] containing all matched elements. Use [`Store::get`] with the
-/// original selector string to retrieve results for a specific query.
 ///
 /// # Example
 ///
@@ -150,7 +168,7 @@ pub use store::{Element, ElementId, Store};
 /// let queries = &[Query::all("a", Save::all())
 ///     .expect("valid selector")
 ///     .build()];
-/// let store = parse(html, queries);
+/// let store = parse(html, queries).expect("parse succeeds");
 ///
 /// let links: Vec<_> = store.get("a").unwrap().collect();
 /// assert_eq!(links.len(), 1);
@@ -159,10 +177,14 @@ pub use store::{Element, ElementId, Store};
 pub fn parse<'a: 'query, 'html: 'query, 'query: 'html, Q>(
     html: &'html str,
     queries: &'a [Q],
-) -> Store<'html, 'query>
+) -> Result<Store<'html, 'query>, ParseError>
 where
     Q: QuerySpec<'query>,
 {
+    if queries.is_empty() {
+        return Err(ParseError::EmptyQueries);
+    }
+
     let selectors = QueryMultiplexer::new(queries);
     let reserve_text_content = selectors.requires_text_content();
 
@@ -173,5 +195,5 @@ where
     parser.trace_parse_started(html.len(), queries.len());
     while parser.next(&mut reader) {}
 
-    parser.finish()
+    Ok(parser.finish())
 }

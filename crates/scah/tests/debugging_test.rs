@@ -37,7 +37,7 @@ fn html_scope_problem_intro_example() {
         .unwrap()
         .build()];
 
-    let store = parse(HTML_SCOPE_PROBLEM_INTRO_EXAMPLE, &queries);
+    let store = parse(HTML_SCOPE_PROBLEM_INTRO_EXAMPLE, &queries).unwrap();
     let intro = store.get("div#project-intro").unwrap().next().unwrap();
 
     let overview_paragraphs = intro
@@ -76,7 +76,7 @@ fn first_selection_as_root_early_exit() {
             first("> p.description", Save::all()),
         }
     }];
-    let store = parse(FIRST_SELECTION_AS_ROOT_EARLY_EXIT, queries);
+    let store = parse(FIRST_SELECTION_AS_ROOT_EARLY_EXIT, queries).unwrap();
 
     assert_eq!(store.get(PRODUCT_SELECTOR).unwrap().count(), 1);
 
@@ -138,7 +138,7 @@ fn first_context_waits_for_required_child_before_early_exit() {
         }
     }];
     assert_eq!(queries[0].exit_at_section_end.unwrap().index(), 1);
-    let store = parse(FIRST_CONTEXT_WITH_REQUIRED_CHILD, queries);
+    let store = parse(FIRST_CONTEXT_WITH_REQUIRED_CHILD, queries).unwrap();
 
     let products = store
         .get("div.product")

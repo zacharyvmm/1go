@@ -40,7 +40,7 @@ fn bench_scah(html: String) {
         .expect("simple bench selector should parse")
         .build()];
 
-    let store = parse(&html, queries);
+    let store = parse(&html, queries).unwrap();
 
     let element = store.get(QUERY).unwrap().next().unwrap();
 

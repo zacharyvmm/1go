@@ -43,7 +43,7 @@ fn bench_spec_links(c: &mut Criterion) {
         .build()];
     group.bench_function("scah_parse_prebuilt_save_none", |b| {
         b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_none_queries));
+            let store = parse(black_box(&content), black_box(save_none_queries)).unwrap();
             black_box(store);
         })
     });
@@ -53,7 +53,7 @@ fn bench_spec_links(c: &mut Criterion) {
         .build()];
     group.bench_function("scah_parse_prebuilt_save_inner_html", |b| {
         b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_inner_html_queries));
+            let store = parse(black_box(&content), black_box(save_inner_html_queries)).unwrap();
             black_box(store);
         })
     });
@@ -63,7 +63,7 @@ fn bench_spec_links(c: &mut Criterion) {
         .build()];
     group.bench_function("scah_parse_prebuilt_save_text", |b| {
         b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_text_queries));
+            let store = parse(black_box(&content), black_box(save_text_queries)).unwrap();
             consume_scah_results(black_box(&store));
         })
     });
@@ -73,7 +73,7 @@ fn bench_spec_links(c: &mut Criterion) {
         .build()];
     group.bench_function("scah_parse_prebuilt_save_all", |b| {
         b.iter(|| {
-            let store = parse(black_box(&content), black_box(save_all_queries));
+            let store = parse(black_box(&content), black_box(save_all_queries)).unwrap();
             consume_scah_results(black_box(&store));
         })
     });
@@ -83,7 +83,7 @@ fn bench_spec_links(c: &mut Criterion) {
             let queries = &[Query::all(QUERY, Save::all())
                 .expect("spec selector should parse")
                 .build()];
-            let store = parse(&content, queries);
+            let store = parse(&content, queries).unwrap();
 
             for element in store.get(QUERY).unwrap() {
                 black_box(&element.attributes(&store));

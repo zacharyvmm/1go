@@ -34,7 +34,7 @@ fn first_selector_returns_first_recovered_match_only() {
         Query::first("ul > li", Save::all()).unwrap().build(),
         Query::all("li", Save::all()).unwrap().build(),
     ];
-    let store = parse(html, &queries);
+    let store = parse(html, &queries).unwrap();
 
     assert_eq!(elements(&store, "li").len(), 3);
     assert_eq!(

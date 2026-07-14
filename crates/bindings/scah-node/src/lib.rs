@@ -19,7 +19,7 @@ fn parse(html: String, queries: Vec<Reference<JsQuery>>) -> Result<JSStore> {
     if queries.is_empty() {
         return Err(napi::Error::new(
             napi::Status::ArrayExpected,
-            "No queries where passed".to_owned(),
+            "parse requires at least one query".to_owned(),
         ));
     }
 

@@ -15,6 +15,11 @@ use element::{PyElement, PyStore};
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn parse(html: String, queries: Vec<PyRef<PyQuery>>) -> PyResult<PyStore> {
+    if queries.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "parse requires at least one query",
+        ));
+    }
     let html = Arc::new(html);
     let html_bytes = html.as_ref().as_bytes();
     let html_bytes = unsafe { std::slice::from_raw_parts(html_bytes.as_ptr(), html_bytes.len()) };
