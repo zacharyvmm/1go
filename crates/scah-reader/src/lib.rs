@@ -69,8 +69,10 @@ impl<'a> Reader<'a> {
     }
 
     pub fn next_until(&mut self, character: u8) {
-        let remaining = &self.source[self.position..];
-        self.position += memchr::memchr(character, remaining).unwrap_or(remaining.len());
+        let len = self.source.len();
+        while self.position < len && self.source[self.position] != character {
+            self.position += 1;
+        }
     }
 
     pub fn skip(&mut self) {

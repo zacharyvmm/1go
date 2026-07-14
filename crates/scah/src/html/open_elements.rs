@@ -1,6 +1,5 @@
-use crate::ascii_ci_tag_match;
-
 use crate::engine::DepthSize;
+use crate::html::tag::{ScopeKind, TagFlags};
 use crate::store::ElementId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,21 +12,13 @@ pub(crate) struct SavedElement {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
+    tag: TagFlags,
     pub saved: Vec<SavedElement>,
 }
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct OpenElementStack<'html> {
     entries: Vec<OpenElement<'html>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScopeKind {
-    Default,
-    ListItem,
-    Button,
-    Table,
-    Select,
 }
 
 impl<'html> Default for OpenElementStack<'html> {
@@ -44,11 +35,17 @@ impl<'html> OpenElementStack<'html> {
         self.entries.len().try_into().unwrap_or(DepthSize::MAX)
     }
 
-    pub fn push(&mut self, name: &'html str) {
+    pub fn push_classified(&mut self, name: &'html str, tag: TagFlags) {
         self.entries.push(OpenElement {
             name,
+            tag,
             saved: Vec::new(),
         });
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, name: &'html str) {
+        self.push_classified(name, TagFlags::classify(name));
     }
 
     pub fn attach_saved(
@@ -69,32 +66,32 @@ impl<'html> OpenElementStack<'html> {
     #[cfg(test)]
     pub fn prepare_for_open(&mut self, name: &str) -> Vec<OpenElement<'html>> {
         let mut popped = Vec::new();
-        self.prepare_for_open_into(name, &mut popped);
+        self.prepare_for_open_into(TagFlags::classify(name), &mut popped);
         popped
     }
 
-    pub fn prepare_for_open_into(&mut self, name: &str, popped: &mut Vec<OpenElement<'html>>) {
+    pub fn prepare_for_open_into(&mut self, tag: TagFlags, popped: &mut Vec<OpenElement<'html>>) {
         popped.clear();
 
-        if closes_open_p(name) {
-            self.pop_matching_in_scope_into(&["p"], ScopeKind::Default, popped);
+        if tag.closes_open_p() {
+            self.pop_matching_in_scope_into(TagFlags::P_MASK, ScopeKind::Default, popped);
         }
 
-        if ascii_ci_tag_match!(name, "button") {
-            self.pop_matching_in_scope_into(&["button"], ScopeKind::Button, popped);
-        } else if ascii_ci_tag_match!(name, "li") {
-            self.pop_matching_in_scope_into(&["li"], ScopeKind::ListItem, popped);
-        } else if ascii_ci_tag_match!(name, "dt", "dd") {
-            self.pop_matching_in_scope_into(&["dt", "dd"], ScopeKind::ListItem, popped);
-        } else if ascii_ci_tag_match!(name, "option") {
-            self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
-        } else if ascii_ci_tag_match!(name, "optgroup") {
-            self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
-            self.pop_matching_in_scope_into(&["optgroup"], ScopeKind::Select, popped);
-        } else if ascii_ci_tag_match!(name, "tr") {
-            self.pop_matching_in_scope_into(&["tr"], ScopeKind::Table, popped);
-        } else if ascii_ci_tag_match!(name, "td", "th") {
-            self.pop_matching_in_scope_into(&["td", "th"], ScopeKind::Table, popped);
+        if tag.intersects(TagFlags::BUTTON_MASK) {
+            self.pop_matching_in_scope_into(TagFlags::BUTTON_MASK, ScopeKind::Button, popped);
+        } else if tag.intersects(TagFlags::LI_MASK) {
+            self.pop_matching_in_scope_into(TagFlags::LI_MASK, ScopeKind::ListItem, popped);
+        } else if tag.intersects(TagFlags::DT_DD_MASK) {
+            self.pop_matching_in_scope_into(TagFlags::DT_DD_MASK, ScopeKind::ListItem, popped);
+        } else if tag.intersects(TagFlags::OPTION_MASK) {
+            self.pop_matching_in_scope_into(TagFlags::OPTION_MASK, ScopeKind::Select, popped);
+        } else if tag.intersects(TagFlags::OPTGROUP_MASK) {
+            self.pop_matching_in_scope_into(TagFlags::OPTION_MASK, ScopeKind::Select, popped);
+            self.pop_matching_in_scope_into(TagFlags::OPTGROUP_MASK, ScopeKind::Select, popped);
+        } else if tag.intersects(TagFlags::TR_MASK) {
+            self.pop_matching_in_scope_into(TagFlags::TR_MASK, ScopeKind::Table, popped);
+        } else if tag.intersects(TagFlags::CELL_MASK) {
+            self.pop_matching_in_scope_into(TagFlags::CELL_MASK, ScopeKind::Table, popped);
         }
     }
 
@@ -107,8 +104,8 @@ impl<'html> OpenElementStack<'html> {
 
     pub fn close_by_end_tag_into(&mut self, name: &str, popped: &mut Vec<OpenElement<'html>>) {
         popped.clear();
-        let scope = close_scope(name);
-        if let Some(index) = self.find_matching_index(name, scope) {
+        let tag = TagFlags::classify(name);
+        if let Some(index) = self.find_matching_index(name, tag.close_scope()) {
             while self.entries.len() > index {
                 if let Some(open) = self.entries.pop() {
                     popped.push(open);
@@ -134,21 +131,21 @@ impl<'html> OpenElementStack<'html> {
     #[allow(dead_code)]
     fn pop_matching_in_scope(
         &mut self,
-        names: &[&str],
+        tags: TagFlags,
         scope: ScopeKind,
     ) -> Vec<OpenElement<'html>> {
         let mut popped = Vec::new();
-        self.pop_matching_in_scope_into(names, scope, &mut popped);
+        self.pop_matching_in_scope_into(tags, scope, &mut popped);
         popped
     }
 
     fn pop_matching_in_scope_into(
         &mut self,
-        names: &[&str],
+        tags: TagFlags,
         scope: ScopeKind,
         popped: &mut Vec<OpenElement<'html>>,
     ) {
-        if let Some(index) = self.find_first_of(names, scope) {
+        if let Some(index) = self.find_first_of(tags, scope) {
             while self.entries.len() > index {
                 if let Some(open) = self.entries.pop() {
                     popped.push(open);
@@ -157,15 +154,12 @@ impl<'html> OpenElementStack<'html> {
         }
     }
 
-    fn find_first_of(&self, names: &[&str], scope: ScopeKind) -> Option<usize> {
+    fn find_first_of(&self, tags: TagFlags, scope: ScopeKind) -> Option<usize> {
         for (index, entry) in self.entries.iter().enumerate().rev() {
-            if names
-                .iter()
-                .any(|name| entry.name.eq_ignore_ascii_case(name))
-            {
+            if entry.tag.intersects(tags) {
                 return Some(index);
             }
-            if is_scope_barrier(entry.name, scope) {
+            if entry.tag.is_scope_barrier(scope) {
                 return None;
             }
         }
@@ -174,81 +168,14 @@ impl<'html> OpenElementStack<'html> {
 
     fn find_matching_index(&self, name: &str, scope: ScopeKind) -> Option<usize> {
         for (index, entry) in self.entries.iter().enumerate().rev() {
-            if entry.name.eq_ignore_ascii_case(name) {
+            if entry.name == name || entry.name.eq_ignore_ascii_case(name) {
                 return Some(index);
             }
-            if is_scope_barrier(entry.name, scope) {
+            if entry.tag.is_scope_barrier(scope) {
                 return None;
             }
         }
         None
-    }
-}
-
-fn close_scope(name: &str) -> ScopeKind {
-    if ascii_ci_tag_match!(name, "li", "dt", "dd") {
-        ScopeKind::ListItem
-    } else if ascii_ci_tag_match!(name, "button") {
-        ScopeKind::Button
-    } else if ascii_ci_tag_match!(
-        name, "tr", "td", "th", "thead", "tbody", "tfoot", "caption", "colgroup",
-    ) {
-        ScopeKind::Table
-    } else if ascii_ci_tag_match!(name, "option", "optgroup") {
-        ScopeKind::Select
-    } else {
-        ScopeKind::Default
-    }
-}
-
-fn closes_open_p(name: &str) -> bool {
-    ascii_ci_tag_match!(
-        name,
-        "address",
-        "article",
-        "aside",
-        "blockquote",
-        "div",
-        "dl",
-        "fieldset",
-        "footer",
-        "form",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "header",
-        "hr",
-        "main",
-        "nav",
-        "ol",
-        "p",
-        "pre",
-        "section",
-        "table",
-        "ul",
-    )
-}
-
-fn is_scope_barrier(name: &str, scope: ScopeKind) -> bool {
-    if ascii_ci_tag_match!(name, "html", "template") {
-        return true;
-    }
-
-    match scope {
-        ScopeKind::Default => {
-            ascii_ci_tag_match!(name, "applet", "marquee", "object", "table", "td", "th")
-        }
-        ScopeKind::ListItem => ascii_ci_tag_match!(
-            name, "applet", "marquee", "object", "table", "td", "th", "ol", "ul",
-        ),
-        ScopeKind::Button => ascii_ci_tag_match!(
-            name, "applet", "marquee", "object", "table", "td", "th", "button",
-        ),
-        ScopeKind::Table => ascii_ci_tag_match!(name, "html", "table", "template"),
-        ScopeKind::Select => !ascii_ci_tag_match!(name, "option", "optgroup"),
     }
 }
 

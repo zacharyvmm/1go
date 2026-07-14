@@ -1,5 +1,6 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
+use super::tag::TagFlags;
 use crate::QuerySpec;
 use crate::Reader;
 use crate::XHtmlElement;
@@ -21,24 +22,6 @@ pub struct XHtmlParser<'html, 'query, Q> {
     capture_text_content: bool,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
-}
-
-/// Returns the closing-tag prefix (`</name`, without the terminating `>`) for
-/// an HTML raw-text / RCDATA element whose contents must not be parsed as
-/// markup. Matching is ASCII-case-insensitive, so `<SCRIPT>` and `<Style>` are
-/// handled the same as their lowercase forms.
-fn raw_text_close_tag(name: &str) -> Option<&'static str> {
-    if name.eq_ignore_ascii_case("script") {
-        Some("</script")
-    } else if name.eq_ignore_ascii_case("style") {
-        Some("</style")
-    } else if name.eq_ignore_ascii_case("textarea") {
-        Some("</textarea")
-    } else if name.eq_ignore_ascii_case("title") {
-        Some("</title")
-    } else {
-        None
-    }
 }
 
 /// A raw-text end tag is only "appropriate" when the tag name is immediately
@@ -229,13 +212,15 @@ where
 
         match tag {
             XHtmlTag::Open => {
-                if let Some(close_tag) = raw_text_close_tag(self.element.name) {
+                let tag = TagFlags::classify(self.element.name);
+
+                if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
                 }
 
                 self.position.reader_position = tag_start_position;
                 self.open_elements
-                    .prepare_for_open_into(self.element.name, &mut self.implied_closes);
+                    .prepare_for_open_into(tag, &mut self.implied_closes);
                 let mut implied = std::mem::take(&mut self.implied_closes);
                 self.pop_open_elements(
                     &mut implied,
@@ -246,12 +231,12 @@ where
                 self.implied_closes = implied;
                 self.position.reader_position = reader.get_position();
 
-                let is_self_closing = self.element.is_self_closing();
+                let is_self_closing = tag.is_void();
                 self.position.self_closing = is_self_closing;
                 if is_self_closing {
                     self.position.element_depth = self.open_elements.depth().saturating_add(1);
                 } else {
-                    self.open_elements.push(self.element.name);
+                    self.open_elements.push_classified(self.element.name, tag);
                     self.position.element_depth = self.open_elements.depth();
                 }
 

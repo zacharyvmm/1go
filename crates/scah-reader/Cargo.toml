@@ -8,9 +8,6 @@ repository = "https://github.com/zacharyvmm/scah"
 homepage = "https://github.com/zacharyvmm/scah"
 documentation = "https://docs.rs/scah-reader"
 
-[dependencies]
-memchr = "2.7"
-
 [lints.clippy]
 let-and-return = "allow"
 byte_char_slices = "allow"

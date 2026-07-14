@@ -1,7 +1,6 @@
-use crate::ascii_ci_tag_match;
-
 use super::tokenizer::ElementAttributeToken;
 use crate::Reader;
+use crate::html::tag::TagFlags;
 use scah_query_ir::{Attribute, IElement};
 
 /// A key-value pair representing an HTML element attribute.
@@ -79,10 +78,7 @@ impl<'html> XHtmlElement<'html> {
         // ignored (it does not make the element self-closing), so tag name is
         // the only signal here. The trailing solidus is stripped during
         // tokenization and never reaches the attribute list.
-        ascii_ci_tag_match!(
-            self.name, "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
-            "param", "source", "track", "wbr",
-        )
+        TagFlags::classify(self.name).is_void()
     }
 
     pub fn clear(&mut self) {

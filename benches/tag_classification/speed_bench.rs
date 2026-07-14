@@ -19,7 +19,8 @@
 //! The "bulk_10k" groups compare aggregate throughput for a realistic mix of
 //! 10 000 tag lookups against each tag set (void, closes_open_p, scope_barrier).
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 // ── tag sets from the production code ──────────────────────────────
 
@@ -85,7 +86,7 @@ fn len_bucketed_scan(name: &str, buckets: &[Vec<&str>]) -> bool {
     }
 }
 
-fn build_len_buckets(candidates: &[&str]) -> Vec<Vec<&str>> {
+fn build_len_buckets<'a>(candidates: &[&'a str]) -> Vec<Vec<&'a str>> {
     let max_len = candidates.iter().map(|t| t.len()).max().unwrap_or(0);
     let mut buckets: Vec<Vec<&str>> = (0..=max_len).map(|_| Vec::new()).collect();
     for &tag in candidates {
@@ -136,7 +137,7 @@ fn bench_bulk_comparison(c: &mut Criterion) {
         b.iter(|| {
             for tag in &tags {
                 black_box(scah::ascii_ci_tag_match!(
-                    black_box(tag),
+                    black_box(*tag),
                     "area",
                     "base",
                     "br",
@@ -177,7 +178,7 @@ fn bench_bulk_comparison(c: &mut Criterion) {
         b.iter(|| {
             for tag in &tags {
                 black_box(scah::ascii_ci_tag_match!(
-                    black_box(tag),
+                    black_box(*tag),
                     "address",
                     "article",
                     "aside",
@@ -229,7 +230,7 @@ fn bench_bulk_comparison(c: &mut Criterion) {
         b.iter(|| {
             for tag in &tags {
                 black_box(scah::ascii_ci_tag_match!(
-                    black_box(tag),
+                    black_box(*tag),
                     "applet",
                     "marquee",
                     "object",
@@ -265,7 +266,7 @@ fn bench_macro_micro(c: &mut Criterion) {
             |b, tag| {
                 b.iter(|| {
                     black_box(scah::ascii_ci_tag_match!(
-                        black_box(tag),
+                        black_box(*tag),
                         "area",
                         "base",
                         "br",
@@ -294,7 +295,7 @@ fn bench_macro_micro(c: &mut Criterion) {
             |b, tag| {
                 b.iter(|| {
                     black_box(scah::ascii_ci_tag_match!(
-                        black_box(tag),
+                        black_box(*tag),
                         "area",
                         "base",
                         "br",
@@ -323,7 +324,7 @@ fn bench_macro_micro(c: &mut Criterion) {
             |b, tag| {
                 b.iter(|| {
                     black_box(scah::ascii_ci_tag_match!(
-                        black_box(tag),
+                        black_box(*tag),
                         "area",
                         "base",
                         "br",
@@ -349,7 +350,7 @@ fn bench_macro_micro(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("void/long_miss", *tag), tag, |b, tag| {
             b.iter(|| {
                 black_box(scah::ascii_ci_tag_match!(
-                    black_box(tag),
+                    black_box(*tag),
                     "area",
                     "base",
                     "br",
