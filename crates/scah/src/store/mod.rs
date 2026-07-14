@@ -78,7 +78,7 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     /// based on measured HTML element density (~1 element per 20-50 bytes,
     /// of which only matched elements land in the arena).
     ///
-    /// Ratios chosen from Criterion microbenchmarks in `benches/`:
+    /// Ratios chosen from valgrind massif profiling (`capacity_profile` example):
     ///
     /// | Arena       | Ratio            | Rationale                             |
     /// |------------ |----------------- |---------------------------------------|
