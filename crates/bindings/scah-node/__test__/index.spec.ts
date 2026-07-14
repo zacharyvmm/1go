@@ -95,7 +95,7 @@ test('Tree selection', () => {
   expect(product1.h1.textContent).toBe('Product #1')
 
   expect(product1.img.name).toBe('img')
-  expect(product1.img.attributes).toEqual({ src: 'https://example.com/p1.png', '/': null })
+  expect(product1.img.attributes).toEqual({ src: 'https://example.com/p1.png' })
 
   expect(product1.p.name).toBe('p')
   expect(product1.p.textContent).toBe('Hello World for Product #1')
@@ -114,7 +114,7 @@ test('Tree selection', () => {
   expect(product2.h1.textContent).toBe('Product #2')
 
   expect(product2.img.name).toBe('img')
-  expect(product2.img.attributes).toEqual({ src: 'https://example.com/p2.png', '/': null })
+  expect(product2.img.attributes).toEqual({ src: 'https://example.com/p2.png' })
 
   expect(product2.p.name).toBe('p')
   expect(product2.p.textContent).toBe('Hello World for Product #2')
