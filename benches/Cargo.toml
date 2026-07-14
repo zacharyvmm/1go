@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-scah = { path = "../crates/scah" }
+scah = { path = "../crates/scah", features = ["bench-internals"] }
 
 # Benchmarking Tools
 criterion = { version = "0.8.1", features = ["html_reports"] }

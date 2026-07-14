@@ -8,10 +8,10 @@
 /// answer hot-path membership and scope queries with integer mask tests rather
 /// than repeatedly matching or comparing the tag name.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TagFlags(u32);
+pub struct TagFlags(u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ScopeKind {
+pub enum ScopeKind {
     Default,
     ListItem,
     Button,
@@ -50,7 +50,7 @@ impl TagFlags {
     pub(crate) const CELL_MASK: Self = Self(Self::CELL);
 
     #[inline]
-    pub(crate) fn classify(name: &str) -> Self {
+    pub fn classify(name: &str) -> Self {
         let flags = Self::classify_lowercase(name);
         if flags.0 != 0 || !name.as_bytes().iter().any(u8::is_ascii_uppercase) {
             return flags;
@@ -111,12 +111,12 @@ impl TagFlags {
     }
 
     #[inline]
-    pub(crate) const fn is_void(self) -> bool {
+    pub const fn is_void(self) -> bool {
         self.0 & Self::VOID != 0
     }
 
     #[inline]
-    pub(crate) const fn closes_open_p(self) -> bool {
+    pub const fn closes_open_p(self) -> bool {
         self.0 & Self::CLOSES_P != 0
     }
 
@@ -136,7 +136,7 @@ impl TagFlags {
     }
 
     #[inline]
-    pub(crate) const fn is_scope_barrier(self, scope: ScopeKind) -> bool {
+    pub const fn is_scope_barrier(self, scope: ScopeKind) -> bool {
         if self.0 & Self::HTML_TEMPLATE != 0 {
             return true;
         }

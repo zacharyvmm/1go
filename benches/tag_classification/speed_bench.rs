@@ -8,8 +8,8 @@
 //! | Strategy | Description |
 //! |----------|-------------|
 //! | **baseline** | Pure `eq_ignore_ascii_case` linear scan (original PR #24 code) |
-//! | **macro**    | `ascii_ci_tag_match!` — exact lowercase `match` + uppercase fallback |
 //! | **len-bucket** | Length-bucketed: group candidates by byte length, scan only the matching bucket |
+//! | **production** | `TagFlags::classify` followed by the parser's actual bitset query |
 //!
 //! Each strategy is tested against realistic tag distributions:
 //! lowercase hits, lowercase misses, mixed-case hits, and long custom-element misses.
@@ -19,7 +19,8 @@
 //! The "bulk_10k" groups compare aggregate throughput for a realistic mix of
 //! 10 000 tag lookups against each tag set (void, closes_open_p, scope_barrier).
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use scah::bench_internals::{ScopeKind, TagFlags};
 use std::hint::black_box;
 
 // ── tag sets from the production code ──────────────────────────────
@@ -133,26 +134,10 @@ fn bench_bulk_comparison(c: &mut Criterion) {
             }
         })
     });
-    group.bench_function("void/macro", |b| {
+    group.bench_function("void/production", |b| {
         b.iter(|| {
             for tag in &tags {
-                black_box(scah::ascii_ci_tag_match!(
-                    black_box(*tag),
-                    "area",
-                    "base",
-                    "br",
-                    "col",
-                    "embed",
-                    "hr",
-                    "img",
-                    "input",
-                    "link",
-                    "meta",
-                    "param",
-                    "source",
-                    "track",
-                    "wbr",
-                ));
+                black_box(TagFlags::classify(black_box(*tag)).is_void());
             }
         })
     });
@@ -174,37 +159,10 @@ fn bench_bulk_comparison(c: &mut Criterion) {
             }
         })
     });
-    group.bench_function("closes_open_p/macro", |b| {
+    group.bench_function("closes_open_p/production", |b| {
         b.iter(|| {
             for tag in &tags {
-                black_box(scah::ascii_ci_tag_match!(
-                    black_box(*tag),
-                    "address",
-                    "article",
-                    "aside",
-                    "blockquote",
-                    "div",
-                    "dl",
-                    "fieldset",
-                    "footer",
-                    "form",
-                    "h1",
-                    "h2",
-                    "h3",
-                    "h4",
-                    "h5",
-                    "h6",
-                    "header",
-                    "hr",
-                    "main",
-                    "nav",
-                    "ol",
-                    "p",
-                    "pre",
-                    "section",
-                    "table",
-                    "ul",
-                ));
+                black_box(TagFlags::classify(black_box(*tag)).closes_open_p());
             }
         })
     });
@@ -226,18 +184,10 @@ fn bench_bulk_comparison(c: &mut Criterion) {
             }
         })
     });
-    group.bench_function("scope_barrier/macro", |b| {
+    group.bench_function("scope_barrier/production", |b| {
         b.iter(|| {
             for tag in &tags {
-                black_box(scah::ascii_ci_tag_match!(
-                    black_box(*tag),
-                    "applet",
-                    "marquee",
-                    "object",
-                    "table",
-                    "td",
-                    "th",
-                ));
+                black_box(TagFlags::classify(black_box(*tag)).is_scope_barrier(ScopeKind::Default));
             }
         })
     });
@@ -253,125 +203,5 @@ fn bench_bulk_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-// ── per-tag microbenchmarks for the winning strategy ───────────────
-
-fn bench_macro_micro(c: &mut Criterion) {
-    let mut group = c.benchmark_group("tag_classification_micro");
-
-    // Lowercase hits — fast path exercised
-    for tag in LOWERCASE_HITS {
-        group.bench_with_input(
-            BenchmarkId::new("void/lowercase_hit", *tag),
-            tag,
-            |b, tag| {
-                b.iter(|| {
-                    black_box(scah::ascii_ci_tag_match!(
-                        black_box(*tag),
-                        "area",
-                        "base",
-                        "br",
-                        "col",
-                        "embed",
-                        "hr",
-                        "img",
-                        "input",
-                        "link",
-                        "meta",
-                        "param",
-                        "source",
-                        "track",
-                        "wbr",
-                    ))
-                })
-            },
-        );
-    }
-
-    // Lowercase misses — fast path, false result
-    for tag in LOWERCASE_MISSES {
-        group.bench_with_input(
-            BenchmarkId::new("void/lowercase_miss", *tag),
-            tag,
-            |b, tag| {
-                b.iter(|| {
-                    black_box(scah::ascii_ci_tag_match!(
-                        black_box(*tag),
-                        "area",
-                        "base",
-                        "br",
-                        "col",
-                        "embed",
-                        "hr",
-                        "img",
-                        "input",
-                        "link",
-                        "meta",
-                        "param",
-                        "source",
-                        "track",
-                        "wbr",
-                    ))
-                })
-            },
-        );
-    }
-
-    // Mixed-case hits — uppercase fallback exercised
-    for tag in MIXED_CASE_HITS {
-        group.bench_with_input(
-            BenchmarkId::new("void/mixed_case_hit", *tag),
-            tag,
-            |b, tag| {
-                b.iter(|| {
-                    black_box(scah::ascii_ci_tag_match!(
-                        black_box(*tag),
-                        "area",
-                        "base",
-                        "br",
-                        "col",
-                        "embed",
-                        "hr",
-                        "img",
-                        "input",
-                        "link",
-                        "meta",
-                        "param",
-                        "source",
-                        "track",
-                        "wbr",
-                    ))
-                })
-            },
-        );
-    }
-
-    // Long misses — worst-case for byte-by-byte comparison
-    for tag in LONG_MISSES {
-        group.bench_with_input(BenchmarkId::new("void/long_miss", *tag), tag, |b, tag| {
-            b.iter(|| {
-                black_box(scah::ascii_ci_tag_match!(
-                    black_box(*tag),
-                    "area",
-                    "base",
-                    "br",
-                    "col",
-                    "embed",
-                    "hr",
-                    "img",
-                    "input",
-                    "link",
-                    "meta",
-                    "param",
-                    "source",
-                    "track",
-                    "wbr",
-                ))
-            })
-        });
-    }
-
-    group.finish();
-}
-
-criterion_group!(benches, bench_bulk_comparison, bench_macro_micro);
+criterion_group!(benches, bench_bulk_comparison);
 criterion_main!(benches);

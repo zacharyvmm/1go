@@ -123,6 +123,14 @@ pub use scah_query_ir::{
 pub use scah_reader::Reader;
 pub use store::{Element, ElementId, Store};
 
+/// Internal parser details exposed only so benchmarks can measure production
+/// code instead of maintaining a duplicate implementation.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub mod bench_internals {
+    pub use crate::html::tag::{ScopeKind, TagFlags};
+}
+
 /// Errors that can occur during parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
