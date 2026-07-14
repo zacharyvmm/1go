@@ -63,6 +63,7 @@ where
                 element_depth: 0,
                 reader_position: 0, // for inner_html
                 text_content_position: usize::MAX,
+                self_closing: false,
             },
             selectors,
             element: XHtmlElement::default(),
@@ -84,6 +85,7 @@ where
                 element_depth: 0,
                 reader_position: 0, // for inner_html
                 text_content_position: usize::MAX,
+                self_closing: false,
             },
             selectors,
             element: XHtmlElement::default(),
@@ -230,6 +232,7 @@ where
                 self.position.reader_position = reader.get_position();
 
                 let is_self_closing = self.element.is_self_closing();
+                self.position.self_closing = is_self_closing;
                 if is_self_closing {
                     self.position.element_depth = self.open_elements.depth().saturating_add(1);
                 } else {

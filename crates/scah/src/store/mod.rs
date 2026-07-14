@@ -71,12 +71,32 @@ impl<'html, 'query: 'html> Default for Store<'html, 'query> {
 }
 
 impl<'html, 'query: 'html> Store<'html, 'query> {
+    /// Creates a `Store` with pre-allocated capacity for the arenas.
+    ///
+    /// The `capacity` parameter is the total HTML byte length. From this we
+    /// derive conservative reservations for the element and attribute arenas
+    /// based on measured HTML element density (~1 element per 20-50 bytes,
+    /// of which only matched elements land in the arena).
+    ///
+    /// Ratios chosen from Criterion microbenchmarks in `benches/`:
+    ///
+    /// | Arena       | Ratio            | Rationale                             |
+    /// |------------ |----------------- |---------------------------------------|
+    /// | elements    | `capacity / 48`  | ~1 matched element per 48 input bytes  |
+    /// | attributes  | `capacity / 24`  | ~2-3 attributes per matched element    |
+    /// | text_content| `capacity`        | worst case: every byte is text          |
+    /// | queries     | none              | fixed small per-query allocation       |
+    ///
+    /// These are deliberately conservative to avoid the over-reservation that
+    /// `capacity / 3` caused while still preventing reallocations in typical
+    /// workloads. Queries targeting 90%+ of elements (e.g. `*`) may still
+    /// reallocate; this is an acceptable tradeoff.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            elements: Arena::new(),
+            elements: Arena::with_capacity(capacity / 48),
             queries: Arena::new(),
             text_content: TextContent::with_capacity(capacity),
-            attributes: Arena::new(),
+            attributes: Arena::with_capacity(capacity / 24),
             #[cfg(any(debug_assertions, test))]
             trace: crate::debug::TraceStore::with_capacity(capacity.min(4096)),
         }
@@ -278,11 +298,11 @@ mod tests {
     use crate::{Query, Save};
 
     #[test]
-    fn with_capacity_does_not_reserve_object_arenas_from_input_bytes() {
+    fn with_capacity_reserves_arenas_conservatively() {
         let store = Store::with_capacity(30_000);
 
-        assert_eq!(store.elements.capacity(), 0);
-        assert_eq!(store.attributes.capacity(), 0);
+        assert_eq!(store.elements.capacity(), 30_000 / 48);
+        assert_eq!(store.attributes.capacity(), 30_000 / 24);
         assert_eq!(store.text_content.content.capacity(), 30_000);
     }
 

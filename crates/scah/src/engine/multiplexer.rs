@@ -8,6 +8,9 @@ pub(crate) struct DocumentPosition {
     pub reader_position: usize,
     pub text_content_position: usize,
     pub element_depth: crate::engine::DepthSize,
+    /// Precomputed by the parser once per open tag so the executor
+    /// never calls `XHtmlElement::is_self_closing()` in its hot loop.
+    pub self_closing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -166,7 +166,7 @@ where
             let is_section_end = is_save_point;
             let section_kind = self.query.get_section_selection_kind(position.selection);
             let is_first = matches!(section_kind, SelectionKind::First);
-            let self_closing = element.is_self_closing();
+            let self_closing = document_position.self_closing;
             let terminal_all = is_section_end
                 && matches!(section_kind, SelectionKind::All)
                 && position.next_child(self.query).is_none();
@@ -486,6 +486,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -514,6 +515,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -549,6 +551,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -568,6 +571,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -607,6 +611,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 2,
+                self_closing: false,
             },
             &mut store,
         );
@@ -644,6 +649,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -661,6 +667,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
         );
@@ -687,6 +694,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -924,6 +932,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -958,6 +967,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut save_hits,
@@ -989,6 +999,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut save_hits2,
@@ -1073,6 +1084,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -1142,6 +1154,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
         );
@@ -1171,6 +1184,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -1190,6 +1204,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
         );
@@ -1226,6 +1241,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -1280,6 +1296,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 2,
+                self_closing: false,
             },
             &mut store,
         );

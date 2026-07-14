@@ -1,3 +1,5 @@
+use crate::ascii_ci_tag_match;
+
 use super::tokenizer::ElementAttributeToken;
 use crate::Reader;
 use scah_query_ir::{Attribute, IElement};
@@ -77,12 +79,10 @@ impl<'html> XHtmlElement<'html> {
         // ignored (it does not make the element self-closing), so tag name is
         // the only signal here. The trailing solidus is stripped during
         // tokenization and never reaches the attribute list.
-        [
-            "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-            "source", "track", "wbr",
-        ]
-        .iter()
-        .any(|void_name| self.name.eq_ignore_ascii_case(void_name))
+        ascii_ci_tag_match!(
+            self.name, "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+            "param", "source", "track", "wbr",
+        )
     }
 
     pub fn clear(&mut self) {

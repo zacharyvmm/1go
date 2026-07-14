@@ -1,3 +1,5 @@
+use crate::ascii_ci_tag_match;
+
 use crate::engine::DepthSize;
 use crate::store::ElementId;
 
@@ -35,16 +37,6 @@ impl<'html> Default for OpenElementStack<'html> {
             entries: Vec::with_capacity(ASSUMED_MAX_DEPTH),
         }
     }
-}
-
-#[inline]
-fn tag_eq(name: &str, expected: &str) -> bool {
-    name.eq_ignore_ascii_case(expected)
-}
-
-#[inline]
-fn tag_in(name: &str, expected: &[&str]) -> bool {
-    expected.iter().any(|item| name.eq_ignore_ascii_case(item))
 }
 
 impl<'html> OpenElementStack<'html> {
@@ -88,20 +80,20 @@ impl<'html> OpenElementStack<'html> {
             self.pop_matching_in_scope_into(&["p"], ScopeKind::Default, popped);
         }
 
-        if tag_eq(name, "button") {
+        if ascii_ci_tag_match!(name, "button") {
             self.pop_matching_in_scope_into(&["button"], ScopeKind::Button, popped);
-        } else if tag_eq(name, "li") {
+        } else if ascii_ci_tag_match!(name, "li") {
             self.pop_matching_in_scope_into(&["li"], ScopeKind::ListItem, popped);
-        } else if tag_in(name, &["dt", "dd"]) {
+        } else if ascii_ci_tag_match!(name, "dt", "dd") {
             self.pop_matching_in_scope_into(&["dt", "dd"], ScopeKind::ListItem, popped);
-        } else if tag_eq(name, "option") {
+        } else if ascii_ci_tag_match!(name, "option") {
             self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
-        } else if tag_eq(name, "optgroup") {
+        } else if ascii_ci_tag_match!(name, "optgroup") {
             self.pop_matching_in_scope_into(&["option"], ScopeKind::Select, popped);
             self.pop_matching_in_scope_into(&["optgroup"], ScopeKind::Select, popped);
-        } else if tag_eq(name, "tr") {
+        } else if ascii_ci_tag_match!(name, "tr") {
             self.pop_matching_in_scope_into(&["tr"], ScopeKind::Table, popped);
-        } else if tag_in(name, &["td", "th"]) {
+        } else if ascii_ci_tag_match!(name, "td", "th") {
             self.pop_matching_in_scope_into(&["td", "th"], ScopeKind::Table, popped);
         }
     }
@@ -194,18 +186,15 @@ impl<'html> OpenElementStack<'html> {
 }
 
 fn close_scope(name: &str) -> ScopeKind {
-    if tag_in(name, &["li", "dt", "dd"]) {
+    if ascii_ci_tag_match!(name, "li", "dt", "dd") {
         ScopeKind::ListItem
-    } else if tag_eq(name, "button") {
+    } else if ascii_ci_tag_match!(name, "button") {
         ScopeKind::Button
-    } else if tag_in(
-        name,
-        &[
-            "tr", "td", "th", "thead", "tbody", "tfoot", "caption", "colgroup",
-        ],
+    } else if ascii_ci_tag_match!(
+        name, "tr", "td", "th", "thead", "tbody", "tfoot", "caption", "colgroup",
     ) {
         ScopeKind::Table
-    } else if tag_in(name, &["option", "optgroup"]) {
+    } else if ascii_ci_tag_match!(name, "option", "optgroup") {
         ScopeKind::Select
     } else {
         ScopeKind::Default
@@ -213,57 +202,53 @@ fn close_scope(name: &str) -> ScopeKind {
 }
 
 fn closes_open_p(name: &str) -> bool {
-    tag_in(
+    ascii_ci_tag_match!(
         name,
-        &[
-            "address",
-            "article",
-            "aside",
-            "blockquote",
-            "div",
-            "dl",
-            "fieldset",
-            "footer",
-            "form",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "header",
-            "hr",
-            "main",
-            "nav",
-            "ol",
-            "p",
-            "pre",
-            "section",
-            "table",
-            "ul",
-        ],
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "div",
+        "dl",
+        "fieldset",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "ul",
     )
 }
 
 fn is_scope_barrier(name: &str, scope: ScopeKind) -> bool {
-    if tag_in(name, &["html", "template"]) {
+    if ascii_ci_tag_match!(name, "html", "template") {
         return true;
     }
 
     match scope {
-        ScopeKind::Default => tag_in(name, &["applet", "marquee", "object", "table", "td", "th"]),
-        ScopeKind::ListItem => tag_in(
-            name,
-            &[
-                "applet", "marquee", "object", "table", "td", "th", "ol", "ul",
-            ],
+        ScopeKind::Default => {
+            ascii_ci_tag_match!(name, "applet", "marquee", "object", "table", "td", "th")
+        }
+        ScopeKind::ListItem => ascii_ci_tag_match!(
+            name, "applet", "marquee", "object", "table", "td", "th", "ol", "ul",
         ),
-        ScopeKind::Button => tag_in(
-            name,
-            &["applet", "marquee", "object", "table", "td", "th", "button"],
+        ScopeKind::Button => ascii_ci_tag_match!(
+            name, "applet", "marquee", "object", "table", "td", "th", "button",
         ),
-        ScopeKind::Table => tag_in(name, &["html", "table", "template"]),
-        ScopeKind::Select => !tag_in(name, &["option", "optgroup"]),
+        ScopeKind::Table => ascii_ci_tag_match!(name, "html", "table", "template"),
+        ScopeKind::Select => !ascii_ci_tag_match!(name, "option", "optgroup"),
     }
 }
 
