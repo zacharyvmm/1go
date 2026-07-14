@@ -185,11 +185,15 @@ where
         return Err(ParseError::EmptyQueries);
     }
 
-    let selectors = QueryMultiplexer::new(queries);
-    let reserve_text_content = selectors.requires_text_content();
+    let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
 
-    let mut parser =
-        XHtmlParser::with_capacity_options(selectors, html.len(), reserve_text_content);
+    let selectors = QueryMultiplexer::new(queries);
+
+    let mut parser = if no_extra_allocations {
+        XHtmlParser::new(selectors)
+    } else {
+        XHtmlParser::with_capacity(selectors, html.len())
+    };
 
     let mut reader = Reader::new(html);
     parser.trace_parse_started(html.len(), queries.len());
@@ -222,5 +226,98 @@ mod tests {
         let store = parse(html, queries).expect("parse succeeds");
 
         assert_eq!(store.get("a").unwrap().count(), 1);
+    }
+
+    #[test]
+    fn parse_first_query_skips_full_document_preallocation() {
+        let filler = "<span class=\"filler\"></span>".repeat(10_000);
+        let html_len = filler.len();
+        let html = format!("<div id=\"hit\"></div>{}", filler);
+
+        let query = Query::first("#hit", Save::none()).unwrap().build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        // Early-exit path uses XHtmlParser::new → Store::default()
+        // which creates empty arenas. After parsing one match, capacity
+        // should be driven by Vec growth (~4-8), not the full document
+        // length (capacity path would reserve html_len / 48 ≈ 5k+).
+        let capacity_path_reservation = html_len / 48;
+        assert!(
+            store.elements.capacity() < capacity_path_reservation,
+            "early-exit parse capacity ({}) must be far below full-document reservation ({})",
+            store.elements.capacity(),
+            capacity_path_reservation,
+        );
+        assert!(
+            store.attributes.capacity() < html_len / 24,
+            "early-exit parse must not preallocate attribute arena"
+        );
+
+        // Results must still be correct.
+        let hits: Vec<_> = store.get("#hit").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "div");
+    }
+
+    #[test]
+    fn parse_all_query_uses_capacity_preallocation_path() {
+        let html = format!(
+            "<div id=\"hit\"></div>{}",
+            "<span class=\"filler\"></span>".repeat(5_000)
+        );
+
+        let query = Query::all("#hit", Save::none()).unwrap().build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        // .all() queries don't have exit_at_section_end → uses capacity path.
+        assert!(
+            store.elements.capacity() > 0,
+            "non-early-exit parse must preallocate element arena"
+        );
+
+        // Text content should NOT be reserved when Save::none().
+        assert_eq!(
+            store.text_content.content.capacity(),
+            0,
+            "capacity path with Save::none must skip text buffer preallocation"
+        );
+    }
+
+    #[test]
+    fn parse_with_save_text_content_reserves_text_buffer() {
+        let html = "<div>text content here</div>".repeat(5_000);
+
+        let query = Query::all("div", Save::only_text_content())
+            .unwrap()
+            .build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        // Text content should be preallocated when saving text content.
+        assert!(
+            store.text_content.content.capacity() > 0,
+            "text buffer must be preallocated when queries need text content"
+        );
+    }
+
+    #[test]
+    fn parse_first_early_exit_still_captures_text_when_needed() {
+        let html = "<div id=\"hit\">important text</div>".to_string()
+            + &"<span>filler</span>".repeat(1_000);
+
+        let query = Query::first("#hit", Save::only_text_content())
+            .unwrap()
+            .build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        let hits: Vec<_> = store.get("#hit").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text_content(&store), Some("important text"));
+
+        // Early-exit with XHtmlParser::new uses Store::default() with no
+        // preallocation, but matches are still recorded correctly.
     }
 }

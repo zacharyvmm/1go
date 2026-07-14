@@ -91,25 +91,16 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     /// `capacity / 3` caused while still preventing reallocations in typical
     /// workloads. Queries targeting 90%+ of elements (e.g. `*`) may still
     /// reallocate; this is an acceptable tradeoff.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_capacity_options(capacity, true)
-    }
-
-    /// Creates a `Store` with pre-allocated element and attribute capacity.
     ///
-    /// Unlike [`Self::with_capacity`], this allows the caller to skip the
-    /// text-content buffer reservation. Pass `reserve_text_content: false`
-    /// when no query needs text content (`Save::none()` or
-    /// `Save::only_inner_html()`) to avoid allocating a buffer proportional
-    /// to the full HTML input.
-    ///
+    /// Pass `capture_text_content: false` when no query needs text content
+    /// to avoid allocating a buffer proportional to the full HTML input.
     /// Element and attribute arenas are always reserved regardless of this
-    /// flag, using the same ratios as `with_capacity`.
-    pub fn with_capacity_options(capacity: usize, reserve_text_content: bool) -> Self {
+    /// flag, using the same ratios.
+    pub fn with_capacity(capacity: usize, capture_text_content: bool) -> Self {
         Self {
             elements: Arena::with_capacity(capacity / 48),
             queries: Arena::new(),
-            text_content: if reserve_text_content {
+            text_content: if capture_text_content {
                 TextContent::with_capacity(capacity)
             } else {
                 TextContent::new()
@@ -317,7 +308,7 @@ mod tests {
 
     #[test]
     fn with_capacity_reserves_arenas_conservatively() {
-        let store = Store::with_capacity(30_000);
+        let store = Store::with_capacity(30_000, true);
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
@@ -325,8 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn with_capacity_options_can_skip_text_content_reservation() {
-        let store = Store::with_capacity_options(30_000, false);
+    fn with_capacity_can_skip_text_content_reservation() {
+        let store = Store::with_capacity(30_000, false);
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
@@ -334,8 +325,8 @@ mod tests {
     }
 
     #[test]
-    fn with_capacity_options_can_reserve_text_content() {
-        let store = Store::with_capacity_options(30_000, true);
+    fn with_capacity_can_reserve_text_content() {
+        let store = Store::with_capacity(30_000, true);
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);

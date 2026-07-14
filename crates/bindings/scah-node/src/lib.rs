@@ -2,7 +2,7 @@ use napi::Result;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use ::scah::{Query, QueryMultiplexer, Reader, XHtmlParser};
+use ::scah::{Query, QueryMultiplexer, QuerySpec, Reader, XHtmlParser};
 
 use std::sync::Arc;
 
@@ -32,8 +32,15 @@ fn parse(html: String, queries: Vec<Reference<JsQuery>>) -> Result<JSStore> {
         .collect::<Vec<Query>>();
 
     let slice = unsafe { std::slice::from_raw_parts(queries_rs.as_ptr(), queries_rs.len()) };
+    // Mirror scah::parse() allocation policy: avoid full-document store
+    // preallocation when all queries can exit early (Query::first-style).
+    let no_extra_allocations = queries_rs.iter().all(|q| q.exit_at_section_end().is_some());
     let selectors = QueryMultiplexer::new(slice);
-    let mut parser = XHtmlParser::with_capacity(selectors, html_bytes.len());
+    let mut parser = if no_extra_allocations {
+        XHtmlParser::new(selectors)
+    } else {
+        XHtmlParser::with_capacity(selectors, html_bytes.len())
+    };
     let mut reader = Reader::from_bytes(html_bytes);
     while parser.next(&mut reader) {}
 

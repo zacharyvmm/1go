@@ -1,3 +1,12 @@
+/// Cached, overlapping properties of an HTML tag.
+///
+/// This is a bit set rather than a single tag enum because one tag can have
+/// several independent parser behaviors. For example, `table` closes an open
+/// paragraph and is also a barrier for multiple scope kinds, while `hr` is
+/// both void and paragraph-closing. Keeping those properties together lets us
+/// classify a tag name once, store the result on the open-element stack, and
+/// answer hot-path membership and scope queries with integer mask tests rather
+/// than repeatedly matching or comparing the tag name.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TagFlags(u32);
 
