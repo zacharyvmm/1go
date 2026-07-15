@@ -176,12 +176,16 @@ def test_unicode_attribute_suffix_does_not_panic():
     """Priority 1: Suffix match with unicode chars must not panic."""
     q = Query.all('[data-x$="e"]', Save.none()).try_build()
     store = parse('<div data-x="café"></div>', [q])
+    result = store.get('[data-x$="e"]') or []
+    assert list(result) == []
 
 
 def test_unicode_attribute_hyphen_does_not_panic():
     """Priority 1: Hyphen-separated match with unicode chars must not panic."""
     q = Query.all('[lang|="e"]', Save.none()).try_build()
     store = parse('<div lang="é-fr"></div>', [q])
+    result = store.get('[lang|="e"]') or []
+    assert list(result) == []
 
 
 def test_escaped_quote_in_attribute_does_not_panic():
@@ -248,3 +252,17 @@ def test_hyphen_separated_exact_semantics():
     ids = [e.id for e in result]
     assert "a" in ids
     assert "b" not in ids
+
+
+@pytest.mark.parametrize("selector, html", [
+    ('[data-x="a=b"]', '<div data-x="a=b"></div>'),
+    ('[data-x="a*b"]', '<div data-x="a*b"></div>'),
+    ('[data-x="a]b"]', '<div data-x="a]b"></div>'),
+    ('[href="https://example.com/search?q=test"]',
+     '<a href="https://example.com/search?q=test"></a>'),
+])
+def test_quoted_attribute_values_allow_selector_control_chars(selector, html):
+    q = Query.all(selector, Save.all()).try_build()
+    store = parse(html, [q])
+    result = store.get(selector) or []
+    assert len(list(result)) == 1

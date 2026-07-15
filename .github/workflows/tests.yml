@@ -30,3 +30,37 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude scah-benches -- -D warnings
       - name: Test
         run: cargo test --workspace --exclude scah-benches
+
+  python:
+    name: Python Binding Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install test tooling
+        run: |
+          python -m pip install -U pip
+          python -m pip install maturin pytest
+
+      - name: Build and install Python package
+        working-directory: crates/bindings/scah-python
+        run: maturin develop
+
+      - name: Run Python tests
+        working-directory: crates/bindings/scah-python
+        run: pytest
