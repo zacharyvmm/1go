@@ -5,6 +5,7 @@ use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRe
 use crate::store::ElementId;
 use crate::store::Store;
 use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
+use smallvec::SmallVec;
 
 /// NFA execution engine for streaming StAX events.
 ///
@@ -32,6 +33,10 @@ where
             query,
             cursors: vec![root],
         }
+    }
+
+    pub fn query(&self) -> &Q {
+        self.query
     }
 
     pub fn save_element(
@@ -104,6 +109,14 @@ where
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();
 
+        // A single element visit can be reached by several descendant forks.
+        // Track saves keyed by (parent scope, section) so the same physical
+        // element is stored once per scope+section: a flat descendant selector
+        // dedups globally (shared root parent), while distinct `.then()`
+        // parents each keep their own copy (distinct parent ids).
+        let mut saved_this_step: SmallVec<[(ElementId, QuerySectionId, ElementId); 4]> =
+            SmallVec::new();
+
         for i in 0..snapshot_len {
             if self.cursors[i].end() {
                 continue;
@@ -153,7 +166,7 @@ where
             let is_section_end = is_save_point;
             let section_kind = self.query.get_section_selection_kind(position.selection);
             let is_first = matches!(section_kind, SelectionKind::First);
-            let self_closing = element.is_self_closing();
+            let self_closing = document_position.self_closing;
             let terminal_all = is_section_end
                 && matches!(section_kind, SelectionKind::All)
                 && position.next_child(self.query).is_none();
@@ -196,16 +209,36 @@ where
                     }
 
                     let saved_parent = if is_save_point {
-                        save_hits.push(Self::save_element(
-                            runner_index,
-                            self.query,
-                            store,
-                            element.clone(),
-                            &mut self.cursors[i],
-                        ));
-                        let sp = self.cursors[i].parent;
-                        self.cursors[i].parent = original_parent;
-                        sp
+                        let save_parent = self.cursors[i].parent;
+                        if let Some(existing) = saved_this_step
+                            .iter()
+                            .find(|(parent, section, _)| {
+                                *parent == save_parent && *section == position.selection
+                            })
+                            .map(|(_, _, element_id)| *element_id)
+                        {
+                            // Same physical element already saved under this
+                            // parent scope + section this visit: skip the
+                            // duplicate store push, keep parenting consistent.
+                            if self.query.is_last_save_point(&position) {
+                                save_parent
+                            } else {
+                                existing
+                            }
+                        } else {
+                            let hit = Self::save_element(
+                                runner_index,
+                                self.query,
+                                store,
+                                element.clone(),
+                                &mut self.cursors[i],
+                            );
+                            let sp = self.cursors[i].parent;
+                            self.cursors[i].parent = original_parent;
+                            saved_this_step.push((save_parent, position.selection, hit.element_id));
+                            save_hits.push(hit);
+                            sp
+                        }
                     } else {
                         original_parent
                     };
@@ -237,18 +270,30 @@ where
                 super::cursor::CursorMode::Anchored { .. } => {
                     if self_closing {
                         if is_save_point {
-                            let mut base = ScopedCursor::new_moving(
-                                depth,
-                                self.cursors[i].parent,
-                                self.cursors[i].position,
-                            );
-                            save_hits.push(Self::save_element(
-                                runner_index,
-                                self.query,
-                                store,
-                                element.clone(),
-                                &mut base,
-                            ));
+                            let save_parent = self.cursors[i].parent;
+                            let already = saved_this_step.iter().any(|(parent, section, _)| {
+                                *parent == save_parent && *section == position.selection
+                            });
+                            if !already {
+                                let mut base = ScopedCursor::new_moving(
+                                    depth,
+                                    save_parent,
+                                    self.cursors[i].position,
+                                );
+                                let hit = Self::save_element(
+                                    runner_index,
+                                    self.query,
+                                    store,
+                                    element.clone(),
+                                    &mut base,
+                                );
+                                saved_this_step.push((
+                                    save_parent,
+                                    position.selection,
+                                    hit.element_id,
+                                ));
+                                save_hits.push(hit);
+                            }
                         }
                         continue;
                     }
@@ -256,19 +301,36 @@ where
                     spawned_positions = self.cursors[i].next_positions(self.query);
 
                     let saved_parent = if is_save_point {
-                        let mut base = ScopedCursor::new_moving(
-                            depth,
-                            self.cursors[i].parent,
-                            self.cursors[i].position,
-                        );
-                        save_hits.push(Self::save_element(
-                            runner_index,
-                            self.query,
-                            store,
-                            element.clone(),
-                            &mut base,
-                        ));
-                        base.parent
+                        let save_parent = self.cursors[i].parent;
+                        if let Some(existing) = saved_this_step
+                            .iter()
+                            .find(|(parent, section, _)| {
+                                *parent == save_parent && *section == position.selection
+                            })
+                            .map(|(_, _, element_id)| *element_id)
+                        {
+                            if self.query.is_last_save_point(&position) {
+                                save_parent
+                            } else {
+                                existing
+                            }
+                        } else {
+                            let mut base = ScopedCursor::new_moving(
+                                depth,
+                                save_parent,
+                                self.cursors[i].position,
+                            );
+                            let hit = Self::save_element(
+                                runner_index,
+                                self.query,
+                                store,
+                                element.clone(),
+                                &mut base,
+                            );
+                            saved_this_step.push((save_parent, position.selection, hit.element_id));
+                            save_hits.push(hit);
+                            base.parent
+                        }
                     } else {
                         self.cursors[i].parent
                     };
@@ -308,7 +370,7 @@ where
     ) -> bool {
         let close_depth = document_position.element_depth;
         let mut last_pruned_parent = None;
-        let mut siginificant_close = false;
+        let mut significant_close = false;
 
         // Walk backwards so `swap_remove` cannot move an unvisited cursor.
         let mut i = self.cursors.len();
@@ -343,12 +405,12 @@ where
                         self.cursors[i].position.back(self.query);
                         self.cursors[i].set_last_match_depth(0);
                     }
-                    siginificant_close = true;
+                    significant_close = true;
                 }
             } else if cur.scope_depth >= close_depth {
                 let pruned = self.cursors.swap_remove(i);
                 last_pruned_parent = Some(pruned.parent);
-                siginificant_close = true;
+                significant_close = true;
 
                 crate::scah_trace!(
                     store,
@@ -374,7 +436,7 @@ where
                     }
                 }
                 self.cursors[i].set_last_match_depth(sd);
-                siginificant_close = true;
+                significant_close = true;
             }
         }
 
@@ -387,7 +449,7 @@ where
             root.parent = parent;
         }
 
-        siginificant_close
+        significant_close
     }
 }
 
@@ -424,6 +486,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -452,6 +515,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -487,6 +551,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -506,6 +571,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -545,6 +611,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 2,
+                self_closing: false,
             },
             &mut store,
         );
@@ -582,6 +649,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -599,6 +667,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
         );
@@ -625,6 +694,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -862,6 +932,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -896,6 +967,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut save_hits,
@@ -927,6 +999,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 1,
+                self_closing: false,
             },
             &mut store,
             &mut save_hits2,
@@ -1011,6 +1084,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -1080,6 +1154,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
         );
@@ -1109,6 +1184,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -1128,6 +1204,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
         );
@@ -1164,6 +1241,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 0,
+                self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
@@ -1218,6 +1296,7 @@ mod tests {
                 reader_position: 0,
                 text_content_position: 0,
                 element_depth: 2,
+                self_closing: false,
             },
             &mut store,
         );

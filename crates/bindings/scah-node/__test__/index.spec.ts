@@ -95,7 +95,7 @@ test('Tree selection', () => {
   expect(product1.h1.textContent).toBe('Product #1')
 
   expect(product1.img.name).toBe('img')
-  expect(product1.img.attributes).toEqual({ src: 'https://example.com/p1.png', '/': null })
+  expect(product1.img.attributes).toEqual({ src: 'https://example.com/p1.png' })
 
   expect(product1.p.name).toBe('p')
   expect(product1.p.textContent).toBe('Hello World for Product #1')
@@ -114,7 +114,7 @@ test('Tree selection', () => {
   expect(product2.h1.textContent).toBe('Product #2')
 
   expect(product2.img.name).toBe('img')
-  expect(product2.img.attributes).toEqual({ src: 'https://example.com/p2.png', '/': null })
+  expect(product2.img.attributes).toEqual({ src: 'https://example.com/p2.png' })
 
   expect(product2.p.name).toBe('p')
   expect(product2.p.textContent).toBe('Hello World for Product #2')
@@ -179,4 +179,19 @@ test('Save defaults omitted object to false', () => {
   const span = div?.get('span').at(0)
   expect(span?.innerHtml).toBeNull()
   expect(span?.textContent).toBeNull()
+})
+
+test("store remains valid after query object goes out of scope", () => {
+  // Query tapes (selector strings) are owned by the query objects.
+  // This test verifies that dropping the query does not invalidate
+  // the store, because JSStore internally retains _query_tapes.
+  const store = (() => {
+    const q = Query.all("a[href]", { innerHtml: true, textContent: true }).build()
+    return parse("<a href='x'>x</a>", [q])
+  })()
+
+  const hits = store.get("a[href]")
+  expect(hits).toHaveLength(1)
+  expect(hits![0].name).toBe("a")
+  expect(hits![0].attributes).toEqual({ href: "x" })
 })

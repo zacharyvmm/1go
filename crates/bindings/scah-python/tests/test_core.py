@@ -144,3 +144,18 @@ def test_multiple_root_queries():
 
     # The QueryMultiplexer evaluates all of these against the token stream simultaneously
     store_api = parse(html_api, queries)
+
+def test_store_remains_valid_after_query_object_goes_out_of_scope():
+    # Query tapes (selector strings) are owned by the query objects.
+    # This test verifies that dropping the query does not invalidate
+    # the store, because PyStore internally retains _query_tapes.
+    def make_store():
+        q = Query.all("a[href]", Save.all()).build()
+        return parse("<a href='x'>x</a>", [q])
+
+    store = make_store()
+    hits = store.get("a[href]")
+    assert hits is not None
+    assert len(hits) == 1
+    assert hits[0].name == "a"
+    assert hits[0].get_attribute("href") == "x"

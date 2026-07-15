@@ -38,7 +38,7 @@
 //!         .build()
 //! ];
 //!
-//! let store = parse(html, queries);
+//! let store = parse(html, queries).expect("parse succeeds");
 //!
 //! // Iterate over matched elements
 //! for element in store.get("main > section > a[href]").unwrap() {
@@ -67,7 +67,7 @@
 //!     .expect("valid child selectors")
 //!     .build()];
 //!
-//! let store = parse(html, queries);
+//! let store = parse(html, queries).expect("parse succeeds");
 //! ```
 //!
 //! ## Architecture
@@ -121,13 +121,44 @@ pub use scah_query_ir::{
     Transition, TransitionId,
 };
 pub use scah_reader::Reader;
-pub use store::{Element, ElementId, Store};
+pub use store::{CapacityOptions, Element, ElementId, Store};
+
+/// Internal parser details exposed only so benchmarks can measure production
+/// code instead of maintaining a duplicate implementation.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub mod bench_internals {
+    pub use crate::html::tag::{ScopeKind, TagFlags};
+}
+
+/// Errors that can occur during parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// The query slice passed to [`parse`] is empty.
+    /// At least one query is required.
+    EmptyQueries,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::EmptyQueries => write!(f, "parse requires at least one query"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 /// Parse an HTML string against one or more pre-built [`Query`] objects and
-/// return a [`Store`] containing all matched elements.
+/// return a [`Result`] containing a [`Store`] with all matched elements.
 ///
 /// This is the main entry point of scah. It wires together the streaming
 /// [`XHtmlParser`], the [`QueryMultiplexer`], and the result [`Store`].
+///
+/// # Errors
+///
+/// Returns [`ParseError::EmptyQueries`] if the query slice is empty.
+/// At least one query is required.
 ///
 /// # Parameters
 ///
@@ -135,11 +166,6 @@ pub use store::{Element, ElementId, Store};
 ///   resulting [`Store`] borrow directly from this string (zero-copy).
 /// - `queries`: A slice of compiled [`Query`] objects. Each query is
 ///   executed concurrently against the same token stream in a single pass.
-///
-/// # Returns
-///
-/// A [`Store`] containing all matched elements. Use [`Store::get`] with the
-/// original selector string to retrieve results for a specific query.
 ///
 /// # Example
 ///
@@ -150,7 +176,7 @@ pub use store::{Element, ElementId, Store};
 /// let queries = &[Query::all("a", Save::all())
 ///     .expect("valid selector")
 ///     .build()];
-/// let store = parse(html, queries);
+/// let store = parse(html, queries).expect("parse succeeds");
 ///
 /// let links: Vec<_> = store.get("a").unwrap().collect();
 /// assert_eq!(links.len(), 1);
@@ -159,13 +185,18 @@ pub use store::{Element, ElementId, Store};
 pub fn parse<'a: 'query, 'html: 'query, 'query: 'html, Q>(
     html: &'html str,
     queries: &'a [Q],
-) -> Store<'html, 'query>
+) -> Result<Store<'html, 'query>, ParseError>
 where
     Q: QuerySpec<'query>,
 {
-    let selectors = QueryMultiplexer::new(queries);
+    if queries.is_empty() {
+        return Err(ParseError::EmptyQueries);
+    }
 
     let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
+
+    let selectors = QueryMultiplexer::new(queries);
+
     let mut parser = if no_extra_allocations {
         XHtmlParser::new(selectors)
     } else {
@@ -176,5 +207,139 @@ where
     parser.trace_parse_started(html.len(), queries.len());
     while parser.next(&mut reader) {}
 
-    parser.finish()
+    Ok(parser.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_query_slice_returns_error() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries: &[Query] = &[];
+
+        let result = parse(html, queries);
+
+        assert!(matches!(result, Err(ParseError::EmptyQueries)));
+    }
+
+    #[test]
+    fn non_empty_query_slice_succeeds() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries = &[Query::all("a", Save::all())
+            .expect("valid selector")
+            .build()];
+
+        let store = parse(html, queries).expect("parse succeeds");
+
+        assert_eq!(store.get("a").unwrap().count(), 1);
+    }
+
+    #[test]
+    fn parse_first_query_skips_full_document_preallocation() {
+        let filler = "<span class=\"filler\"></span>".repeat(10_000);
+        let html_len = filler.len();
+        let html = format!("<div id=\"hit\"></div>{}", filler);
+
+        let query = Query::first("#hit", Save::none()).unwrap().build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        // Early-exit path uses XHtmlParser::new → Store::default()
+        // which creates empty arenas. After parsing one match, capacity
+        // should be driven by Vec growth (~4-8), not the full document
+        // length (capacity path would reserve html_len / 48 ≈ 5k+).
+        let capacity_path_reservation = html_len / 48;
+        assert!(
+            store.elements.capacity() < capacity_path_reservation,
+            "early-exit parse capacity ({}) must be far below full-document reservation ({})",
+            store.elements.capacity(),
+            capacity_path_reservation,
+        );
+        assert!(
+            store.attributes.capacity() < html_len / 24,
+            "early-exit parse must not preallocate attribute arena"
+        );
+
+        // Results must still be correct.
+        let hits: Vec<_> = store.get("#hit").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "div");
+    }
+
+    #[test]
+    fn parse_all_query_uses_capacity_preallocation_path() {
+        let html = format!(
+            "<div id=\"hit\"></div>{}",
+            "<span class=\"filler\"></span>".repeat(5_000)
+        );
+
+        let query = Query::all("#hit", Save::none()).unwrap().build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        // .all() queries don't have exit_at_section_end → uses capacity path.
+        assert!(
+            store.elements.capacity() > 0,
+            "non-early-exit parse must preallocate element arena"
+        );
+
+        // Text content should NOT be reserved when Save::none().
+        assert_eq!(
+            store.text_content.content.capacity(),
+            0,
+            "capacity path with Save::none must skip text buffer preallocation"
+        );
+    }
+
+    #[test]
+    fn parse_with_save_text_content_reserves_text_buffer() {
+        let html = "<div>text content here</div>".repeat(5_000);
+
+        let query = Query::all("div", Save::only_text_content())
+            .unwrap()
+            .build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        // Text content should be preallocated when saving text content.
+        assert!(
+            store.text_content.content.capacity() > 0,
+            "text buffer must be preallocated when queries need text content"
+        );
+    }
+
+    #[test]
+    fn parse_first_early_exit_still_captures_text_when_needed() {
+        let html = "<div id=\"hit\">important text</div>".to_string()
+            + &"<span>filler</span>".repeat(1_000);
+
+        let query = Query::first("#hit", Save::only_text_content())
+            .unwrap()
+            .build();
+        let queries = &[query];
+        let store = parse(&html, queries).unwrap();
+
+        let hits: Vec<_> = store.get("#hit").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text_content(&store), Some("important text"));
+
+        // Early-exit with XHtmlParser::new uses Store::default() with no
+        // preallocation, but matches are still recorded correctly.
+    }
+
+    #[test]
+    fn element_attribute_lookup_is_case_insensitive_for_html_attributes() {
+        let html = "<a HREF='x'></a>";
+        let queries = &[Query::all("a", Save::all())
+            .expect("valid selector")
+            .build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let a = store.get("a").unwrap().next().unwrap();
+
+        assert_eq!(a.attribute(&store, "href"), Some("x"));
+        assert_eq!(a.attribute(&store, "HREF"), Some("x"));
+        assert_eq!(a.attribute(&store, "Href"), Some("x"));
+    }
 }

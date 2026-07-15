@@ -77,7 +77,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -772,7 +772,7 @@ checksum = "507460a910eb7b32ee961886ff48539633b788a36b65692b95f225b844c82553"
 [[package]]
 name = "lexbor_css"
 version = "0.0.1"
-source = "git+https://github.com/zacharyvmm/lexbor-rust-css-selection.git#0a6b0294a5d23eb32af848413de7f361aa1cb07b"
+source = "git+https://github.com/zacharyvmm/lexbor_css.git?rev=d6aa234648c6d1883c3563431b62688a109e3142#d6aa234648c6d1883c3563431b62688a109e3142"
 dependencies = [
  "bindgen",
 ]
@@ -1529,7 +1529,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "rlibxml"
 version = "0.1.1"
-source = "git+https://github.com/zacharyvmm/rlibxml.git#c75a5abe523408dc2793fe8d345120b85e35e6f4"
+source = "git+https://github.com/zacharyvmm/rlibxml.git#b6f7de0f78fcc85283cd32545508a44b180f9c58"
 dependencies = [
  "bindgen",
  "pkg-config",

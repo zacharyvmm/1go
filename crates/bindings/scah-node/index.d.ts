@@ -13,7 +13,9 @@ export declare class Element {
 }
 export type JsElement = Element
 
-export declare class JsQuery {}
+export declare class JsQuery {
+
+}
 
 export declare class Query {
   static all(selector: string, save?: Save | undefined | null): QueryBuilder

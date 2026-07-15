@@ -3,7 +3,8 @@ use super::string_search::AttributeSelectionKind;
 
 impl<'a> AttributeSelection<'a> {
     pub fn matches_attribute(&self, other: &Attribute<'_>) -> bool {
-        if self.name != other.key {
+        // Attribute names are case-insensitive in HTML.
+        if !self.name.eq_ignore_ascii_case(other.key) {
             return false;
         }
 
@@ -16,6 +17,21 @@ impl<'a> AttributeSelection<'a> {
         }
 
         self.kind.find(self.value.unwrap(), other.value.unwrap())
+    }
+
+    /// Match this selector against a value routed through one of the
+    /// dedicated element fields (`id` / `class`), which are stored separately
+    /// from the generic attribute list. A missing field never matches.
+    fn matches_field(&self, field: Option<&str>) -> bool {
+        let Some(value) = field else {
+            return false;
+        };
+
+        if self.value.is_none() || self.kind == AttributeSelectionKind::Presence {
+            return true;
+        }
+
+        self.kind.find(self.value.unwrap(), value)
     }
 }
 
@@ -58,7 +74,7 @@ impl<'a> ElementPredicate<'a> {
 
     pub fn matches_element<'b, E: IElement<'b>>(&self, other: &E) -> bool {
         if let Some(name) = self.name
-            && name != other.name()
+            && !name.eq_ignore_ascii_case(other.name())
         {
             return false;
         }
@@ -78,10 +94,29 @@ impl<'a> ElementPredicate<'a> {
         }
 
         self.attributes.as_slice().iter().all(|selector_attribute| {
-            other
-                .attributes()
-                .iter()
-                .any(|xhtml_attribute| selector_attribute.matches_attribute(xhtml_attribute))
+            // `id` and `class` live in dedicated element fields, not the
+            // generic attribute list, so route `[id]`/`[class]` selectors
+            // there. Attribute names are case-insensitive in HTML. A rare
+            // valueless `id`/`class` that landed in the attribute list is
+            // still matched via the fallback scan.
+            if selector_attribute.name.eq_ignore_ascii_case("id") {
+                selector_attribute.matches_field(other.id())
+                    || other
+                        .attributes()
+                        .iter()
+                        .any(|attribute| selector_attribute.matches_attribute(attribute))
+            } else if selector_attribute.name.eq_ignore_ascii_case("class") {
+                selector_attribute.matches_field(other.class())
+                    || other
+                        .attributes()
+                        .iter()
+                        .any(|attribute| selector_attribute.matches_attribute(attribute))
+            } else {
+                other
+                    .attributes()
+                    .iter()
+                    .any(|xhtml_attribute| selector_attribute.matches_attribute(xhtml_attribute))
+            }
         })
     }
 }

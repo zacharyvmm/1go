@@ -53,7 +53,7 @@ fn trace_records_open_and_save_events() {
     let query = Query::all("main section a", Save::all()).unwrap().build();
     let queries = [query];
 
-    let store = parse(html, &queries);
+    let store = parse(html, &queries).unwrap();
 
     assert!(!store.trace.is_empty());
     assert!(
@@ -79,7 +79,7 @@ fn trace_records_implied_li_close() {
     let query = Query::all("li", Save::all()).unwrap().build();
     let queries = [query];
 
-    let store = parse(html, &queries);
+    let store = parse(html, &queries).unwrap();
 
     assert!(store.trace.events().iter().any(|event| {
         matches!(
@@ -100,7 +100,7 @@ fn trace_records_first_query_early_exit() {
     let query = Query::first("a", Save::all()).unwrap().build();
     let queries = [query];
 
-    let store = parse(html, &queries);
+    let store = parse(html, &queries).unwrap();
 
     assert!(
         store
@@ -118,7 +118,7 @@ fn trace_records_transition_rejections() {
     let query = Query::all("main > a", Save::all()).unwrap().build();
     let queries = [query];
 
-    let store = parse(html, &queries);
+    let store = parse(html, &queries).unwrap();
 
     assert!(store.trace.events().iter().any(|event| {
         matches!(
@@ -137,7 +137,7 @@ fn test_html_page() {
     let selection_tree = Query::all("main > section#id", Save::all()).unwrap();
 
     let queries = &[selection_tree.build()];
-    let store = parse(HTML, queries);
+    let store = parse(HTML, queries).unwrap();
     let list = store.get("main > section#id").unwrap().collect::<Vec<_>>();
 
     assert_eq!(list.len(), 2);
@@ -180,7 +180,7 @@ fn test_html_page() {
 #[test]
 fn test_html_page_all_anchor_tag_selection() {
     let queries = &[Query::all("a", Save::all()).unwrap().build()];
-    let store = parse(HTML, queries);
+    let store = parse(HTML, queries).unwrap();
     println!("Store: {:#?}", store);
 
     let list = store.get("a").unwrap().collect::<Vec<_>>();
@@ -192,7 +192,7 @@ fn test_html_page_all_anchor_tag_selection() {
 #[test]
 fn test_html_page_first_anchor_tag_selection() {
     let queries = &[Query::first("a", Save::all()).unwrap().build()];
-    let store = parse(HTML, queries);
+    let store = parse(HTML, queries).unwrap();
     let mut children = store.get("a").unwrap();
 
     let a = children.next().unwrap();
@@ -218,7 +218,7 @@ fn test_html_page_first_anchor_tag_selection() {
 #[test]
 fn test_html_page_all_anchor_tag_starting_with_link_selection() {
     let queries = &[Query::all("a[href^=link]", Save::all()).unwrap().build()];
-    let store = parse(HTML, queries);
+    let store = parse(HTML, queries).unwrap();
     let list = store.get("a[href^=link]").unwrap();
 
     assert_eq!(list.count(), 3);
@@ -230,7 +230,7 @@ fn test_html_page_children_valid_anchor_tags_in_main() {
         .unwrap()
         .build()];
 
-    let store = parse(HTML, queries);
+    let store = parse(HTML, queries).unwrap();
     let list = store.get("main > section > a[href]").unwrap();
 
     assert_eq!(list.count(), 5);
@@ -241,7 +241,7 @@ fn test_html_page_single_main() {
     let queries = &[Query::all("main.red-background > section#id", Save::all())
         .unwrap()
         .build()];
-    let store = parse(HTML, queries);
+    let store = parse(HTML, queries).unwrap();
     let list = store.get("main.red-background > section#id").unwrap();
 
     assert_eq!(list.count(), 1);
@@ -265,7 +265,7 @@ fn test_html_multi_selection() {
         .build();
 
     let q = &[query];
-    let store = parse(HTML, q);
+    let store = parse(HTML, q).unwrap();
     let list = store.get("main > section").unwrap();
 
     println!("List: {:#?}", list.collect::<Vec<_>>());
@@ -292,8 +292,8 @@ fn test_macro_static_query() {
 
     let static_queries = [static_query];
     let runtime_queries = [runtime_query];
-    let static_store = parse(HTML, &static_queries);
-    let runtime_store = parse(HTML, &runtime_queries);
+    let static_store = parse(HTML, &static_queries).unwrap();
+    let runtime_store = parse(HTML, &runtime_queries).unwrap();
     let count = |store: &scah::Store<'_, '_>, selector| {
         store.get(selector).map(|items| items.count()).unwrap_or(0)
     };
@@ -371,8 +371,8 @@ fn test_macro_query_matches_runtime_store_contents() {
 
     let static_queries = [static_query];
     let runtime_queries = [runtime_query];
-    let static_store = parse(HTML, &static_queries);
-    let runtime_store = parse(HTML, &runtime_queries);
+    let static_store = parse(HTML, &static_queries).unwrap();
+    let runtime_store = parse(HTML, &runtime_queries).unwrap();
 
     type Content = Vec<(String, Option<String>, Option<String>, Option<String>)>;
 

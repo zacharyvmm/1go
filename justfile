@@ -7,7 +7,7 @@ build: build-rust build-node build-python
 build-rust:
     cargo build --release
 build-node:
-    cd crates/bindings/scah-node && bun run build
+    cd crates/bindings/scah-node && bun install && bun run build
 build-python:
     cd crates/bindings/scah-python && cargo run --bin stub_gen && uvx maturin build --release
 

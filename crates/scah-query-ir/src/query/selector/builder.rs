@@ -143,6 +143,7 @@ impl<'query> AttributeSelection<'query> {
 
         let mut opened_quote: Option<QuoteKind> = None;
         let mut equal = false;
+        let mut operator_requires_equal = false;
 
         let mut kv = KeyValueAttributeSelection {
             name: None,
@@ -151,6 +152,16 @@ impl<'query> AttributeSelection<'query> {
         };
 
         while let Some(token) = SelectionAttributeToken::next(reader)? {
+            // A match operator (`~`, `|`, `^`, `$`, `*`) must be immediately
+            // followed by `=`. Anything else (`[class~]`, `[id^]`, ...) is a
+            // malformed selector.
+            if operator_requires_equal && !matches!(token, SelectionAttributeToken::Equal) {
+                return Err(SelectorParseError::new(
+                    "attribute match operator requires '='",
+                    reader.get_position(),
+                ));
+            }
+
             match token {
                 SelectionAttributeToken::Quote(kind) => {
                     if opened_quote.is_none() {
@@ -184,9 +195,11 @@ impl<'query> AttributeSelection<'query> {
 
                 SelectionAttributeToken::StringMatchSelector(equal_selector) => {
                     kv.selection_kind = equal_selector;
+                    operator_requires_equal = true;
                 }
 
                 SelectionAttributeToken::Equal => {
+                    operator_requires_equal = false;
                     if kv.name.is_none() {
                         return Err(SelectorParseError::new(
                             "attribute selector is missing a key",
@@ -208,6 +221,13 @@ impl<'query> AttributeSelection<'query> {
                     equal = true;
                 }
             }
+        }
+
+        if operator_requires_equal {
+            return Err(SelectorParseError::new(
+                "attribute match operator requires '='",
+                reader.get_position(),
+            ));
         }
 
         if kv.name.is_none() {

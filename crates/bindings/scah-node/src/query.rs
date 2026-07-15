@@ -141,8 +141,8 @@ impl JsQueryFactory {
 #[napi]
 #[derive(Clone)]
 pub struct JsQuery {
-    _tape: std::sync::Arc<Vec<u8>>,
-    pub(super) query: Query<'static>,
+    pub(crate) _tape: std::sync::Arc<Vec<u8>>,
+    pub(crate) query: Query<'static>,
 }
 
 #[napi(js_name = "Query")]

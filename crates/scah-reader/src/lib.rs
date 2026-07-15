@@ -37,6 +37,13 @@ impl<'a> Reader<'a> {
         self.source.get(self.position).copied()
     }
 
+    /// Peek at the byte `offset` positions ahead of the cursor without
+    /// advancing. Returns `None` when the position is past the end of input.
+    #[inline]
+    pub fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.source.get(self.position + offset).copied()
+    }
+
     #[inline]
     pub fn next_while_list(&mut self, characters: &[u8]) {
         let len = self.source.len();
@@ -74,6 +81,7 @@ impl<'a> Reader<'a> {
         }
     }
 
+    #[inline]
     pub fn eof(&self) -> bool {
         if self.position >= self.source.len() {
             return true;
@@ -82,6 +90,15 @@ impl<'a> Reader<'a> {
         self.source[self.position..]
             .iter()
             .all(|b| b.is_ascii_whitespace())
+    }
+
+    /// Check whether the bytes immediately before the cursor match `suffix`,
+    /// without interpreting them as UTF-8. Safe to call when the cursor sits
+    /// in the middle of a multibyte character.
+    #[inline]
+    pub fn preceding_bytes_eq(&self, suffix: &[u8]) -> bool {
+        let position = self.position;
+        position >= suffix.len() && &self.source[position - suffix.len()..position] == suffix
     }
 
     pub fn match_ignore_case(&self, s: &str) -> bool {
@@ -154,5 +171,48 @@ mod tests {
         assert_eq!(reader.next(), Some(b'd'));
 
         assert_eq!(reader.slice(0..5), "Hello");
+    }
+
+    #[test]
+    fn next_until_stops_at_delimiter() {
+        let mut reader = Reader::new("abc<def");
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 3);
+        assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    #[test]
+    fn next_until_moves_to_end_when_delimiter_is_absent() {
+        let mut reader = Reader::new("abcdef");
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 6);
+        assert_eq!(reader.peek(), None);
+    }
+
+    #[test]
+    fn next_until_does_not_advance_when_delimiter_is_current() {
+        let mut reader = Reader::new("<abcdef");
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 0);
+        assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    #[test]
+    fn next_until_handles_long_spans() {
+        let mut input = "a".repeat(16 * 1024);
+        input.push('<');
+        input.push_str("tail");
+        let mut reader = Reader::new(&input);
+
+        reader.next_until(b'<');
+
+        assert_eq!(reader.get_position(), 16 * 1024);
+        assert_eq!(reader.peek(), Some(b'<'));
     }
 }

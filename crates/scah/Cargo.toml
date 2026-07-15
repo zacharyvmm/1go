@@ -24,6 +24,7 @@ tracing = { version = "0.1", optional = true }
 
 [features]
 default = []
+bench-internals = []
 otel = ["dep:tracing"]
 
 [dev-dependencies]

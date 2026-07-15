@@ -1,5 +1,6 @@
 use super::tokenizer::ElementAttributeToken;
 use crate::Reader;
+use crate::html::tag::TagFlags;
 use scah_query_ir::{Attribute, IElement};
 
 /// A key-value pair representing an HTML element attribute.
@@ -16,7 +17,7 @@ use scah_query_ir::{Attribute, IElement};
 /// let queries = &[Query::all("a", Save::all())
 ///     .expect("valid selector")
 ///     .build()];
-/// let store = parse(html, queries);
+/// let store = parse(html, queries).expect("parse succeeds");
 ///
 /// let a = store.get("a").unwrap().next().unwrap();
 /// let attrs = a.attributes(&store).unwrap();
@@ -56,9 +57,15 @@ impl<'html> XHtmlElement<'html> {
     ) {
         if self.name.is_empty() && attribute.value.is_none() {
             self.name = attribute.key;
-        } else if self.class.is_none() && attribute.key == "class" && attribute.value.is_some() {
+        } else if self.class.is_none()
+            && attribute.key.eq_ignore_ascii_case("class")
+            && attribute.value.is_some()
+        {
             self.class = attribute.value;
-        } else if self.id.is_none() && attribute.key == "id" && attribute.value.is_some() {
+        } else if self.id.is_none()
+            && attribute.key.eq_ignore_ascii_case("id")
+            && attribute.value.is_some()
+        {
             self.id = attribute.value;
         } else {
             attribute_tape.push(attribute);
@@ -66,30 +73,12 @@ impl<'html> XHtmlElement<'html> {
     }
 
     pub fn is_self_closing(&self) -> bool {
-        if matches!(
-            self.name,
-            "area"
-                | "base"
-                | "br"
-                | "col"
-                | "embed"
-                | "hr"
-                | "img"
-                | "input"
-                | "link"
-                | "meta"
-                | "param"
-                | "source"
-                | "track"
-                | "wbr"
-        ) {
-            return true;
-        }
-        if let Some(last_attribute) = self.attributes.last() {
-            return last_attribute.key == "\\";
-        }
-
-        false
+        // HTML void elements are always self-closing, with or without a
+        // trailing `/`. In HTML mode a trailing `/` on a non-void element is
+        // ignored (it does not make the element self-closing), so tag name is
+        // the only signal here. The trailing solidus is stripped during
+        // tokenization and never reaches the attribute list.
+        TagFlags::classify(self.name).is_void()
     }
 
     pub fn clear(&mut self) {
@@ -119,11 +108,16 @@ impl<'html> XHtmlElement<'html> {
         let mut key = None;
         let start_len = attribute_tape.len();
 
-        while let Some(token) = ElementAttributeToken::next(reader) {
+        // Pass `assign` so the tokenizer knows whether the next token is an
+        // unquoted attribute *value* (immediately after `=`), where a trailing
+        // `/` is a literal character rather than a self-closing marker.
+        while let Some(token) = ElementAttributeToken::next(reader, assign) {
             match token {
                 ElementAttributeToken::String(string_value) => match key {
                     None => {
-                        debug_assert!(!assign);
+                        // A dangling `=` with no pending key (malformed input
+                        // such as `key=a=b`) is ignored rather than panicking.
+                        assign = false;
                         key = Some(string_value);
                     }
                     Some(k) => {
@@ -200,7 +194,7 @@ impl<'html> IElement<'html> for XHtmlElement<'html> {
 // TODO: Parse the closing tag for the XHtmlTag
 impl<'a> XHtmlTag<'a> {
     pub fn from(reader: &mut Reader<'a>) -> Option<Self> {
-        reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', b'<']);
+        reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', 0x0C, b'<']);
         if let Some(character) = reader.peek() {
             if character == b'/' {
                 let start = reader.get_position() + 1;
@@ -215,13 +209,55 @@ impl<'a> XHtmlTag<'a> {
 
                 return Some(Self::Close(reader.slice(start..end).trim()));
             } else if character == b'!' {
-                // This is a comment
-                reader.next_until(b'>');
-                reader.skip();
+                reader.skip(); // consume '!'
+                if reader.match_ignore_case("--") {
+                    reader.skip();
+                    reader.skip();
+                    skip_html_comment(reader);
+                } else {
+                    // DOCTYPE, CDATA, or bogus comment: terminates at the
+                    // first `>`.
+                    reader.next_until(b'>');
+                    reader.skip();
+                }
                 return None;
             }
         }
         Some(Self::Open)
+    }
+}
+
+/// Consume an HTML comment after the opening `<!--` has already been read.
+///
+/// Handles the abrupt-close forms `<!-->` and `<!--->`, the `--!>` end
+/// sequence, and comments containing bare `>` characters. An unterminated
+/// comment simply stops at end of input instead of panicking or swallowing
+/// the remainder of the document past a stray `>`.
+fn skip_html_comment(reader: &mut Reader<'_>) {
+    // Abrupt closes immediately after `<!--`.
+    if reader.peek() == Some(b'>') {
+        reader.skip();
+        return;
+    }
+    if reader.match_ignore_case("->") {
+        reader.skip();
+        reader.skip();
+        return;
+    }
+
+    loop {
+        reader.next_until(b'>');
+        if reader.peek().is_none() {
+            // Unterminated comment at EOF.
+            return;
+        }
+
+        let closed = reader.preceding_bytes_eq(b"--") || reader.preceding_bytes_eq(b"--!");
+        reader.skip(); // consume the '>'
+
+        if closed {
+            return;
+        }
     }
 }
 

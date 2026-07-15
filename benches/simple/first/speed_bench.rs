@@ -50,7 +50,7 @@ fn bench_comparison(c: &mut Criterion) {
                     .expect("simple bench selector should parse")
                     .build()];
 
-                let store = parse(&html, queries);
+                let store = parse(html, queries).unwrap();
 
                 let element = store.get(QUERY).unwrap().next().unwrap();
 
@@ -89,10 +89,10 @@ fn bench_comparison(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("lexbor", size), &content, |b, html| {
             b.iter(|| {
-                let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+                let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
                 let nodes = doc.select(QUERY);
 
-                let node = nodes.iter().next().unwrap();
+                let node = nodes.first().unwrap();
                 // TODO: I need to add attributes and innerhtml for lexbor
                 black_box(node.text_content());
                 black_box(node.inner_html());

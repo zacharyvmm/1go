@@ -1,13 +1,21 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
+use super::tag::TagFlags;
 use crate::QuerySpec;
 use crate::Reader;
 use crate::XHtmlElement;
 use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
-use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer};
+use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
 use crate::store::Store;
+
+#[derive(Default)]
+struct ParserTempState<'html> {
+    closing_elements: Vec<OpenElement<'html>>,
+    implied_closes: Vec<OpenElement<'html>>,
+    save_hits: Vec<SaveHit>,
+}
 
 pub struct XHtmlParser<'html, 'query, Q> {
     position: DocumentPosition,
@@ -15,8 +23,21 @@ pub struct XHtmlParser<'html, 'query, Q> {
     store: Store<'html, 'query>,
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
-    in_script: bool,
+    temp_state: ParserTempState<'html>,
+    capture_text_content: bool,
+    raw_text_close: Option<&'static str>,
     eof_drained: bool,
+}
+
+/// A raw-text end tag is only "appropriate" when the tag name is immediately
+/// followed by HTML whitespace, a `/`, or `>` (or end of input). This prevents
+/// a longer name such as `</styles>` from prematurely closing `<style>`.
+#[inline]
+fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
+    matches!(
+        byte,
+        None | Some(b' ' | b'\t' | b'\n' | 0x0C | b'\r' | b'/' | b'>')
+    )
 }
 
 impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
@@ -24,39 +45,53 @@ where
     Q: QuerySpec<'query>,
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
+        let capture_text_content = selectors.requires_text_content();
         Self {
             position: DocumentPosition {
                 element_depth: 0,
                 reader_position: 0, // for inner_html
                 text_content_position: usize::MAX,
+                self_closing: false,
             },
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
-            in_script: false,
+            temp_state: ParserTempState::default(),
+            capture_text_content,
+            raw_text_close: None,
             eof_drained: false,
             store: Store::default(),
         }
     }
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
+        let capture_text_content = selectors.requires_text_content();
         Self {
             position: DocumentPosition {
                 element_depth: 0,
                 reader_position: 0, // for inner_html
                 text_content_position: usize::MAX,
+                self_closing: false,
             },
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
-            in_script: false,
+            temp_state: ParserTempState::default(),
+            capture_text_content,
+            raw_text_close: None,
             eof_drained: false,
-            store: Store::with_capacity(capacity),
+            store: Store::with_capacity_options(
+                capacity,
+                crate::CapacityOptions {
+                    reserve_text_content: capture_text_content,
+                    ..crate::CapacityOptions::default()
+                },
+            ),
         }
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
-        if self.in_script {
+        if let Some(close_tag) = self.raw_text_close {
             loop {
                 reader.next_until(b'<');
                 if reader.peek().is_none() {
@@ -64,15 +99,37 @@ where
                     return false;
                 }
 
-                if reader.match_ignore_case("</script>") {
-                    if self.store.text_content.text_start.is_some()
+                // `close_tag` is the `</name` prefix. It is only the real end
+                // tag when the name is followed by an appropriate terminator
+                // (HTML whitespace, `/`, or `>`), so `</styles>` does not close
+                // `<style>` and `</style >` does. Consume an appropriate raw
+                // end tag here instead of delegating to `XHtmlTag::from`: that
+                // parser intentionally keeps text after `/` as part of the
+                // closing tag name, which would leave `<style>` open for a
+                // tolerated form such as `</style ignored>`.
+                if reader.match_ignore_case(close_tag)
+                    && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
+                {
+                    if self.capture_text_content
+                        && self.store.text_content.text_start.is_some()
                         && let Some(position) =
                             self.store.text_content.push(reader, reader.get_position())
                     {
                         self.position.text_content_position = position;
                     }
-                    self.in_script = false;
-                    break;
+                    self.raw_text_close = None;
+
+                    self.position.reader_position = reader.get_position();
+                    reader.next_until(b'>');
+                    reader.skip();
+
+                    if self.capture_text_content {
+                        self.store.text_content.set_start(reader.get_position());
+                    }
+
+                    let closing_tag = &close_tag[2..];
+                    let early_exit = self.handle_close_tag(closing_tag, reader);
+                    return !early_exit && !reader.eof();
                 } else {
                     reader.skip();
                 }
@@ -95,7 +152,8 @@ where
                 tag = XHtmlTag::from(reader);
                 if let Some(XHtmlTag::Open) = tag {
                     self.element.from(reader, &mut self.store.attributes);
-                } else if tag.is_none()
+                } else if self.capture_text_content
+                    && tag.is_none()
                     && self.store.text_content.text_start.is_some()
                     && let Some(position) = self
                         .store
@@ -111,7 +169,8 @@ where
         };
         let tag_start_position = self.position.reader_position;
 
-        if self.store.text_content.text_start.is_some()
+        if self.capture_text_content
+            && self.store.text_content.text_start.is_some()
             && let Some(position) = self
                 .store
                 .text_content
@@ -120,7 +179,9 @@ where
             self.position.text_content_position = position;
         }
 
-        self.store.text_content.set_start(reader.get_position());
+        if self.capture_text_content {
+            self.store.text_content.set_start(reader.get_position());
+        }
 
         // TODO: register the start
         //reader.next_while(|c| c.is_whitespace());
@@ -128,25 +189,24 @@ where
 
         match tag {
             XHtmlTag::Open => {
-                if self.element.name.eq_ignore_ascii_case("script") {
-                    self.in_script = true;
+                let tag = TagFlags::classify(self.element.name);
+
+                if let Some(close_tag) = tag.raw_text_close_tag() {
+                    self.raw_text_close = Some(close_tag);
                 }
 
                 self.position.reader_position = tag_start_position;
-                let implied_closes = self.open_elements.prepare_for_open(self.element.name);
-                self.pop_open_elements(
-                    implied_closes,
-                    reader,
-                    Some(ImpliedCloseReason::OpenTagRule),
-                    None,
-                );
+                self.open_elements
+                    .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
+                self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
                 self.position.reader_position = reader.get_position();
 
-                let is_self_closing = self.element.is_self_closing();
+                let is_self_closing = tag.is_void();
+                self.position.self_closing = is_self_closing;
                 if is_self_closing {
                     self.position.element_depth = self.open_elements.depth().saturating_add(1);
                 } else {
-                    self.open_elements.push(self.element.name);
+                    self.open_elements.push_classified(self.element.name, tag);
                     self.position.element_depth = self.open_elements.depth();
                 }
 
@@ -160,11 +220,14 @@ where
                     }
                 );
 
-                let save_hits = self
-                    .selectors
-                    .next(&self.element, &self.position, &mut self.store);
+                self.selectors.next_into(
+                    &self.element,
+                    &self.position,
+                    &mut self.store,
+                    &mut self.temp_state.save_hits,
+                );
                 if !is_self_closing {
-                    for save_hit in save_hits {
+                    for save_hit in &self.temp_state.save_hits {
                         self.open_elements.attach_saved(
                             save_hit.element_id,
                             save_hit
@@ -180,22 +243,7 @@ where
                 self.element.clear();
             }
             XHtmlTag::Close(closing_tag) => {
-                crate::scah_trace!(
-                    self.store,
-                    TraceEvent::CloseTag {
-                        tag: closing_tag,
-                        depth: self.position.element_depth,
-                        reader_position: self.position.reader_position,
-                    }
-                );
-
-                let closing_elements = self.open_elements.close_by_end_tag(closing_tag);
-                early_exit = self.pop_open_elements(
-                    closing_elements,
-                    reader,
-                    Some(ImpliedCloseReason::MismatchedEndTag),
-                    Some(closing_tag),
-                ) || early_exit;
+                early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
             }
         }
 
@@ -247,18 +295,20 @@ where
             .back(open_element.name, &self.position, reader, &mut self.store)
     }
 
-    fn pop_open_elements(
+    /// Drain the implied-closes vector, finalizing each element, and restore
+    /// the vector's capacity for reuse. Returns `true` on early exit.
+    fn drain_implied_closes(
         &mut self,
-        open_elements: Vec<OpenElement<'html>>,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
         expected_tag: Option<&'html str>,
     ) -> bool {
         let base_depth = self.open_elements.depth();
-        let total = open_elements.len();
+        let mut elems = std::mem::take(&mut self.temp_state.implied_closes);
+        let total = elems.len();
         let mut early_exit = false;
 
-        for (index, open_element) in open_elements.into_iter().enumerate() {
+        for (index, open_element) in elems.drain(..).enumerate() {
             let close_depth =
                 base_depth.saturating_add((total - index) as crate::engine::DepthSize);
             if implied_close_reason.is_some_and(|_| {
@@ -277,6 +327,62 @@ where
             early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
         }
 
+        self.temp_state.implied_closes = elems;
+        early_exit
+    }
+
+    /// Apply a close tag: trace, pop from the open-element stack, and run
+    /// the close-element path. Returns `true` on early exit.
+    fn handle_close_tag(&mut self, closing_tag: &'html str, reader: &Reader<'html>) -> bool {
+        crate::scah_trace!(
+            self.store,
+            TraceEvent::CloseTag {
+                tag: closing_tag,
+                depth: self.position.element_depth,
+                reader_position: self.position.reader_position,
+            }
+        );
+
+        self.open_elements
+            .close_by_end_tag_into(closing_tag, &mut self.temp_state.closing_elements);
+        self.pop_closing_elements(
+            reader,
+            Some(ImpliedCloseReason::MismatchedEndTag),
+            Some(closing_tag),
+        )
+    }
+
+    fn pop_closing_elements(
+        &mut self,
+        reader: &Reader<'html>,
+        implied_close_reason: Option<ImpliedCloseReason>,
+        expected_tag: Option<&'html str>,
+    ) -> bool {
+        let base_depth = self.open_elements.depth();
+        let mut closing_elements = std::mem::take(&mut self.temp_state.closing_elements);
+        let total = closing_elements.len();
+        let mut early_exit = false;
+
+        for (index, open_element) in closing_elements.drain(..).enumerate() {
+            let close_depth =
+                base_depth.saturating_add((total - index) as crate::engine::DepthSize);
+            if implied_close_reason.is_some_and(|_| {
+                expected_tag
+                    .is_none_or(|expected| !open_element.name.eq_ignore_ascii_case(expected))
+            }) {
+                crate::scah_trace!(
+                    self.store,
+                    TraceEvent::ImpliedClose {
+                        tag: open_element.name,
+                        depth: close_depth,
+                        reason: implied_close_reason.unwrap(),
+                    }
+                );
+            }
+            early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
+        }
+
+        self.temp_state.closing_elements = closing_elements;
         early_exit
     }
 
@@ -287,13 +393,14 @@ where
                 .map(|start_idx| reader.slice(start_idx..self.position.reader_position));
 
             let text_content = saved.text_content_start.and_then(|start_idx| {
+                // `get_position()` asserts the buffer is non-empty, so guard
+                // empty/whitespace-only elements here to avoid a panic.
+                if self.store.text_content.is_empty() {
+                    return None;
+                }
                 let end = self.store.text_content.get_position();
                 if start_idx == usize::MAX {
-                    if self.store.text_content.is_empty() {
-                        None
-                    } else {
-                        Some(0..end)
-                    }
+                    Some(0..end)
                 } else if start_idx == end {
                     None
                 } else {
@@ -311,14 +418,16 @@ where
             return;
         }
 
-        if self.store.text_content.text_start.is_some()
+        if self.capture_text_content
+            && self.store.text_content.text_start.is_some()
             && let Some(position) = self.store.text_content.push(reader, reader.get_position())
         {
             self.position.text_content_position = position;
         }
         self.position.reader_position = reader.get_position();
-        let remaining = self.open_elements.close_all_at_eof();
-        self.pop_open_elements(remaining, reader, Some(ImpliedCloseReason::EofDrain), None);
+        self.open_elements
+            .close_all_at_eof_into(&mut self.temp_state.implied_closes);
+        self.drain_implied_closes(reader, Some(ImpliedCloseReason::EofDrain), None);
         self.eof_drained = true;
     }
 }
@@ -330,7 +439,7 @@ mod tests {
     use crate::Attribute;
     use crate::engine::multiplexer::QueryMultiplexer;
     use crate::store::Element;
-    use crate::{Query, Reader, Save};
+    use crate::{Query, Reader, Save, parse};
     use pretty_assertions::assert_eq;
 
     const BASIC_HTML: &str = r#"
@@ -381,7 +490,7 @@ mod tests {
     fn test_text_content() {
         let mut reader = Reader::new(BASIC_HTML);
 
-        let queries = &[Query::all("p.indent > .bold", Save::none())
+        let queries = &[Query::all("p.indent > .bold", Save::only_text_content())
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(queries);
@@ -429,6 +538,44 @@ mod tests {
             parser.store.text_content.content,
             b"Hello World My name is Zachary "
         );
+    }
+
+    #[test]
+    fn test_text_content_buffer_is_empty_when_queries_do_not_request_text() {
+        let html = "<div><a href='x'>Hello <b>World</b></a></div>";
+        let mut reader = Reader::new(html);
+        let queries = &[Query::all("a", Save::only_inner_html()).unwrap().build()];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        while parser.next(&mut reader) {}
+
+        let store = parser.matches();
+        let anchor = store.get("a").unwrap().next().unwrap();
+        assert_eq!(anchor.inner_html, Some("Hello <b>World</b>"));
+        assert_eq!(anchor.text_content(&store), None);
+        assert!(store.text_content.content.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_queries_keep_text_content_available_when_any_query_requests_it() {
+        let html = "<div><a href='x'>Hello <b>World</b></a></div>";
+        let mut reader = Reader::new(html);
+        let queries = &[
+            Query::all("a", Save::only_inner_html()).unwrap().build(),
+            Query::all("b", Save::only_text_content()).unwrap().build(),
+        ];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        while parser.next(&mut reader) {}
+
+        let store = parser.matches();
+        let anchor = store.get("a").unwrap().next().unwrap();
+        let bold = store.get("b").unwrap().next().unwrap();
+        assert_eq!(anchor.inner_html, Some("Hello <b>World</b>"));
+        assert_eq!(anchor.text_content(&store), None);
+        assert_eq!(bold.text_content(&store), Some("World"));
     }
 
     #[test]
@@ -1088,6 +1235,30 @@ mod tests {
         assert_eq!(div.text_content(&store), Some("Hello"));
     }
 
+    #[test]
+    fn save_none_does_not_accumulate_text_content() {
+        let queries = &[Query::all("a", Save::none()).unwrap().build()];
+        let store = parse("<div><a>Hello <b>World</b></a></div>", queries).unwrap();
+
+        let anchor = store.get("a").unwrap().next().unwrap();
+        assert_eq!(anchor.text_content(&store), None);
+        assert_eq!(store.text_content.len(), 0);
+    }
+
+    #[test]
+    fn mixed_save_queries_keep_text_content_for_text_query() {
+        let queries = &[
+            Query::all("a", Save::none()).unwrap().build(),
+            Query::all("b", Save::only_text_content()).unwrap().build(),
+        ];
+        let store = parse("<a>Hello <b>World</b></a>", queries).unwrap();
+
+        let anchor = store.get("a").unwrap().next().unwrap();
+        let bold = store.get("b").unwrap().next().unwrap();
+        assert_eq!(anchor.text_content(&store), None);
+        assert_eq!(bold.text_content(&store), Some("World"));
+    }
+
     const SINGLE_PRODUCT_HTML: &str = r#"
     <section id="products">
         <div class="product">
@@ -1132,16 +1303,10 @@ mod tests {
 
         assert_eq!(
             store.attributes.deref().clone(),
-            vec![
-                Attribute {
-                    key: "src",
-                    value: Some("https://example.com/p1.png")
-                },
-                Attribute {
-                    key: "/",
-                    value: None
-                }
-            ]
+            vec![Attribute {
+                key: "src",
+                value: Some("https://example.com/p1.png")
+            }]
         );
 
         let products_sections: Vec<&Element> = store.get("#products").unwrap().collect();
@@ -1235,16 +1400,8 @@ mod tests {
                     value: Some("https://example.com/p1.png")
                 },
                 Attribute {
-                    key: "/",
-                    value: None
-                },
-                Attribute {
                     key: "src",
                     value: Some("https://example.com/p2.png")
-                },
-                Attribute {
-                    key: "/",
-                    value: None
                 },
             ]
         );
@@ -1302,5 +1459,29 @@ mod tests {
         assert_eq!(p2_p.name, "p");
         assert!(p2_p.inner_html.is_some());
         assert!(p2_p.text_content(&store).is_some());
+    }
+
+    // --- parse() Result tests ---
+
+    #[test]
+    fn empty_query_list_returns_error() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries: Vec<Query> = Vec::new();
+
+        let result = parse(html, &queries);
+
+        assert!(matches!(result, Err(crate::ParseError::EmptyQueries)));
+    }
+
+    #[test]
+    fn non_empty_query_list_still_parses() {
+        let html = "<main><a href='x'>x</a></main>";
+        let queries = &[Query::all("a", Save::all())
+            .expect("valid selector")
+            .build()];
+
+        let store = parse(html, queries).expect("parse succeeds");
+
+        assert_eq!(store.get("a").unwrap().count(), 1);
     }
 }

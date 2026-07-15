@@ -27,7 +27,7 @@ fn bench_scah(html: String) {
         .expect("simple bench selector should parse")
         .build()];
 
-    let store = parse(&html, queries);
+    let store = parse(&html, queries).unwrap();
 
     for element in store.get(QUERY).unwrap() {
         black_box(&element.attributes(&store));
@@ -79,7 +79,7 @@ use lexbor_css::HtmlDocument;
 #[library_benchmark]
 #[bench::lexbor(setup_html())]
 fn bench_lexbor(html: String) {
-    let doc = HtmlDocument::new(html.as_str()).expect("Failed to parse HTML");
+    let doc = HtmlDocument::parse(html.as_str()).expect("Failed to parse HTML");
     let nodes = doc.select(QUERY);
     let iterator = nodes.iter();
 

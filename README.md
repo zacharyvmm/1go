@@ -35,7 +35,7 @@ let queries = &[
         .expect("valid selector")
         .build()
 ];
-let store = parse(html, queries);
+let store = parse(html, queries).expect("parse succeeds");
 
 for a in store.get("a[href]").unwrap() {
     let href = a.attribute(&store, "href").unwrap();
@@ -66,7 +66,7 @@ let query = Query::all("main > section", Save::all())
     .build();
 
 let queries = [query];
-let store = parse(html, &queries);
+let store = parse(html, &queries).expect("parse succeeds");
 
 // Access nested results through parent elements
 for section in store.get("main > section").unwrap() {
@@ -104,7 +104,7 @@ let query = query! {
     }
 };
 let queries = [query]; 
-let store = parse(html, &queries);
+let store = parse(html, &queries).expect("parse succeeds");
 let articles = store.get("article").unwrap();
 assert_eq!(articles.len(), 1);
 for article in articles {
