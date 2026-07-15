@@ -348,4 +348,39 @@ mod tests {
 
         assert_eq!(error.message(), "illegal selector token");
     }
+
+    #[test]
+    fn child_combinator_without_spaces_parses() {
+        let mut reader = Reader::new("main>section");
+        let result = Lexer::try_next(&mut reader, false);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn child_combinator_with_left_space_only_parses() {
+        let mut reader = Reader::new("main >section");
+        let result = Lexer::try_next(&mut reader, false);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn child_combinator_with_right_space_only_parses() {
+        let mut reader = Reader::new("main> section");
+        let result = Lexer::try_next(&mut reader, false);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn newline_descendant_combinator_parses() {
+        let mut reader = Reader::new("main\nsection");
+        let result = Lexer::try_next(&mut reader, false);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
+
+    #[test]
+    fn tab_descendant_combinator_parses() {
+        let mut reader = Reader::new("main\tsection");
+        let result = Lexer::try_next(&mut reader, false);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
 }

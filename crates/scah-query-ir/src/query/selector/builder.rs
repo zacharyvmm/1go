@@ -114,13 +114,22 @@ struct KeyValueAttributeSelection<'query> {
 }
 
 impl<'query> KeyValueAttributeSelection<'query> {
-    fn push(&mut self, content_inside_quotes: &'query str) {
+    fn push(
+        &mut self,
+        content_inside_quotes: &'query str,
+        position: usize,
+    ) -> Result<(), SelectorParseError> {
         if self.name.is_none() {
             self.name = Some(content_inside_quotes);
+            Ok(())
         } else if self.value.is_none() {
             self.value = Some(content_inside_quotes);
+            Ok(())
         } else {
-            unreachable!();
+            Err(SelectorParseError::new(
+                "attribute selector has too many tokens",
+                position,
+            ))
         }
     }
 
@@ -189,7 +198,7 @@ impl<'query> AttributeSelection<'query> {
                     let end_position = reader.get_position() - SIZE_OF_QUOTE;
                     let content_inside_quotes = reader.slice(position..end_position);
 
-                    kv.push(content_inside_quotes);
+                    kv.push(content_inside_quotes, reader.get_position())?;
                 }
 
                 SelectionAttributeToken::String(string_value) => {
@@ -197,7 +206,7 @@ impl<'query> AttributeSelection<'query> {
                         continue;
                     }
 
-                    kv.push(string_value);
+                    kv.push(string_value, reader.get_position())?;
                 }
 
                 SelectionAttributeToken::StringMatchSelector(equal_selector) => {
@@ -288,7 +297,7 @@ impl<'a> SelectionKeyWords<'a> {
         let start_pos = reader.get_position();
 
         if let Some(token) = reader.peek()
-            && matches!(token, b'>' | b' ' | b'+' | b'~' | b'|')
+            && (matches!(token, b'>' | b'+' | b'~' | b'|') || token.is_ascii_whitespace())
         {
             return None;
         }
@@ -301,7 +310,9 @@ impl<'a> SelectionKeyWords<'a> {
             b'[' => Some(Self::OpenAttribute),
             b']' => Some(Self::CloseAttribute),
             _ => {
-                reader.next_until_list(&[b' ', b'#', b'.', b'[']);
+                reader.next_until_list(&[
+                    b' ', b'\t', b'\n', b'\r', b'#', b'.', b'[', b'>', b'+', b'~', b'|',
+                ]);
                 Some(Self::String(reader.slice(start_pos..reader.get_position())))
             }
         }
@@ -426,9 +437,13 @@ impl<'a> ElementPredicate<'a> {
                             reader.get_position().saturating_sub(id_name.len()),
                         ));
                     }
-                    if element.id.is_none() {
-                        element.id = Some(*id_name);
+                    if element.id.is_some() {
+                        return Err(SelectorParseError::new(
+                            "selector has multiple IDs",
+                            reader.get_position().saturating_sub(id_name.len()),
+                        ));
                     }
+                    element.id = Some(*id_name);
                 }
                 (Some(SelectionKeyWords::Class), SelectionKeyWords::String(class_name)) => {
                     if !is_valid_selector_name(class_name) {
@@ -577,23 +592,11 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_duplicates_in_element_definition() {
+    fn test_duplicate_ids_are_rejected() {
         let mut reader = Reader::new("element#id.class[selected=true]#id#notid");
-        let element = ElementPredicate::from(&mut reader);
-
-        assert_eq!(
-            element,
-            ElementPredicate {
-                name: Some("element"),
-                id: Some("id"),
-                classes: ClassSelections::from_static(&["class"]),
-                attributes: AttributeSelections::from(vec![AttributeSelection {
-                    name: "selected",
-                    value: Some("true"),
-                    kind: AttributeSelectionKind::Exact
-                }]),
-            }
-        );
+        let result = ElementPredicate::try_from(&mut reader);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().message(), "selector has multiple IDs");
     }
 
     #[test]

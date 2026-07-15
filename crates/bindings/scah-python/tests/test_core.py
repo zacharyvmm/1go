@@ -159,3 +159,92 @@ def test_store_remains_valid_after_query_object_goes_out_of_scope():
     assert len(hits) == 1
     assert hits[0].name == "a"
     assert hits[0].get_attribute("href") == "x"
+
+# ── Regression tests for edge-case fixes ──────────────────────────────
+
+
+def test_unicode_attribute_prefix_does_not_panic():
+    """Priority 1: Unicode chars in attribute values must not panic."""
+    q = Query.all('[data-x^="e"]', Save.none()).try_build()
+    store = parse('<div id="x" data-x="éclair"></div>', [q])
+    # Should not match — "éclair" does not start with "e" (ASCII)
+    result = store.get('[data-x^="e"]') or []
+    assert list(result) == []
+
+
+def test_unicode_attribute_suffix_does_not_panic():
+    """Priority 1: Suffix match with unicode chars must not panic."""
+    q = Query.all('[data-x$="e"]', Save.none()).try_build()
+    store = parse('<div data-x="café"></div>', [q])
+
+
+def test_unicode_attribute_hyphen_does_not_panic():
+    """Priority 1: Hyphen-separated match with unicode chars must not panic."""
+    q = Query.all('[lang|="e"]', Save.none()).try_build()
+    store = parse('<div lang="é-fr"></div>', [q])
+
+
+def test_escaped_quote_in_attribute_does_not_panic():
+    """Priority 2: Escaped quotes inside attribute selectors must not panic."""
+    # Either succeeds or raises ValueError; must never panic.
+    try:
+        q = Query.all(r'[data-x="a\"b"]', Save.none()).try_build()
+    except ValueError:
+        pass  # Parse error is acceptable
+
+
+def test_build_invalid_selector_raises_value_error():
+    """Priority 3: build() must raise ValueError on invalid selectors."""
+    with pytest.raises(ValueError):
+        Query.all("!", Save.none()).build()
+
+
+@pytest.mark.parametrize("selector", [
+    '[data-x="unterminated]',
+    '[=value]',
+    '[data-x^]',
+])
+def test_invalid_selectors_raise_value_error(selector):
+    """Priority 3: Malformed selectors must raise ValueError, not panic."""
+    with pytest.raises(ValueError):
+        Query.all(selector, Save.none()).build()
+
+
+def test_child_combinator_without_spaces():
+    """Priority 4: main>section must parse and match."""
+    html = "<main><section id='s1'></section></main>"
+    q = Query.all("main>section", Save.none()).try_build()
+    store = parse(html, [q])
+    result = store.get("main>section") or []
+    assert len(list(result)) == 1
+    assert list(result)[0].id == "s1"
+
+
+def test_child_combinator_whitespace_variants():
+    """Priority 4: Combinator whitespace variants must all parse."""
+    html = "<main><section id='s1'></section></main>"
+    for selector in ["main> section", "main >section", "main\nsection", "main\tsection"]:
+        q = Query.all(selector, Save.none()).try_build()
+        store = parse(html, [q])
+        result = store.get(selector) or []
+        assert len(list(result)) == 1, f"selector {selector!r} failed"
+
+
+def test_duplicate_ids_are_rejected():
+    """Priority 5: Duplicate IDs must raise ValueError."""
+    with pytest.raises(ValueError):
+        Query.all("#a1#a2", Save.none()).try_build()
+
+
+def test_hyphen_separated_exact_semantics():
+    """Priority 6: [lang|="en"] must not scan whitespace words."""
+    html = """
+    <div id="a" lang="en-US"></div>
+    <div id="b" lang="xx en-US"></div>
+    """
+    q = Query.all('[lang|="en"]', Save.none()).try_build()
+    store = parse(html, [q])
+    result = store.get('[lang|="en"]') or []
+    ids = [e.id for e in result]
+    assert "a" in ids
+    assert "b" not in ids

@@ -39,8 +39,8 @@ impl PyQueryBuilder {
         Ok(slf)
     }
 
-    fn build(&self) -> PyQuery {
-        self.try_build().unwrap()
+    fn build(&self) -> PyResult<PyQuery> {
+        self.try_build()
     }
 
     fn try_build(&self) -> PyResult<PyQuery> {
