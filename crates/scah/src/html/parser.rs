@@ -7,8 +7,15 @@ use crate::XHtmlElement;
 use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
-use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer};
+use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
 use crate::store::Store;
+
+#[derive(Default)]
+struct ParserTempState<'html> {
+    closing_elements: Vec<OpenElement<'html>>,
+    implied_closes: Vec<OpenElement<'html>>,
+    save_hits: Vec<SaveHit>,
+}
 
 pub struct XHtmlParser<'html, 'query, Q> {
     position: DocumentPosition,
@@ -16,9 +23,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     store: Store<'html, 'query>,
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
-    closing_elements: Vec<OpenElement<'html>>,
-    implied_closes: Vec<OpenElement<'html>>,
-    save_hits: Vec<crate::engine::multiplexer::SaveHit>,
+    temp_state: ParserTempState<'html>,
     capture_text_content: bool,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
@@ -51,9 +56,7 @@ where
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
-            closing_elements: Vec::new(),
-            implied_closes: Vec::new(),
-            save_hits: Vec::new(),
+            temp_state: ParserTempState::default(),
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
@@ -73,9 +76,7 @@ where
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
-            closing_elements: Vec::new(),
-            implied_closes: Vec::new(),
-            save_hits: Vec::new(),
+            temp_state: ParserTempState::default(),
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
@@ -196,7 +197,7 @@ where
 
                 self.position.reader_position = tag_start_position;
                 self.open_elements
-                    .prepare_for_open_into(tag, &mut self.implied_closes);
+                    .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
                 self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
                 self.position.reader_position = reader.get_position();
 
@@ -223,10 +224,10 @@ where
                     &self.element,
                     &self.position,
                     &mut self.store,
-                    &mut self.save_hits,
+                    &mut self.temp_state.save_hits,
                 );
                 if !is_self_closing {
-                    for save_hit in &self.save_hits {
+                    for save_hit in &self.temp_state.save_hits {
                         self.open_elements.attach_saved(
                             save_hit.element_id,
                             save_hit
@@ -303,7 +304,7 @@ where
         expected_tag: Option<&'html str>,
     ) -> bool {
         let base_depth = self.open_elements.depth();
-        let mut elems = std::mem::take(&mut self.implied_closes);
+        let mut elems = std::mem::take(&mut self.temp_state.implied_closes);
         let total = elems.len();
         let mut early_exit = false;
 
@@ -326,7 +327,7 @@ where
             early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
         }
 
-        self.implied_closes = elems;
+        self.temp_state.implied_closes = elems;
         early_exit
     }
 
@@ -343,7 +344,7 @@ where
         );
 
         self.open_elements
-            .close_by_end_tag_into(closing_tag, &mut self.closing_elements);
+            .close_by_end_tag_into(closing_tag, &mut self.temp_state.closing_elements);
         self.pop_closing_elements(
             reader,
             Some(ImpliedCloseReason::MismatchedEndTag),
@@ -358,7 +359,7 @@ where
         expected_tag: Option<&'html str>,
     ) -> bool {
         let base_depth = self.open_elements.depth();
-        let mut closing_elements = std::mem::take(&mut self.closing_elements);
+        let mut closing_elements = std::mem::take(&mut self.temp_state.closing_elements);
         let total = closing_elements.len();
         let mut early_exit = false;
 
@@ -381,7 +382,7 @@ where
             early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
         }
 
-        self.closing_elements = closing_elements;
+        self.temp_state.closing_elements = closing_elements;
         early_exit
     }
 
@@ -425,7 +426,7 @@ where
         }
         self.position.reader_position = reader.get_position();
         self.open_elements
-            .close_all_at_eof_into(&mut self.implied_closes);
+            .close_all_at_eof_into(&mut self.temp_state.implied_closes);
         self.drain_implied_closes(reader, Some(ImpliedCloseReason::EofDrain), None);
         self.eof_drained = true;
     }
