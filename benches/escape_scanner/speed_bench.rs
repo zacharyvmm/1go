@@ -53,9 +53,40 @@ fn production_scanner(data: &[u8], delimiter: u8, escape: u8) -> usize {
     reader.get_position()
 }
 
+/// Bytes actually examined by the scanner for a given case.
+/// For delimiter-hit cases this includes the delimiter byte itself;
+/// for unterminated cases this is the full input length.
+#[inline]
+fn bytes_scanned(case: &ScanCase) -> usize {
+    if case.expected_position < case.data.len() {
+        // The scanner reads through and including the delimiter.
+        case.expected_position + 1
+    } else {
+        // No unescaped delimiter: the entire input is examined.
+        case.data.len()
+    }
+}
+
 // ── Correctness validation ─────────────────────────────────────────────
 
 fn validate_cases(cases: &[ScanCase]) {
+    // Pre-validate throughput helper with explicit cases.
+    let stop_at_five = ScanCase {
+        name: "throughput_stop".into(),
+        data: b"hello\"xx".to_vec(),
+        delimiter: b'"',
+        expected_position: 5,
+    };
+    assert_eq!(bytes_scanned(&stop_at_five), 6);
+
+    let eof = ScanCase {
+        name: "throughput_eof".into(),
+        data: b"hello".to_vec(),
+        delimiter: b'"',
+        expected_position: 5,
+    };
+    assert_eq!(bytes_scanned(&eof), 5);
+
     for case in cases {
         let candidate = forward_parity(&case.data, case.delimiter, b'\\');
         let production = production_scanner(&case.data, case.delimiter, b'\\');
@@ -299,7 +330,7 @@ fn bench_comparison(c: &mut Criterion) {
         run: fn(&[u8], u8, u8) -> usize,
     ) {
         for case in cases {
-            group.throughput(Throughput::Bytes(case.data.len() as u64));
+            group.throughput(Throughput::Bytes(bytes_scanned(case) as u64));
             group.bench_with_input(BenchmarkId::new(algo_name, &case.name), case, |b, c| {
                 b.iter(|| {
                     let pos = run(
