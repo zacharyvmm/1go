@@ -403,3 +403,17 @@ fn test_macro_query_matches_runtime_store_contents() {
         );
     }
 }
+
+#[test]
+fn escaped_quote_in_attribute_matches() {
+    let html = r#"<a title="hello \"world\"">x</a>"#;
+    let query = Query::all(r#"a[title="hello \"world\""]"#, Save::all())
+        .unwrap()
+        .build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    assert_eq!(
+        store.get(r#"a[title="hello \"world\""]"#).unwrap().count(),
+        1
+    );
+}

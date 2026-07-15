@@ -9,6 +9,7 @@ pub enum ElementAttributeToken<'a> {
 const DOUBLEQUOTE: u8 = b'"';
 const SINGLEQUOTE: u8 = b'\'';
 const EQUAL: u8 = b'=';
+const BACKSLASH: u8 = b'\\';
 const END_OF_ELEMENT: u8 = b'>';
 
 /// HTML whitespace: space, tab, line feed, form feed (U+000C), carriage return.
@@ -44,7 +45,7 @@ impl<'a> ElementAttributeToken<'a> {
         match reader.next()? {
             DOUBLEQUOTE => {
                 let star_position = reader.get_position();
-                reader.next_until(DOUBLEQUOTE);
+                reader.next_until_unescaped(DOUBLEQUOTE, BACKSLASH);
                 let content_inside_quotes = reader.slice(star_position..reader.get_position());
                 reader.skip();
 
@@ -52,7 +53,7 @@ impl<'a> ElementAttributeToken<'a> {
             }
             SINGLEQUOTE => {
                 let star_position = reader.get_position();
-                reader.next_until(SINGLEQUOTE);
+                reader.next_until_unescaped(SINGLEQUOTE, BACKSLASH);
                 let content_inside_quotes = reader.slice(star_position..reader.get_position());
                 reader.skip();
 

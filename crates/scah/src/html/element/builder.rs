@@ -451,7 +451,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Known issue: Escapes are not handled"]
     fn test_long_key_with_spaces_and_real_same_quote_inside() {
         let mut reader = Reader::new(r#"p "long key\"s with spaces"="value""#);
         let mut element = XHtmlElement::default();
@@ -470,7 +469,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Known issue: Escapes are not handled"]
     fn test_long_key_and_value_with_spaces_and_real_same_quote_inside() {
         let mut reader = Reader::new(
             r#"p "long key\"s with spaces"="value\"s of an other person \\\\\\ \\\\\ \ \  \"""#,
@@ -623,5 +621,65 @@ mod tests {
         let tag = XHtmlTag::from(&mut reader);
 
         assert!(tag.is_none())
+    }
+
+    #[test]
+    fn quoted_attribute_value_ignores_odd_backslash_quote() {
+        let mut reader = Reader::new(r#"p title="hello \"world\" end""#);
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+
+        element.from(&mut reader, &mut attributes);
+
+        assert_eq!(element.name, "p");
+        assert_eq!(
+            element.attributes[0],
+            Attribute {
+                key: "title",
+                value: Some(r#"hello \"world\" end"#),
+            }
+        );
+    }
+
+    #[test]
+    fn quoted_attribute_value_closes_after_even_backslashes() {
+        let mut reader = Reader::new(r#"p title="hello \\" next=value"#);
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+
+        element.from(&mut reader, &mut attributes);
+
+        assert_eq!(element.name, "p");
+        assert_eq!(
+            element.attributes[0],
+            Attribute {
+                key: "title",
+                value: Some(r#"hello \\"#),
+            }
+        );
+        assert_eq!(
+            element.attributes[1],
+            Attribute {
+                key: "next",
+                value: Some("value"),
+            }
+        );
+    }
+
+    #[test]
+    fn single_quoted_attribute_value_ignores_escaped_single_quote() {
+        let mut reader = Reader::new(r#"p title='hello \'world\' end'"#);
+        let mut element = XHtmlElement::default();
+        let mut attributes = vec![];
+
+        element.from(&mut reader, &mut attributes);
+
+        assert_eq!(
+            element.attributes[0],
+            Attribute {
+                key: "title",
+                value: Some(r#"hello \'world\' end"#),
+            }
+        );
     }
 }

@@ -176,9 +176,16 @@ impl<'query> AttributeSelection<'query> {
                         continue;
                     }
 
+                    // An escaped quote (preceded by an odd number of backslashes)
+                    // is a literal character inside the quoted value, not a closer.
+                    const SIZE_OF_QUOTE: usize = 1;
+                    let quote_position = reader.get_position() - SIZE_OF_QUOTE;
+                    if reader.is_escaped_at(quote_position, b'\\') {
+                        continue;
+                    }
+
                     opened_quote = None;
 
-                    const SIZE_OF_QUOTE: usize = 1;
                     let end_position = reader.get_position() - SIZE_OF_QUOTE;
                     let content_inside_quotes = reader.slice(position..end_position);
 
@@ -602,6 +609,19 @@ mod tests {
                 classes: ClassSelections::from_static(&["blue", "exit"]),
                 attributes: AttributeSelections::from_static(&[]),
             }
+        );
+    }
+
+    #[test]
+    fn selector_attribute_value_allows_escaped_double_quote() {
+        let mut reader = Reader::new(r#"a[title="hello \"world\""]"#);
+        let element = ElementPredicate::from(&mut reader);
+
+        assert_eq!(element.attributes.as_slice().len(), 1);
+        assert_eq!(element.attributes.as_slice()[0].name, "title");
+        assert_eq!(
+            element.attributes.as_slice()[0].value,
+            Some(r#"hello \"world\""#)
         );
     }
 }

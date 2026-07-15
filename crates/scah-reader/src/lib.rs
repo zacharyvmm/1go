@@ -75,6 +75,43 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Check whether the byte at `position` is escaped by an odd-length run
+    /// of `escape` bytes immediately before it.
+    #[inline]
+    pub fn is_escaped_at(&self, position: usize, escape: u8) -> bool {
+        let mut i = position;
+        let mut escaped = false;
+
+        while i > 0 && self.source[i - 1] == escape {
+            escaped = !escaped;
+            i -= 1;
+        }
+
+        escaped
+    }
+
+    /// Advance past characters until an unescaped `delimiter` byte, skipping
+    /// over any `delimiter` that is preceded by an odd run of `escape` bytes.
+    #[inline]
+    pub fn next_until_unescaped(&mut self, delimiter: u8, escape: u8) {
+        let len = self.source.len();
+
+        while self.position < len {
+            self.next_until(delimiter);
+
+            if self.position >= len {
+                return;
+            }
+
+            if !self.is_escaped_at(self.position, escape) {
+                return;
+            }
+
+            // Skip the escaped delimiter and continue searching.
+            self.position += 1;
+        }
+    }
+
     pub fn skip(&mut self) {
         if self.position < self.source.len() {
             self.position += 1;
