@@ -63,4 +63,4 @@ jobs:
 
       - name: Run Python tests
         working-directory: crates/bindings/scah-python
-        run: pytest
+        run: pytest tests/
