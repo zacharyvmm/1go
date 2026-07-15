@@ -60,9 +60,9 @@ pub struct Store<'html, 'query> {
 /// Advanced allocation tuning for [`Store::with_capacity_options`].
 ///
 /// Controls how the `Store` pre-allocates arena capacity from a total
-/// HTML byte-length hint.  The defaults mirror the heuristics used by
-/// [`Store::with_capacity`] and are suitable for the vast majority of
-/// workloads.
+/// HTML byte-length hint. The defaults are the optimized parser/store
+/// heuristics used by [`Store::with_capacity`] and are suitable for the
+/// vast majority of workloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityOptions {
     /// Approximate HTML bytes per reserved element slot.
@@ -78,8 +78,8 @@ pub struct CapacityOptions {
     /// Whether to reserve the text-content buffer using the full input
     /// capacity.  Set to `false` when no query needs text content.
     ///
-    /// Default: `true` (preserves the historical behaviour of
-    /// [`Store::with_capacity`]).
+    /// Default: `true`, preserving the public [`Store::with_capacity`]
+    /// behaviour of reserving text-content storage.
     pub reserve_text_content: bool,
 
     /// Maximum trace-log preallocation.  Only used behind

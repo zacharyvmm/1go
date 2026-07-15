@@ -180,3 +180,18 @@ test('Save defaults omitted object to false', () => {
   expect(span?.innerHtml).toBeNull()
   expect(span?.textContent).toBeNull()
 })
+
+test("store remains valid after query object goes out of scope", () => {
+  // Query tapes (selector strings) are owned by the query objects.
+  // This test verifies that dropping the query does not invalidate
+  // the store, because JSStore internally retains _query_tapes.
+  const store = (() => {
+    const q = Query.all("a[href]", { innerHtml: true, textContent: true }).build()
+    return parse("<a href='x'>x</a>", [q])
+  })()
+
+  const hits = store.get("a[href]")
+  expect(hits).toHaveLength(1)
+  expect(hits![0].name).toBe("a")
+  expect(hits![0].attributes).toEqual({ href: "x" })
+})
