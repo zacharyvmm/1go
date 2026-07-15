@@ -55,11 +55,11 @@ jobs:
       - name: Install test tooling
         run: |
           python -m pip install -U pip
-          python -m pip install maturin pytest
+          python -m pip install pytest
 
       - name: Build and install Python package
         working-directory: crates/bindings/scah-python
-        run: maturin develop
+        run: python -m pip install -e .
 
       - name: Run Python tests
         working-directory: crates/bindings/scah-python
