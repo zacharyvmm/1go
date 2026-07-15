@@ -428,6 +428,9 @@ mod tests {
             "a[]",
             "*",
             "a[123=\"321\"]",
+            r#"[data-x="unterminated]"#,
+            "[=value]",
+            "[data-x^]",
         ];
 
         for selector in invalid {

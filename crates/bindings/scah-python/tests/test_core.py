@@ -224,12 +224,3 @@ def test_try_build_invalid_selector_raises_value_error():
     with pytest.raises(ValueError):
         Query.all("!", Save.none()).try_build()
 
-
-@pytest.mark.parametrize("selector", [
-    '[data-x="unterminated]',
-    '[=value]',
-    '[data-x^]',
-])
-def test_invalid_selectors_raise_value_error(selector):
-    with pytest.raises(ValueError):
-        Query.all(selector, Save.none()).build()
