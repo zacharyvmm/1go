@@ -79,6 +79,10 @@ impl<'a> Reader<'a> {
     /// of `escape` bytes immediately before it.
     #[inline]
     pub fn is_escaped_at(&self, position: usize, escape: u8) -> bool {
+        if position > self.source.len() {
+            return false;
+        }
+
         let mut i = position;
         let mut escaped = false;
 
@@ -251,5 +255,95 @@ mod tests {
 
         assert_eq!(reader.get_position(), 16 * 1024);
         assert_eq!(reader.peek(), Some(b'<'));
+    }
+
+    // ── is_escaped_at ──────────────────────────────────────────
+
+    #[test]
+    fn is_escaped_at_false_without_backslash() {
+        let reader = Reader::new(r#"hello "world""#);
+        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
+
+        assert!(!reader.is_escaped_at(quote_pos, b'\\'));
+    }
+
+    #[test]
+    fn is_escaped_at_true_for_odd_backslash_run() {
+        let reader = Reader::new(r#"hello \"world""#);
+        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
+
+        assert!(reader.is_escaped_at(quote_pos, b'\\'));
+    }
+
+    #[test]
+    fn is_escaped_at_false_for_even_backslash_run() {
+        let reader = Reader::new(r#"hello \\"world""#);
+        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
+
+        assert!(!reader.is_escaped_at(quote_pos, b'\\'));
+    }
+
+    #[test]
+    fn is_escaped_at_true_for_three_backslashes() {
+        let reader = Reader::new(r#"hello \\\"world""#);
+        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
+
+        assert!(reader.is_escaped_at(quote_pos, b'\\'));
+    }
+
+    #[test]
+    fn is_escaped_at_returns_false_for_out_of_bounds_position() {
+        let reader = Reader::new("abc");
+
+        assert!(!reader.is_escaped_at(5, b'\\'));
+    }
+
+    #[test]
+    fn is_escaped_at_returns_false_at_position_zero() {
+        let reader = Reader::new(r#""hello""#);
+
+        assert!(!reader.is_escaped_at(0, b'\\'));
+    }
+
+    // ── next_until_unescaped ───────────────────────────────────
+
+    #[test]
+    fn next_until_unescaped_stops_at_unescaped_delimiter() {
+        let mut reader = Reader::new(r#"abc"def"#);
+
+        reader.next_until_unescaped(b'"', b'\\');
+
+        assert_eq!(reader.get_position(), 3);
+        assert_eq!(reader.peek(), Some(b'"'));
+    }
+
+    #[test]
+    fn next_until_unescaped_skips_escaped_delimiter() {
+        let mut reader = Reader::new(r#"abc\"def"ghi"#);
+
+        reader.next_until_unescaped(b'"', b'\\');
+
+        assert_eq!(reader.slice(0..reader.get_position()), r#"abc\"def"#);
+        assert_eq!(reader.peek(), Some(b'"'));
+    }
+
+    #[test]
+    fn next_until_unescaped_stops_after_even_backslashes() {
+        let mut reader = Reader::new(r#"abc\\"def"#);
+
+        reader.next_until_unescaped(b'"', b'\\');
+
+        assert_eq!(reader.slice(0..reader.get_position()), r#"abc\\"#);
+        assert_eq!(reader.peek(), Some(b'"'));
+    }
+
+    #[test]
+    fn next_until_unescaped_reaches_eof_without_unescaped_delimiter() {
+        let mut reader = Reader::new(r#"abc\"def"#);
+
+        reader.next_until_unescaped(b'"', b'\\');
+
+        assert_eq!(reader.get_position(), 8);
+        assert_eq!(reader.peek(), None);
     }
 }
