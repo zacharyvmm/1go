@@ -2,20 +2,35 @@
 //!
 //! Compares two algorithms for finding the next unescaped delimiter in a byte
 //! stream, as used by HTML attribute tokenization and CSS selector parsing.
+//!
+//! Forward-parity candidate retained for comparison with the production
+//! delimiter-first scanner.
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box as bb;
+use scah::Reader;
+use std::hint::black_box;
 
-// ── Algorithm implementations ───────────────────────────────────────
+// ── Benchmark case representation ─────────────────────────────────────
+
+struct ScanCase {
+    name: String,
+    data: Vec<u8>,
+    delimiter: u8,
+    /// Byte position where the scanner is expected to stop.
+    /// Equal to `data.len()` when no unescaped delimiter is present.
+    expected_position: usize,
+}
+
+// ── Algorithm implementations ──────────────────────────────────────────
 
 /// Forward-parity: scans byte-by-byte, tracking escape-run parity.
-/// This matches the current `Reader::next_until_unescaped` implementation.
+/// Retained as a benchmark-only comparison candidate.
 #[inline(never)]
 fn forward_parity(bytes: &[u8], delimiter: u8, escape: u8) -> usize {
     let mut esc_run = false;
     let len = bytes.len();
     let mut pos = 0;
     while pos < len {
-        let byte = unsafe { *bytes.get_unchecked(pos) };
+        let byte = bytes[pos];
         if byte == delimiter && !esc_run {
             return pos;
         }
@@ -29,266 +44,282 @@ fn forward_parity(bytes: &[u8], delimiter: u8, escape: u8) -> usize {
     len
 }
 
-/// Delimiter-first: find the next delimiter byte, then scan backward
-/// through the immediately preceding escape run to decide whether it
-/// is escaped. Only the escape-run scan touches the escape byte.
+/// Production delimiter-first scanner via `Reader::next_until_unescaped()`.
+/// This measures the actual shipping implementation.
 #[inline(never)]
-fn delimiter_first(bytes: &[u8], delimiter: u8, escape: u8) -> usize {
-    let len = bytes.len();
-    let mut pos = 0;
-    while pos < len {
-        // Find next delimiter
-        let slice = &bytes[pos..];
-        let delim_pos = match slice.iter().position(|&b| b == delimiter) {
-            None => return len,
-            Some(offset) => pos + offset,
-        };
-
-        // Scan backward from just before the delimiter for an escape run
-        let mut escape_count = 0u32;
-        let mut scan = delim_pos;
-        while scan > 0 && bytes[scan - 1] == escape {
-            escape_count += 1;
-            scan -= 1;
-        }
-
-        if escape_count % 2 == 0 {
-            return delim_pos;
-        }
-        pos = delim_pos + 1;
-    }
-    len
+fn production_scanner(data: &[u8], delimiter: u8, escape: u8) -> usize {
+    let mut reader = Reader::from_bytes(data);
+    reader.next_until_unescaped(delimiter, escape);
+    reader.get_position()
 }
 
-// ── Correctness smoke tests ─────────────────────────────────────────
+// ── Correctness validation ─────────────────────────────────────────────
 
-#[test]
-fn algorithms_agree_on_correctness_cases() {
-    let cases: &[(&str, u8)] = &[
-        (r#"abc"def"#, b'"'),
-        (r#"abc\"def"ghi"#, b'"'),
-        (r#"abc\\"def"#, b'"'),
-        (r#"abc\\\"def"ghi"#, b'"'),
-        (r#"abc\"def"#, b'"'),
-        (r#"\a""#, b'"'),
-        ("data:more", b':'),
-        ("hello", b'"'),
-        (r#"\\"def"#, b'"'),
-        (r#"\"def"ghi"#, b'"'),
-        (r#"hello \"world\" end"#, b'"'),
-        (r#"hello \'world\' end'"#, b'\''),
-    ];
+fn validate_cases(cases: &[ScanCase]) {
+    for case in cases {
+        let candidate = forward_parity(&case.data, case.delimiter, b'\\');
+        let production = production_scanner(&case.data, case.delimiter, b'\\');
 
-    for (input, delim) in cases {
-        let bytes = input.as_bytes();
-        let fp = forward_parity(bytes, *delim, b'\\');
-        let df = delimiter_first(bytes, *delim, b'\\');
         assert_eq!(
-            fp, df,
-            "mismatch on {input:?} (delim={delim}): fp={fp}, df={df}"
+            candidate, case.expected_position,
+            "forward_parity mismatch for {}: got {}, expected {}",
+            case.name, candidate, case.expected_position,
+        );
+        assert_eq!(
+            production, case.expected_position,
+            "production_scanner mismatch for {}: got {}, expected {}",
+            case.name, production, case.expected_position,
+        );
+        assert_eq!(
+            candidate, production,
+            "scanner mismatch for {}: fp={}, prod={}",
+            case.name, candidate, production,
         );
     }
 }
 
-// ── Input generators ─────────────────────────────────────────────────
+// ── Input generators ───────────────────────────────────────────────────
 
-fn ordinary_short() -> Vec<(&'static str, Vec<u8>)> {
+fn ordinary_short() -> Vec<ScanCase> {
     vec![
-        ("hello_8", b"hello\"xx".to_vec()),
-        ("hello-world_16", b"hello-world\"xxyy".to_vec()),
-        ("url_24", b"https://example.com\"xx".to_vec()),
-        ("button-primary_24", b"button-primary active\"x".to_vec()),
+        ScanCase {
+            name: "hello_8".into(),
+            data: b"hello\"xx".to_vec(),
+            delimiter: b'"',
+            expected_position: 5,
+        },
+        ScanCase {
+            name: "hello-world_16".into(),
+            data: b"hello-world\"xxyy".to_vec(),
+            delimiter: b'"',
+            expected_position: 11,
+        },
+        ScanCase {
+            name: "url_24".into(),
+            data: b"https://example.com\"xx".to_vec(),
+            delimiter: b'"',
+            expected_position: 19,
+        },
+        ScanCase {
+            name: "button-primary_24".into(),
+            data: b"button-primary active\"x".to_vec(),
+            delimiter: b'"',
+            expected_position: 21,
+        },
     ]
 }
 
-fn ordinary_medium() -> Vec<(String, Vec<u8>)> {
+fn ordinary_medium() -> Vec<ScanCase> {
     let sizes = [128, 256, 512];
     sizes
         .iter()
         .map(|&n| {
             let mut v = vec![b'a'; n];
+            let expected = v.len();
             v.push(b'"');
             v.push(b'x');
-            (format!("ordinary_{n}"), v)
+            ScanCase {
+                name: format!("ordinary_{n}"),
+                data: v,
+                delimiter: b'"',
+                expected_position: expected,
+            }
         })
         .collect()
 }
 
-fn ordinary_long() -> Vec<(String, Vec<u8>)> {
+fn ordinary_long() -> Vec<ScanCase> {
     let sizes = [1024, 4096, 16384];
     sizes
         .iter()
         .map(|&n| {
             let mut v = vec![b'a'; n];
+            let expected = v.len();
             v.push(b'"');
             v.push(b'x');
-            (format!("ordinary_{n}"), v)
+            ScanCase {
+                name: format!("ordinary_{n}"),
+                data: v,
+                delimiter: b'"',
+                expected_position: expected,
+            }
         })
         .collect()
 }
 
-fn one_escaped_quote() -> Vec<(&'static str, Vec<u8>)> {
+fn one_escaped_quote() -> Vec<ScanCase> {
     vec![
-        ("escaped_double", br#"hello \"world\" end"xx"#.to_vec()),
-        ("escaped_single", br#"hello \'world\' end'xx"#.to_vec()),
+        ScanCase {
+            name: "escaped_double".into(),
+            // Each \" is escaped (odd run=1); the final " is unescaped.
+            data: br#"hello \"world\" end"xx"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 19,
+        },
+        ScanCase {
+            name: "escaped_single".into(),
+            // Each \' is escaped; the final ' is unescaped.
+            data: br#"hello \'world\' end'xx"#.to_vec(),
+            delimiter: b'\'',
+            expected_position: 19,
+        },
     ]
 }
 
-fn repeated_escaped() -> Vec<(String, Vec<u8>)> {
-    // value containing many escaped delimiters
+fn repeated_escaped() -> Vec<ScanCase> {
+    // Value containing many escaped delimiters followed by one unescaped.
     let mut v = Vec::new();
     for _ in 0..50 {
         v.extend_from_slice(b"data\\\"");
     }
+    let expected = v.len();
     v.push(b'"');
     v.push(b'x');
-    vec![("repeated_escaped_50".into(), v)]
+    vec![ScanCase {
+        name: "repeated_escaped_50".into(),
+        data: v,
+        delimiter: b'"',
+        expected_position: expected,
+    }]
 }
 
-fn even_escape_runs() -> Vec<(&'static str, Vec<u8>)> {
+fn even_escape_runs() -> Vec<ScanCase> {
     vec![
-        (r"two_escapes", br#"\\"def"#.to_vec()),
-        (r"four_escapes", br#"\\\\"def"#.to_vec()),
+        ScanCase {
+            name: "two_escapes".into(),
+            // \\"def  →  \\ is even, so " closes at pos 2.
+            data: br#"\\"def"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 2,
+        },
+        ScanCase {
+            name: "four_escapes".into(),
+            // \\\\"def  →  \\\\ is even, closes at pos 4.
+            data: br#"\\\\"def"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 4,
+        },
     ]
 }
 
-fn odd_escape_runs() -> Vec<(&'static str, Vec<u8>)> {
+fn odd_escape_runs() -> Vec<ScanCase> {
     vec![
-        (r"one_escape", br#"\"def"ghi"#.to_vec()),
-        (r"three_escapes", br#"\\\"def"ghi"#.to_vec()),
+        ScanCase {
+            name: "one_escape".into(),
+            // \"def"ghi  →  \" is odd (1), skips; unescaped " at pos 5.
+            data: br#"\"def"ghi"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 5,
+        },
+        ScanCase {
+            name: "three_escapes".into(),
+            // \\\"def"ghi  →  \\\ is odd (3), skips; unescaped " at pos 7.
+            data: br#"\\\"def"ghi"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 7,
+        },
     ]
 }
 
-fn unterminated() -> Vec<(String, Vec<u8>)> {
+fn unterminated() -> Vec<ScanCase> {
     let sizes = [1024, 4096, 16384];
     sizes
         .iter()
         .map(|&n| {
             let mut v = vec![b'a'; n];
-            v.extend_from_slice(b"\\\""); // escaped quote at end, no unescaped
-            (format!("unterminated_{n}"), v)
+            // Escaped quote at end, no unescaped delimiter → runs to EOF.
+            v.extend_from_slice(b"\\\"");
+            let len = v.len();
+            ScanCase {
+                name: format!("unterminated_{n}"),
+                data: v,
+                delimiter: b'"',
+                expected_position: len,
+            }
         })
         .collect()
 }
 
-fn mixed_html_attrs() -> Vec<(&'static str, Vec<u8>)> {
+fn realistic_attribute_values() -> Vec<ScanCase> {
+    // Value-only: the scanner starts inside the attribute value, after the
+    // opening quote has been consumed. The sentinel byte after the closing
+    // quote distinguishes stop-at-delimiter from run-to-EOF.
     vec![
-        (
-            "href",
-            br#"href="https://example.com/search?q=test"x"#.to_vec(),
-        ),
-        (
-            "class",
-            br#"class="button button-primary active"x"#.to_vec(),
-        ),
-        ("title", br#"title="hello \"world\""x"#.to_vec()),
-        ("data_json", br#"data-json="{\"key\":\"value\"}"x"#.to_vec()),
+        ScanCase {
+            name: "href_url".into(),
+            data: br#"https://example.com/search?q=test"x"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 33,
+        },
+        ScanCase {
+            name: "class_list".into(),
+            data: br#"button button-primary active"x"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 28,
+        },
+        ScanCase {
+            name: "title_escaped".into(),
+            data: br#"hello \"world\""x"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 15,
+        },
+        ScanCase {
+            name: "data_json".into(),
+            data: br#"{\"key\":\"value\"}"x"#.to_vec(),
+            delimiter: b'"',
+            expected_position: 19,
+        },
     ]
 }
 
-// ── Benchmarks ──────────────────────────────────────────────────────
+// ── Benchmarks ─────────────────────────────────────────────────────────
 
 fn bench_comparison(c: &mut Criterion) {
+    // Collect all cases and validate before benchmarking.
+    let mut all_cases: Vec<ScanCase> = Vec::new();
+    all_cases.extend(ordinary_short());
+    all_cases.extend(ordinary_medium());
+    all_cases.extend(ordinary_long());
+    all_cases.extend(one_escaped_quote());
+    all_cases.extend(repeated_escaped());
+    all_cases.extend(even_escape_runs());
+    all_cases.extend(odd_escape_runs());
+    all_cases.extend(unterminated());
+    all_cases.extend(realistic_attribute_values());
+
+    validate_cases(&all_cases);
+
     let mut group = c.benchmark_group("escape_scanner");
 
-    // Ordinary short values
-    for (name, data) in ordinary_short() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
+    // Helper: benchmark one algorithm across all cases.
+    fn bench_algo(
+        group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+        algo_name: &str,
+        cases: &[ScanCase],
+        run: fn(&[u8], u8, u8) -> usize,
+    ) {
+        for case in cases {
+            group.throughput(Throughput::Bytes(case.data.len() as u64));
+            group.bench_with_input(BenchmarkId::new(algo_name, &case.name), case, |b, c| {
+                b.iter(|| {
+                    let pos = run(
+                        black_box(c.data.as_slice()),
+                        black_box(c.delimiter),
+                        black_box(b'\\'),
+                    );
+                    black_box(pos)
+                })
+            });
+        }
     }
 
-    // Ordinary medium values
-    for (name, data) in ordinary_medium() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
-
-    // Ordinary long values
-    for (name, data) in ordinary_long() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
-
-    // One escaped quote
-    for (name, data) in one_escaped_quote() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
-
-    // Repeated escaped
-    for (name, data) in repeated_escaped() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
-
-    // Even escape runs
-    for (name, data) in even_escape_runs() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
-
-    // Odd escape runs
-    for (name, data) in odd_escape_runs() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
-
-    // Unterminated
-    for (name, data) in unterminated() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
-
-    // Mixed HTML attributes
-    for (name, data) in mixed_html_attrs() {
-        group.throughput(Throughput::Bytes(data.len() as u64));
-        group.bench_with_input(BenchmarkId::new("forward_parity", &name), &data, |b, d| {
-            b.iter(|| forward_parity(bb(d), b'"', b'\\'))
-        });
-        group.bench_with_input(BenchmarkId::new("delimiter_first", &name), &data, |b, d| {
-            b.iter(|| delimiter_first(bb(d), b'"', b'\\'))
-        });
-    }
+    bench_algo(&mut group, "forward_parity", &all_cases, forward_parity);
+    bench_algo(
+        &mut group,
+        "production_delimiter_first",
+        &all_cases,
+        production_scanner,
+    );
 
     group.finish();
 }

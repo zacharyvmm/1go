@@ -267,7 +267,8 @@ mod tests {
 
     // ── next_until_unescaped ───────────────────────────────────
 
-    // Escape-run parity tracked inline: odd → escaped, even → delimiter.
+    // Delimiter-first scanning: candidate delimiters are validated by counting
+    // the immediately preceding escape run.
 
     #[test]
     fn next_until_unescaped_stops_at_unescaped_delimiter() {

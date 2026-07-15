@@ -30,6 +30,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude scah-benches -- -D warnings
       - name: Test
         run: cargo test --workspace --exclude scah-benches
+      - name: Check escape scanner benchmark
+        run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
 
   python:
     name: Python Binding Tests

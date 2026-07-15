@@ -22,9 +22,7 @@ impl<'query> Transition<'query> {
     ) -> Result<Vec<Self>, SelectorParseError> {
         let reader = &mut Reader::new(query);
         let mut states = Vec::new();
-        let mut seen_selector = false;
-        while let Some((combinator, element)) = Lexer::try_next(reader, seen_selector)? {
-            seen_selector = true;
+        while let Some((combinator, element)) = Lexer::try_next(reader)? {
             states.push(Self::new(combinator, element));
         }
 

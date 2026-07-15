@@ -84,14 +84,13 @@ impl Lexer {
     pub fn next<'query>(
         reader: &mut Reader<'query>,
     ) -> Option<(Combinator, ElementPredicate<'query>)> {
-        Self::try_next(reader, false).unwrap()
+        Self::try_next(reader).unwrap()
     }
 
     pub fn try_next<'query>(
         reader: &mut Reader<'query>,
-        seen_selector: bool,
     ) -> Result<Option<(Combinator, ElementPredicate<'query>)>, SelectorParseError> {
-        let Some(combinator) = Self::parse_combinator(reader, seen_selector)? else {
+        let Some(combinator) = Self::parse_combinator(reader)? else {
             return Ok(None);
         };
 
@@ -101,14 +100,11 @@ impl Lexer {
 
     fn parse_combinator<'query>(
         reader: &mut Reader<'query>,
-        seen_selector: bool,
     ) -> Result<Option<Combinator>, SelectorParseError> {
-        let mut saw_whitespace = false;
         while let Some(token) = reader.peek() {
             if !is_css_whitespace(token) {
                 break;
             }
-            saw_whitespace = true;
             reader.skip();
         }
 
@@ -136,7 +132,6 @@ impl Lexer {
                 "unsupported combinator '|'",
                 reader.get_position(),
             )),
-            Some(_) if saw_whitespace || !seen_selector => Ok(Some(Combinator::Descendant)),
             Some(_) => Ok(Some(Combinator::Descendant)),
         }
     }
@@ -150,13 +145,13 @@ mod tests {
     #[test]
     fn test_whitespace_only_returns_none() {
         let mut reader = Reader::new("   \n\t  ");
-        assert_eq!(Lexer::try_next(&mut reader, false).unwrap(), None);
+        assert_eq!(Lexer::try_next(&mut reader).unwrap(), None);
     }
 
     #[test]
     fn test_leading_whitespace_uses_descendant_combinator() {
         let mut reader = Reader::new("   article#main.hero");
-        let (combinator, element) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        let (combinator, element) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(combinator, Combinator::Descendant);
         assert_eq!(
@@ -204,7 +199,7 @@ mod tests {
     #[test]
     fn test_unsupported_combinator_leading_selector() {
         let mut reader = Reader::new("~ element#id.class > other#other_id.other_class");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "unsupported combinator '~'");
     }
@@ -212,7 +207,7 @@ mod tests {
     #[test]
     fn test_child_combinator_after_seen_selector() {
         let mut reader = Reader::new("> span.highlight");
-        let (combinator, element) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (combinator, element) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(combinator, Combinator::Child);
         assert_eq!(
@@ -229,7 +224,7 @@ mod tests {
     #[test]
     fn test_missing_selector_after_child_combinator() {
         let mut reader = Reader::new(">   ");
-        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "missing selector element");
     }
@@ -237,7 +232,7 @@ mod tests {
     #[test]
     fn test_unsupported_adjacent_sibling_combinator_after_selector() {
         let mut reader = Reader::new("+ a");
-        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "unsupported combinator '+'");
     }
@@ -245,7 +240,7 @@ mod tests {
     #[test]
     fn test_unsupported_namespace_combinator_after_selector() {
         let mut reader = Reader::new("| a");
-        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "unsupported combinator '|'");
     }
@@ -253,7 +248,7 @@ mod tests {
     #[test]
     fn test_illegal_character_bang() {
         let mut reader = Reader::new("!");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -261,7 +256,7 @@ mod tests {
     #[test]
     fn test_illegal_character_at() {
         let mut reader = Reader::new("@");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -269,7 +264,7 @@ mod tests {
     #[test]
     fn test_illegal_character_dollar() {
         let mut reader = Reader::new("$");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -277,7 +272,7 @@ mod tests {
     #[test]
     fn test_illegal_character_percent() {
         let mut reader = Reader::new("%");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -285,7 +280,7 @@ mod tests {
     #[test]
     fn test_illegal_character_caret() {
         let mut reader = Reader::new("^");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -293,7 +288,7 @@ mod tests {
     #[test]
     fn test_illegal_character_ampersand() {
         let mut reader = Reader::new("&");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -301,7 +296,7 @@ mod tests {
     #[test]
     fn test_illegal_character_open_paren() {
         let mut reader = Reader::new("(");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -309,7 +304,7 @@ mod tests {
     #[test]
     fn test_illegal_character_close_paren() {
         let mut reader = Reader::new(")");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -317,7 +312,7 @@ mod tests {
     #[test]
     fn test_illegal_character_question_mark() {
         let mut reader = Reader::new("?");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -325,7 +320,7 @@ mod tests {
     #[test]
     fn test_illegal_character_backtick() {
         let mut reader = Reader::new("`");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -333,7 +328,7 @@ mod tests {
     #[test]
     fn test_illegal_character_less_than() {
         let mut reader = Reader::new("<");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -341,7 +336,7 @@ mod tests {
     #[test]
     fn test_illegal_character_colon() {
         let mut reader = Reader::new(":");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -349,7 +344,7 @@ mod tests {
     #[test]
     fn test_illegal_character_semicolon() {
         let mut reader = Reader::new(";");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
 
         assert_eq!(error.message(), "illegal selector token");
     }
@@ -362,8 +357,8 @@ mod tests {
     #[test]
     fn child_combinator_without_spaces_decomposes() {
         let mut reader = Reader::new("main>section");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -371,14 +366,14 @@ mod tests {
         assert_eq!(second_guard, Combinator::Child);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn child_combinator_with_left_space_decomposes() {
         let mut reader = Reader::new("main >section");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -386,14 +381,14 @@ mod tests {
         assert_eq!(second_guard, Combinator::Child);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn child_combinator_with_right_space_decomposes() {
         let mut reader = Reader::new("main> section");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -401,14 +396,14 @@ mod tests {
         assert_eq!(second_guard, Combinator::Child);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn child_combinator_with_both_spaces_decomposes() {
         let mut reader = Reader::new("main > section");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -416,7 +411,7 @@ mod tests {
         assert_eq!(second_guard, Combinator::Child);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     // ── Descendant combinator whitespace ────────────────────────
@@ -424,8 +419,8 @@ mod tests {
     #[test]
     fn space_descendant_combinator_decomposes() {
         let mut reader = Reader::new("main section");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -433,14 +428,14 @@ mod tests {
         assert_eq!(second_guard, Combinator::Descendant);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn tab_descendant_combinator_decomposes() {
         let mut reader = Reader::new("main\tsection");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -448,14 +443,14 @@ mod tests {
         assert_eq!(second_guard, Combinator::Descendant);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn newline_descendant_combinator_decomposes() {
         let mut reader = Reader::new("main\nsection");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -463,14 +458,14 @@ mod tests {
         assert_eq!(second_guard, Combinator::Descendant);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn carriage_return_descendant_combinator_decomposes() {
         let mut reader = Reader::new("main\rsection");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -478,14 +473,14 @@ mod tests {
         assert_eq!(second_guard, Combinator::Descendant);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn form_feed_descendant_combinator_decomposes() {
         let mut reader = Reader::new("main\u{000C}section");
-        let (first_guard, first) = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        let (second_guard, second) = Lexer::try_next(&mut reader, true).unwrap().unwrap();
+        let (first_guard, first) = Lexer::try_next(&mut reader).unwrap().unwrap();
+        let (second_guard, second) = Lexer::try_next(&mut reader).unwrap().unwrap();
 
         assert_eq!(first_guard, Combinator::Descendant);
         assert_eq!(first.name, Some("main"));
@@ -493,7 +488,7 @@ mod tests {
         assert_eq!(second_guard, Combinator::Descendant);
         assert_eq!(second.name, Some("section"));
 
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
@@ -502,7 +497,7 @@ mod tests {
         // descendant combinator. The parser must reject it as an illegal token
         // rather than treating it as ordinary whitespace.
         let mut reader = Reader::new("main\u{000B}section");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
         assert_eq!(error.message(), "illegal selector token");
     }
 
@@ -512,9 +507,9 @@ mod tests {
     #[test]
     fn trailing_vertical_tab_after_css_whitespace_is_rejected() {
         let mut reader = Reader::new("main \u{000B}");
-        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        let first = Lexer::try_next(&mut reader).unwrap().unwrap();
         assert_eq!(first.1.name, Some("main"));
-        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
         assert_eq!(error.message(), "illegal selector token");
     }
 
@@ -522,7 +517,7 @@ mod tests {
     #[test]
     fn vertical_tab_alone_is_rejected() {
         let mut reader = Reader::new("\u{000B}");
-        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
         assert_eq!(error.message(), "illegal selector token");
     }
 
@@ -530,27 +525,27 @@ mod tests {
     #[test]
     fn tab_vertical_tab_not_treated_as_css_whitespace() {
         let mut reader = Reader::new("main\t\u{000B}");
-        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        let first = Lexer::try_next(&mut reader).unwrap().unwrap();
         assert_eq!(first.1.name, Some("main"));
-        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
         assert_eq!(error.message(), "illegal selector token");
     }
 
     #[test]
     fn newline_vertical_tab_not_treated_as_css_whitespace() {
         let mut reader = Reader::new("main\n\u{000B}");
-        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        let first = Lexer::try_next(&mut reader).unwrap().unwrap();
         assert_eq!(first.1.name, Some("main"));
-        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
         assert_eq!(error.message(), "illegal selector token");
     }
 
     #[test]
     fn form_feed_vertical_tab_not_treated_as_css_whitespace() {
         let mut reader = Reader::new("main\u{000C}\u{000B}");
-        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        let first = Lexer::try_next(&mut reader).unwrap().unwrap();
         assert_eq!(first.1.name, Some("main"));
-        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        let error = Lexer::try_next(&mut reader).unwrap_err();
         assert_eq!(error.message(), "illegal selector token");
     }
 
@@ -558,36 +553,36 @@ mod tests {
     #[test]
     fn space_trailing_whitespace_terminates() {
         let mut reader = Reader::new("main ");
-        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        let _ = Lexer::try_next(&mut reader).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn tab_trailing_whitespace_terminates() {
         let mut reader = Reader::new("main\t");
-        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        let _ = Lexer::try_next(&mut reader).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn newline_trailing_whitespace_terminates() {
         let mut reader = Reader::new("main\n");
-        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        let _ = Lexer::try_next(&mut reader).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn carriage_return_trailing_whitespace_terminates() {
         let mut reader = Reader::new("main\r");
-        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        let _ = Lexer::try_next(&mut reader).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     #[test]
     fn form_feed_trailing_whitespace_terminates() {
         let mut reader = Reader::new("main\u{000C}");
-        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
-        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+        let _ = Lexer::try_next(&mut reader).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader).unwrap().is_none());
     }
 
     // ── Combinator::try_from tests ────────────────────────────────

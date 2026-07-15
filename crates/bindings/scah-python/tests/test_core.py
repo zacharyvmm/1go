@@ -109,6 +109,6 @@ def test_build_invalid_selector_raises_value_error():
         Query.all("!", Save.none()).build()
 
 
-def test_try_build_invalid_selector_raises_value_error():
-    with pytest.raises(ValueError):
-        Query.all("!", Save.none()).try_build()
+def test_query_builder_does_not_expose_try_build():
+    builder = Query.all("a", Save.none())
+    assert not hasattr(builder, "try_build")
