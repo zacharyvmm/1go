@@ -121,7 +121,7 @@ impl<'query> KeyValueAttributeSelection<'query> {
             Ok(())
         } else {
             Err(SelectorParseError::new(
-                "attribute selector has too many tokens",
+                "attribute selector already has a value; it cannot write another to it",
                 position,
             ))
         }
