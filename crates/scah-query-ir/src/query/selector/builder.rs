@@ -1,3 +1,4 @@
+use super::is_css_whitespace;
 use super::string_search::AttributeSelectionKind;
 use crate::Reader;
 use crate::query::compiler::SelectorParseError;
@@ -121,7 +122,7 @@ impl<'query> KeyValueAttributeSelection<'query> {
             Ok(())
         } else {
             Err(SelectorParseError::new(
-                "attribute selector already has a value; it cannot write another to it",
+                "attribute selector has multiple values",
                 position,
             ))
         }
@@ -247,9 +248,8 @@ enum SelectionKeyWords<'query> {
 impl<'a> SelectionKeyWords<'a> {
     pub fn next(reader: &mut Reader<'a>) -> Option<Self> {
         let start_pos = reader.get_position();
-
         if let Some(token) = reader.peek()
-            && (matches!(token, b'>' | b'+' | b'~' | b'|') || token.is_ascii_whitespace())
+            && (matches!(token, b'>' | b'+' | b'~' | b'|') || is_css_whitespace(token))
         {
             return None;
         }
@@ -280,7 +280,12 @@ enum SelectionAttributeToken<'a> {
 
 impl<'a> SelectionAttributeToken<'a> {
     pub fn next(reader: &mut Reader<'a>) -> Result<Option<Self>, SelectorParseError> {
-        reader.next_while(b' ');
+        while let Some(b) = reader.peek() {
+            if !is_css_whitespace(b) {
+                break;
+            }
+            reader.skip();
+        }
 
         let start_pos = reader.get_position();
 
@@ -326,7 +331,8 @@ impl<'a> SelectionAttributeToken<'a> {
             b']' => None,
             _ => {
                 reader.next_until_list(&[
-                    b' ', b'"', b'\'', b'=', b']', b'~', b'|', b'^', b'$', b'*',
+                    b' ', b'\t', b'\n', b'\r', 0x0C, b'"', b'\'', b'=', b']', b'~', b'|', b'^',
+                    b'$', b'*',
                 ]);
                 Some(Self::String(reader.slice(start_pos..reader.get_position())))
             }
@@ -639,10 +645,60 @@ mod tests {
         assert_eq!(attr.value, Some("https://example.com/search?q=test"));
     }
 
+    // ── CSS whitespace around attribute selector operators ──────
+
     #[test]
-    fn form_feed_descendant_combinator_parses() {
-        let mut reader = Reader::new("main\u{000C}section");
+    fn attribute_selector_with_tab_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\t=\t\"value\"]");
         let element = ElementPredicate::from(&mut reader);
-        assert_eq!(element.name, Some("main"));
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_with_newline_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\n=\n\"value\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_with_cr_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\r=\r\"value\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_with_form_feed_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\u{000C}=\u{000C}\"value\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_unquoted_value_with_css_whitespace_around_operator_parses() {
+        // Unquoted value with tab around `=`.
+        let mut reader = Reader::new("[data-x\t=\tvalue]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn whitespace_inside_quoted_attribute_value_is_preserved() {
+        let mut reader = Reader::new("[data-x=\"a   b\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("a   b"));
     }
 }

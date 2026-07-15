@@ -75,43 +75,32 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Check whether the byte at `position` is escaped by an odd-length run
-    /// of `escape` bytes immediately before it.
-    #[inline]
-    pub fn is_escaped_at(&self, position: usize, escape: u8) -> bool {
-        if position > self.source.len() {
-            return false;
-        }
-
-        let mut i = position;
-        let mut escaped = false;
-
-        while i > 0 && self.source[i - 1] == escape {
-            escaped = !escaped;
-            i -= 1;
-        }
-
-        escaped
-    }
-
     /// Advance past characters until an unescaped `delimiter` byte, skipping
     /// over any `delimiter` that is preceded by an odd run of `escape` bytes.
+    ///
+    /// Odd-length escape runs escape the delimiter; even-length runs do not.
+    /// Any non-escape byte resets the escape-run parity.
+    ///
+    /// On return the cursor sits at the unescaped delimiter, or at
+    /// `source.len()` if no unescaped delimiter was found.
     #[inline]
     pub fn next_until_unescaped(&mut self, delimiter: u8, escape: u8) {
+        let mut esc_run = false;
         let len = self.source.len();
 
         while self.position < len {
-            self.next_until(delimiter);
+            let byte = self.source[self.position];
 
-            if self.position >= len {
+            if byte == delimiter && !esc_run {
                 return;
             }
 
-            if !self.is_escaped_at(self.position, escape) {
-                return;
+            if byte == escape {
+                esc_run = !esc_run;
+            } else {
+                esc_run = false;
             }
 
-            // Skip the escaped delimiter and continue searching.
             self.position += 1;
         }
     }
@@ -257,55 +246,9 @@ mod tests {
         assert_eq!(reader.peek(), Some(b'<'));
     }
 
-    // ── is_escaped_at ──────────────────────────────────────────
-
-    #[test]
-    fn is_escaped_at_false_without_backslash() {
-        let reader = Reader::new(r#"hello "world""#);
-        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
-
-        assert!(!reader.is_escaped_at(quote_pos, b'\\'));
-    }
-
-    #[test]
-    fn is_escaped_at_true_for_odd_backslash_run() {
-        let reader = Reader::new(r#"hello \"world""#);
-        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
-
-        assert!(reader.is_escaped_at(quote_pos, b'\\'));
-    }
-
-    #[test]
-    fn is_escaped_at_false_for_even_backslash_run() {
-        let reader = Reader::new(r#"hello \\"world""#);
-        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
-
-        assert!(!reader.is_escaped_at(quote_pos, b'\\'));
-    }
-
-    #[test]
-    fn is_escaped_at_true_for_three_backslashes() {
-        let reader = Reader::new(r#"hello \\\"world""#);
-        let quote_pos = reader.source.iter().position(|&b| b == b'"').unwrap();
-
-        assert!(reader.is_escaped_at(quote_pos, b'\\'));
-    }
-
-    #[test]
-    fn is_escaped_at_returns_false_for_out_of_bounds_position() {
-        let reader = Reader::new("abc");
-
-        assert!(!reader.is_escaped_at(5, b'\\'));
-    }
-
-    #[test]
-    fn is_escaped_at_returns_false_at_position_zero() {
-        let reader = Reader::new(r#""hello""#);
-
-        assert!(!reader.is_escaped_at(0, b'\\'));
-    }
-
     // ── next_until_unescaped ───────────────────────────────────
+
+    // Escape-run parity tracked inline: odd → escaped, even → delimiter.
 
     #[test]
     fn next_until_unescaped_stops_at_unescaped_delimiter() {
@@ -318,17 +261,21 @@ mod tests {
     }
 
     #[test]
-    fn next_until_unescaped_skips_escaped_delimiter() {
+    fn next_until_unescaped_skips_odd_escape_run() {
+        // abc\"def"ghi  →  \" is an odd run, so the first quote is escaped;
+        // the later quote at position 10 is unescaped.
         let mut reader = Reader::new(r#"abc\"def"ghi"#);
 
         reader.next_until_unescaped(b'"', b'\\');
 
+        // Content before the unescaped quote includes the escaped quote.
         assert_eq!(reader.slice(0..reader.get_position()), r#"abc\"def"#);
         assert_eq!(reader.peek(), Some(b'"'));
     }
 
     #[test]
-    fn next_until_unescaped_stops_after_even_backslashes() {
+    fn next_until_unescaped_stops_after_even_escape_run() {
+        // abc\\"def  →  \\ is even, so the quote closes.
         let mut reader = Reader::new(r#"abc\\"def"#);
 
         reader.next_until_unescaped(b'"', b'\\');
@@ -338,12 +285,46 @@ mod tests {
     }
 
     #[test]
-    fn next_until_unescaped_reaches_eof_without_unescaped_delimiter() {
+    fn next_until_unescaped_skips_triple_escape_run() {
+        // abc\\\"def"ghi  →  \\\ is odd (3), so the first quote (pos 6) is
+        // escaped; the second quote at position 10 is unescaped.
+        let mut reader = Reader::new(r#"abc\\\"def"ghi"#);
+
+        reader.next_until_unescaped(b'"', b'\\');
+
+        assert_eq!(reader.get_position(), 10);
+        assert_eq!(reader.peek(), Some(b'"'));
+    }
+
+    #[test]
+    fn next_until_unescaped_reaches_eof_when_only_delimiter_is_escaped() {
+        // abc\"def  →  only quote is escaped; no unescaped quote exists.
         let mut reader = Reader::new(r#"abc\"def"#);
 
         reader.next_until_unescaped(b'"', b'\\');
 
         assert_eq!(reader.get_position(), 8);
         assert_eq!(reader.peek(), None);
+    }
+
+    #[test]
+    fn next_until_unescaped_non_escape_byte_resets_parity() {
+        // \a"  →  \ sets parity true, a resets it false, " closes.
+        let mut reader = Reader::new(r#"\a""#);
+
+        reader.next_until_unescaped(b'"', b'\\');
+
+        assert_eq!(reader.get_position(), 2);
+        assert_eq!(reader.peek(), Some(b'"'));
+    }
+
+    #[test]
+    fn next_until_unescaped_delimiter_without_escape_byte() {
+        // No escape bytes at all — stops at first delimiter.
+        let mut reader = Reader::new("data:more");
+        reader.next_until_unescaped(b':', b'\\');
+
+        assert_eq!(reader.get_position(), 4);
+        assert_eq!(reader.peek(), Some(b':'));
     }
 }
