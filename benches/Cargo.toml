@@ -78,3 +78,8 @@ harness = false
 name = "speed_bench_tag_classification"
 path = "tag_classification/speed_bench.rs"
 harness = false
+
+[[bench]]
+name = "speed_bench_escape_scanner"
+path = "escape_scanner/speed_bench.rs"
+harness = false

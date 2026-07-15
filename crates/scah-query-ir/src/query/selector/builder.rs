@@ -3,6 +3,20 @@ use super::string_search::AttributeSelectionKind;
 use crate::Reader;
 use crate::query::compiler::SelectorParseError;
 
+#[inline]
+fn is_element_selector_boundary(byte: u8) -> bool {
+    is_css_whitespace(byte) || matches!(byte, b'#' | b'.' | b'[' | b'>' | b'+' | b'~' | b'|')
+}
+
+#[inline]
+fn is_attribute_selector_boundary(byte: u8) -> bool {
+    is_css_whitespace(byte)
+        || matches!(
+            byte,
+            b'"' | b'\'' | b'=' | b']' | b'~' | b'|' | b'^' | b'$' | b'*'
+        )
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Attribute<'html> {
     pub key: &'html str,
@@ -244,7 +258,6 @@ enum SelectionKeyWords<'query> {
     OpenAttribute,
     CloseAttribute,
 }
-
 impl<'a> SelectionKeyWords<'a> {
     pub fn next(reader: &mut Reader<'a>) -> Option<Self> {
         let start_pos = reader.get_position();
@@ -262,9 +275,12 @@ impl<'a> SelectionKeyWords<'a> {
             b'[' => Some(Self::OpenAttribute),
             b']' => Some(Self::CloseAttribute),
             _ => {
-                reader.next_until_list(&[
-                    b' ', b'\t', b'\n', b'\r', 0x0C, b'#', b'.', b'[', b'>', b'+', b'~', b'|',
-                ]);
+                while let Some(byte) = reader.peek() {
+                    if is_element_selector_boundary(byte) {
+                        break;
+                    }
+                    reader.skip();
+                }
                 Some(Self::String(reader.slice(start_pos..reader.get_position())))
             }
         }
@@ -330,10 +346,12 @@ impl<'a> SelectionAttributeToken<'a> {
             b'*' => Some(Self::StringMatchSelector(AttributeSelectionKind::Substring)),
             b']' => None,
             _ => {
-                reader.next_until_list(&[
-                    b' ', b'\t', b'\n', b'\r', 0x0C, b'"', b'\'', b'=', b']', b'~', b'|', b'^',
-                    b'$', b'*',
-                ]);
+                while let Some(byte) = reader.peek() {
+                    if is_attribute_selector_boundary(byte) {
+                        break;
+                    }
+                    reader.skip();
+                }
                 Some(Self::String(reader.slice(start_pos..reader.get_position())))
             }
         })

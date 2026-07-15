@@ -78,6 +78,11 @@ impl<'a> Reader<'a> {
     /// Advance past characters until an unescaped `delimiter` byte, skipping
     /// over any `delimiter` that is preceded by an odd run of `escape` bytes.
     ///
+    /// Uses a delimiter-first strategy: find the next delimiter, then scan
+    /// backward through the immediately preceding escape run to decide
+    /// whether it is escaped. This avoids per-byte escape-parity tracking
+    /// on the hot path, which matters for ordinary (no-backslash) values.
+    ///
     /// Odd-length escape runs escape the delimiter; even-length runs do not.
     /// Any non-escape byte resets the escape-run parity.
     ///
@@ -85,23 +90,37 @@ impl<'a> Reader<'a> {
     /// `source.len()` if no unescaped delimiter was found.
     #[inline]
     pub fn next_until_unescaped(&mut self, delimiter: u8, escape: u8) {
-        let mut esc_run = false;
         let len = self.source.len();
 
         while self.position < len {
-            let byte = self.source[self.position];
+            // Find the next delimiter byte
+            let slice = &self.source[self.position..];
+            match slice.iter().position(|&b| b == delimiter) {
+                None => {
+                    self.position = len;
+                    return;
+                }
+                Some(offset) => {
+                    let candidate = self.position + offset;
 
-            if byte == delimiter && !esc_run {
-                return;
+                    // Count consecutive escape bytes immediately before the delimiter
+                    let mut esc_count = 0usize;
+                    let mut scan = candidate;
+                    while scan > 0 && self.source[scan - 1] == escape {
+                        esc_count += 1;
+                        scan -= 1;
+                    }
+
+                    if esc_count.is_multiple_of(2) {
+                        // Even run: delimiter is unescaped
+                        self.position = candidate;
+                        return;
+                    }
+
+                    // Odd run: delimiter is escaped; skip past it and continue
+                    self.position = candidate + 1;
+                }
             }
-
-            if byte == escape {
-                esc_run = !esc_run;
-            } else {
-                esc_run = false;
-            }
-
-            self.position += 1;
         }
     }
 

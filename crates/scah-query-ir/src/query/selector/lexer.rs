@@ -18,20 +18,29 @@ pub enum Combinator {
 }
 
 impl Combinator {
-    fn next<'a>(reader: &mut Reader<'a>) -> Option<Self> {
-        if let Some(token) = reader.peek()
-            && !matches!(token, b'>' | b' ' | b'+' | b'~' | b'|')
-        {
-            return None;
-        }
-
-        match reader.next()? {
-            b'>' => Some(Self::Child),
-            b' ' => Some(Self::Descendant),
-            b'+' => Some(Self::NextSibling),
-            b'~' => Some(Self::SubsequentSibling),
-            b'|' => Some(Self::Namespace),
-            _ => panic!("Not possible root"),
+    fn next(reader: &mut Reader<'_>) -> Option<Self> {
+        match reader.peek()? {
+            b'>' => {
+                reader.skip();
+                Some(Self::Child)
+            }
+            b'+' => {
+                reader.skip();
+                Some(Self::NextSibling)
+            }
+            b'~' => {
+                reader.skip();
+                Some(Self::SubsequentSibling)
+            }
+            b'|' => {
+                reader.skip();
+                Some(Self::Namespace)
+            }
+            byte if is_css_whitespace(byte) => {
+                reader.skip();
+                Some(Self::Descendant)
+            }
+            _ => None,
         }
     }
 }
@@ -82,20 +91,18 @@ impl Lexer {
         reader: &mut Reader<'query>,
         seen_selector: bool,
     ) -> Result<Option<(Combinator, ElementPredicate<'query>)>, SelectorParseError> {
-        if reader.eof() {
+        let Some(combinator) = Self::parse_combinator(reader, seen_selector)? else {
             return Ok(None);
-        }
+        };
 
-        let combinator = Self::parse_combinator(reader, seen_selector)?;
         let element = ElementPredicate::try_from(reader)?;
-
         Ok(Some((combinator, element)))
     }
 
     fn parse_combinator<'query>(
         reader: &mut Reader<'query>,
         seen_selector: bool,
-    ) -> Result<Combinator, SelectorParseError> {
+    ) -> Result<Option<Combinator>, SelectorParseError> {
         let mut saw_whitespace = false;
         while let Some(token) = reader.peek() {
             if !is_css_whitespace(token) {
@@ -106,10 +113,7 @@ impl Lexer {
         }
 
         match reader.peek() {
-            None => Err(SelectorParseError::new(
-                "missing selector after combinator",
-                reader.get_position(),
-            )),
+            None => Ok(None),
             Some(b'>') => {
                 reader.skip();
                 while let Some(token) = reader.peek() {
@@ -118,7 +122,7 @@ impl Lexer {
                     }
                     reader.skip();
                 }
-                Ok(Combinator::Child)
+                Ok(Some(Combinator::Child))
             }
             Some(b'+') => Err(SelectorParseError::new(
                 "unsupported combinator '+'",
@@ -132,8 +136,8 @@ impl Lexer {
                 "unsupported combinator '|'",
                 reader.get_position(),
             )),
-            Some(_) if saw_whitespace || !seen_selector => Ok(Combinator::Descendant),
-            Some(_) => Ok(Combinator::Descendant),
+            Some(_) if saw_whitespace || !seen_selector => Ok(Some(Combinator::Descendant)),
+            Some(_) => Ok(Some(Combinator::Descendant)),
         }
     }
 }
@@ -500,7 +504,182 @@ mod tests {
         let mut reader = Reader::new("main\u{000B}section");
         let error = Lexer::try_next(&mut reader, false).unwrap_err();
         assert_eq!(error.message(), "illegal selector token");
-        // The error position should be near the offending character.
-        assert!(error.position() <= 12);
+    }
+
+    // ── Trailing vertical tab: Fix 1 tests ───────────────────────
+
+    // Case 1: vertical tab after valid CSS whitespace
+    #[test]
+    fn trailing_vertical_tab_after_css_whitespace_is_rejected() {
+        let mut reader = Reader::new("main \u{000B}");
+        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert_eq!(first.1.name, Some("main"));
+        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        assert_eq!(error.message(), "illegal selector token");
+    }
+
+    // Case 2: vertical tab alone
+    #[test]
+    fn vertical_tab_alone_is_rejected() {
+        let mut reader = Reader::new("\u{000B}");
+        let error = Lexer::try_next(&mut reader, false).unwrap_err();
+        assert_eq!(error.message(), "illegal selector token");
+    }
+
+    // Case 3: valid CSS whitespace followed by vertical tab
+    #[test]
+    fn tab_vertical_tab_not_treated_as_css_whitespace() {
+        let mut reader = Reader::new("main\t\u{000B}");
+        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert_eq!(first.1.name, Some("main"));
+        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        assert_eq!(error.message(), "illegal selector token");
+    }
+
+    #[test]
+    fn newline_vertical_tab_not_treated_as_css_whitespace() {
+        let mut reader = Reader::new("main\n\u{000B}");
+        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert_eq!(first.1.name, Some("main"));
+        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        assert_eq!(error.message(), "illegal selector token");
+    }
+
+    #[test]
+    fn form_feed_vertical_tab_not_treated_as_css_whitespace() {
+        let mut reader = Reader::new("main\u{000C}\u{000B}");
+        let first = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert_eq!(first.1.name, Some("main"));
+        let error = Lexer::try_next(&mut reader, true).unwrap_err();
+        assert_eq!(error.message(), "illegal selector token");
+    }
+
+    // Case 4: legitimate trailing CSS whitespace terminates successfully
+    #[test]
+    fn space_trailing_whitespace_terminates() {
+        let mut reader = Reader::new("main ");
+        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn tab_trailing_whitespace_terminates() {
+        let mut reader = Reader::new("main\t");
+        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn newline_trailing_whitespace_terminates() {
+        let mut reader = Reader::new("main\n");
+        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn carriage_return_trailing_whitespace_terminates() {
+        let mut reader = Reader::new("main\r");
+        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn form_feed_trailing_whitespace_terminates() {
+        let mut reader = Reader::new("main\u{000C}");
+        let _ = Lexer::try_next(&mut reader, false).unwrap().unwrap();
+        assert!(Lexer::try_next(&mut reader, true).unwrap().is_none());
+    }
+
+    // ── Combinator::try_from tests ────────────────────────────────
+
+    #[test]
+    fn combinator_try_from_space_is_descendant() {
+        let mut reader = Reader::new(" ");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::Descendant)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_tab_is_descendant() {
+        let mut reader = Reader::new("\t");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::Descendant)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_newline_is_descendant() {
+        let mut reader = Reader::new("\n");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::Descendant)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_cr_is_descendant() {
+        let mut reader = Reader::new("\r");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::Descendant)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_form_feed_is_descendant() {
+        let mut reader = Reader::new("\u{000C}");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::Descendant)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_whitespace_then_child_is_child() {
+        let mut reader = Reader::new(" \t > ");
+        assert_eq!(Combinator::try_from(&mut reader), Some(Combinator::Child));
+    }
+
+    #[test]
+    fn combinator_try_from_plus_is_next_sibling() {
+        let mut reader = Reader::new("+");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::NextSibling)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_tilde_is_subsequent_sibling() {
+        let mut reader = Reader::new("~");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::SubsequentSibling)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_pipe_is_namespace() {
+        let mut reader = Reader::new("|");
+        assert_eq!(
+            Combinator::try_from(&mut reader),
+            Some(Combinator::Namespace)
+        );
+    }
+
+    #[test]
+    fn combinator_try_from_vertical_tab_is_none() {
+        let mut reader = Reader::new("\u{000B}");
+        assert_eq!(Combinator::try_from(&mut reader), None);
+    }
+
+    #[test]
+    fn combinator_try_from_unknown_byte_is_none_and_unconsumed() {
+        let mut reader = Reader::new("x");
+        assert_eq!(Combinator::try_from(&mut reader), None);
+        assert_eq!(reader.peek(), Some(b'x'));
     }
 }

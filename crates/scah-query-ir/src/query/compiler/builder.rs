@@ -464,6 +464,17 @@ mod tests {
         assert!(Query::all("main > section", Save::none()).is_ok());
     }
 
+    // Priority 5: vertical tab must not be accepted as CSS whitespace
+    #[test]
+    fn vertical_tab_in_selector_is_rejected() {
+        for selector in ["main \u{000B}", "\u{000B}", "main\t\u{000B}"] {
+            assert!(
+                Query::all(selector, Save::none()).is_err(),
+                "{selector:?} must not treat vertical tab as CSS whitespace"
+            );
+        }
+    }
+
     #[test]
     fn test_then_with_all_and_first() {
         let query = Query::all("article", Save::none())
