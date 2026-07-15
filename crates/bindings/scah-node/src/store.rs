@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub struct JSStore {
     pub(crate) store: Arc<Store<'static, 'static>>,
     pub(crate) _html: Arc<String>,
+    pub(crate) _query_tapes: Vec<Arc<Vec<u8>>>,
 }
 
 #[napi]

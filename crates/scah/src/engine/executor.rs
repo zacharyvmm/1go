@@ -370,7 +370,7 @@ where
     ) -> bool {
         let close_depth = document_position.element_depth;
         let mut last_pruned_parent = None;
-        let mut siginificant_close = false;
+        let mut significant_close = false;
 
         // Walk backwards so `swap_remove` cannot move an unvisited cursor.
         let mut i = self.cursors.len();
@@ -405,12 +405,12 @@ where
                         self.cursors[i].position.back(self.query);
                         self.cursors[i].set_last_match_depth(0);
                     }
-                    siginificant_close = true;
+                    significant_close = true;
                 }
             } else if cur.scope_depth >= close_depth {
                 let pruned = self.cursors.swap_remove(i);
                 last_pruned_parent = Some(pruned.parent);
-                siginificant_close = true;
+                significant_close = true;
 
                 crate::scah_trace!(
                     store,
@@ -436,7 +436,7 @@ where
                     }
                 }
                 self.cursors[i].set_last_match_depth(sd);
-                siginificant_close = true;
+                significant_close = true;
             }
         }
 
@@ -449,7 +449,7 @@ where
             root.parent = parent;
         }
 
-        siginificant_close
+        significant_close
     }
 }
 

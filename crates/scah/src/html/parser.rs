@@ -79,7 +79,13 @@ where
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
-            store: Store::with_capacity(capacity, capture_text_content),
+            store: Store::with_capacity_options(
+                capacity,
+                crate::CapacityOptions {
+                    reserve_text_content: capture_text_content,
+                    ..crate::CapacityOptions::default()
+                },
+            ),
         }
     }
 
@@ -112,7 +118,6 @@ where
                     }
                     self.raw_text_close = None;
 
-                    let closing_tag = &close_tag[2..];
                     self.position.reader_position = reader.get_position();
                     reader.next_until(b'>');
                     reader.skip();
@@ -121,22 +126,8 @@ where
                         self.store.text_content.set_start(reader.get_position());
                     }
 
-                    crate::scah_trace!(
-                        self.store,
-                        TraceEvent::CloseTag {
-                            tag: closing_tag,
-                            depth: self.position.element_depth,
-                            reader_position: self.position.reader_position,
-                        }
-                    );
-
-                    self.open_elements
-                        .close_by_end_tag_into(closing_tag, &mut self.closing_elements);
-                    let early_exit = self.pop_closing_elements(
-                        reader,
-                        Some(ImpliedCloseReason::MismatchedEndTag),
-                        Some(closing_tag),
-                    );
+                    let closing_tag = &close_tag[2..];
+                    let early_exit = self.handle_close_tag(closing_tag, reader);
                     return !early_exit && !reader.eof();
                 } else {
                     reader.skip();
@@ -206,14 +197,7 @@ where
                 self.position.reader_position = tag_start_position;
                 self.open_elements
                     .prepare_for_open_into(tag, &mut self.implied_closes);
-                let mut implied = std::mem::take(&mut self.implied_closes);
-                self.pop_open_elements(
-                    &mut implied,
-                    reader,
-                    Some(ImpliedCloseReason::OpenTagRule),
-                    None,
-                );
-                self.implied_closes = implied;
+                self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
                 self.position.reader_position = reader.get_position();
 
                 let is_self_closing = tag.is_void();
@@ -258,22 +242,7 @@ where
                 self.element.clear();
             }
             XHtmlTag::Close(closing_tag) => {
-                crate::scah_trace!(
-                    self.store,
-                    TraceEvent::CloseTag {
-                        tag: closing_tag,
-                        depth: self.position.element_depth,
-                        reader_position: self.position.reader_position,
-                    }
-                );
-
-                self.open_elements
-                    .close_by_end_tag_into(closing_tag, &mut self.closing_elements);
-                early_exit = self.pop_closing_elements(
-                    reader,
-                    Some(ImpliedCloseReason::MismatchedEndTag),
-                    Some(closing_tag),
-                ) || early_exit;
+                early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
             }
         }
 
@@ -325,15 +294,16 @@ where
             .back(open_element.name, &self.position, reader, &mut self.store)
     }
 
-    fn pop_open_elements(
+    /// Drain the implied-closes vector, finalizing each element, and restore
+    /// the vector's capacity for reuse. Returns `true` on early exit.
+    fn drain_implied_closes(
         &mut self,
-        open_elements: &mut Vec<OpenElement<'html>>,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
         expected_tag: Option<&'html str>,
     ) -> bool {
         let base_depth = self.open_elements.depth();
-        let mut elems = std::mem::take(open_elements);
+        let mut elems = std::mem::take(&mut self.implied_closes);
         let total = elems.len();
         let mut early_exit = false;
 
@@ -356,8 +326,29 @@ where
             early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
         }
 
-        *open_elements = elems;
+        self.implied_closes = elems;
         early_exit
+    }
+
+    /// Apply a close tag: trace, pop from the open-element stack, and run
+    /// the close-element path. Returns `true` on early exit.
+    fn handle_close_tag(&mut self, closing_tag: &'html str, reader: &Reader<'html>) -> bool {
+        crate::scah_trace!(
+            self.store,
+            TraceEvent::CloseTag {
+                tag: closing_tag,
+                depth: self.position.element_depth,
+                reader_position: self.position.reader_position,
+            }
+        );
+
+        self.open_elements
+            .close_by_end_tag_into(closing_tag, &mut self.closing_elements);
+        self.pop_closing_elements(
+            reader,
+            Some(ImpliedCloseReason::MismatchedEndTag),
+            Some(closing_tag),
+        )
     }
 
     fn pop_closing_elements(
@@ -435,14 +426,7 @@ where
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.implied_closes);
-        let mut implied = std::mem::take(&mut self.implied_closes);
-        self.pop_open_elements(
-            &mut implied,
-            reader,
-            Some(ImpliedCloseReason::EofDrain),
-            None,
-        );
-        self.implied_closes = implied;
+        self.drain_implied_closes(reader, Some(ImpliedCloseReason::EofDrain), None);
         self.eof_drained = true;
     }
 }

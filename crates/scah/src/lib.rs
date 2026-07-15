@@ -121,7 +121,7 @@ pub use scah_query_ir::{
     Transition, TransitionId,
 };
 pub use scah_reader::Reader;
-pub use store::{Element, ElementId, Store};
+pub use store::{CapacityOptions, Element, ElementId, Store};
 
 /// Internal parser details exposed only so benchmarks can measure production
 /// code instead of maintaining a duplicate implementation.
@@ -327,5 +327,19 @@ mod tests {
 
         // Early-exit with XHtmlParser::new uses Store::default() with no
         // preallocation, but matches are still recorded correctly.
+    }
+
+    #[test]
+    fn element_attribute_lookup_is_case_insensitive_for_html_attributes() {
+        let html = "<a HREF='x'></a>";
+        let queries = &[Query::all("a", Save::all())
+            .expect("valid selector")
+            .build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let a = store.get("a").unwrap().next().unwrap();
+
+        assert_eq!(a.attribute(&store, "href"), Some("x"));
+        assert_eq!(a.attribute(&store, "HREF"), Some("x"));
+        assert_eq!(a.attribute(&store, "Href"), Some("x"));
     }
 }

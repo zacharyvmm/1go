@@ -1,6 +1,5 @@
 use pyo3::prelude::*;
 use pyo3_stub_gen::{define_stub_info_gatherer, derive::gen_stub_pyfunction};
-use scah_core::{Query, QueryMultiplexer, QuerySpec, Reader, XHtmlParser};
 
 use std::sync::Arc;
 
@@ -15,39 +14,33 @@ use element::{PyElement, PyStore};
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn parse(html: String, queries: Vec<PyRef<PyQuery>>) -> PyResult<PyStore> {
-    if queries.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "parse requires at least one query",
-        ));
-    }
     let html = Arc::new(html);
-    let html_bytes = html.as_ref().as_bytes();
-    let html_bytes = unsafe { std::slice::from_raw_parts(html_bytes.as_ptr(), html_bytes.len()) };
+    let html_str: &str = unsafe { std::mem::transmute(html.as_str()) };
 
-    let queries_rs = queries
-        .iter()
-        .map(|q| q.query.clone())
-        .collect::<Box<[Query]>>();
+    let mut query_tapes: Vec<Arc<Vec<u8>>> = Vec::with_capacity(queries.len());
+    let mut queries_rs: Vec<scah_core::Query<'static>> = Vec::with_capacity(queries.len());
+    for q in &queries {
+        query_tapes.push(q.tape.clone());
+        queries_rs.push(q.query.clone());
+    }
 
-    let slice = unsafe {
-        std::slice::from_raw_parts(queries_rs.as_ref().as_ptr(), queries_rs.as_ref().len())
+    let queries_slice =
+        unsafe { std::slice::from_raw_parts(queries_rs.as_ptr(), queries_rs.len()) };
+
+    let store = match scah_core::parse(html_str, queries_slice) {
+        Ok(store) => store,
+        Err(scah_core::ParseError::EmptyQueries) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "parse requires at least one query",
+            ));
+        }
     };
-    // Mirror scah::parse() allocation policy: avoid full-document store
-    // preallocation when all queries can exit early (Query::first-style).
-    let no_extra_allocations = queries_rs.iter().all(|q| q.exit_at_section_end().is_some());
-    let selectors = QueryMultiplexer::new(slice);
-    let mut parser = if no_extra_allocations {
-        XHtmlParser::new(selectors)
-    } else {
-        XHtmlParser::with_capacity(selectors, html_bytes.len())
-    };
 
-    let mut reader = Reader::from_bytes(html_bytes);
-    while parser.next(&mut reader) {}
-
-    let store = std::sync::Arc::new(parser.matches());
-
-    Ok(PyStore { store, _html: html })
+    Ok(PyStore {
+        store: Arc::new(store),
+        _html: html,
+        _query_tapes: query_tapes,
+    })
 }
 
 #[pymodule]

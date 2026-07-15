@@ -122,6 +122,7 @@ impl PyElement {
 pub(crate) struct PyStore {
     pub(crate) store: Arc<Store<'static, 'static>>,
     pub(crate) _html: Arc<String>,
+    pub(crate) _query_tapes: Vec<Arc<Vec<u8>>>,
 }
 
 #[gen_stub_pymethods]

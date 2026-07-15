@@ -57,6 +57,49 @@ pub struct Store<'html, 'query> {
     pub trace: crate::debug::TraceStore<'html, 'query>,
 }
 
+/// Advanced allocation tuning for [`Store::with_capacity_options`].
+///
+/// Controls how the `Store` pre-allocates arena capacity from a total
+/// HTML byte-length hint.  The defaults mirror the heuristics used by
+/// [`Store::with_capacity`] and are suitable for the vast majority of
+/// workloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityOptions {
+    /// Approximate HTML bytes per reserved element slot.
+    ///
+    /// Default: 48 (derived from valgrind massif profiling).
+    pub element_bytes_per_slot: usize,
+
+    /// Approximate HTML bytes per reserved attribute slot.
+    ///
+    /// Default: 24.
+    pub attribute_bytes_per_slot: usize,
+
+    /// Whether to reserve the text-content buffer using the full input
+    /// capacity.  Set to `false` when no query needs text content.
+    ///
+    /// Default: `true` (preserves the historical behaviour of
+    /// [`Store::with_capacity`]).
+    pub reserve_text_content: bool,
+
+    /// Maximum trace-log preallocation.  Only used behind
+    /// `cfg(any(debug_assertions, test))`; harmless otherwise.
+    ///
+    /// Default: 4096.
+    pub trace_capacity_limit: usize,
+}
+
+impl Default for CapacityOptions {
+    fn default() -> Self {
+        Self {
+            element_bytes_per_slot: 48,
+            attribute_bytes_per_slot: 24,
+            reserve_text_content: true,
+            trace_capacity_limit: 4096,
+        }
+    }
+}
+
 impl<'html, 'query: 'html> Default for Store<'html, 'query> {
     fn default() -> Self {
         Self {
@@ -75,39 +118,45 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     ///
     /// The `capacity` parameter is the total HTML byte length. From this we
     /// derive conservative reservations for the element and attribute arenas
-    /// based on measured HTML element density (~1 element per 20-50 bytes,
-    /// of which only matched elements land in the arena).
+    /// using the default [`CapacityOptions`].
     ///
-    /// Ratios chosen from valgrind massif profiling (`capacity_profile` example):
+    /// This is the non-breaking public API. For advanced tuning (e.g.
+    /// skipping text-content reservation or adjusting element/attribute
+    /// ratios), use [`Store::with_capacity_options`].
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_options(capacity, CapacityOptions::default())
+    }
+
+    /// Creates a `Store` with pre-allocated capacity controlled by
+    /// [`CapacityOptions`].
     ///
-    /// | Arena       | Ratio            | Rationale                             |
-    /// |------------ |----------------- |---------------------------------------|
-    /// | elements    | `capacity / 48`  | ~1 matched element per 48 input bytes  |
-    /// | attributes  | `capacity / 24`  | ~2-3 attributes per matched element    |
-    /// | text_content| `capacity`        | worst case: every byte is text          |
-    /// | queries     | none              | fixed small per-query allocation       |
+    /// # Allocation policy
     ///
-    /// These are deliberately conservative to avoid the over-reservation that
-    /// `capacity / 3` caused while still preventing reallocations in typical
-    /// workloads. Queries targeting 90%+ of elements (e.g. `*`) may still
-    /// reallocate; this is an acceptable tradeoff.
+    /// | Arena        | Reservation                        |
+    /// |------------- |----------------------------------- |
+    /// | elements     | `capacity / element_bytes_per_slot` |
+    /// | attributes   | `capacity / attribute_bytes_per_slot`|
+    /// | text_content | `capacity` if `reserve_text_content` |
+    /// | queries      | none (fixed small per-query alloc)   |
     ///
-    /// Pass `capture_text_content: false` when no query needs text content
-    /// to avoid allocating a buffer proportional to the full HTML input.
-    /// Element and attribute arenas are always reserved regardless of this
-    /// flag, using the same ratios.
-    pub fn with_capacity(capacity: usize, capture_text_content: bool) -> Self {
+    /// Every divisor is clamped to at least 1 to avoid division by zero.
+    pub fn with_capacity_options(capacity: usize, options: CapacityOptions) -> Self {
+        let element_divisor = options.element_bytes_per_slot.max(1);
+        let attribute_divisor = options.attribute_bytes_per_slot.max(1);
+
         Self {
-            elements: Arena::with_capacity(capacity / 48),
+            elements: Arena::with_capacity(capacity / element_divisor),
             queries: Arena::new(),
-            text_content: if capture_text_content {
+            text_content: if options.reserve_text_content {
                 TextContent::with_capacity(capacity)
             } else {
                 TextContent::new()
             },
-            attributes: Arena::with_capacity(capacity / 24),
+            attributes: Arena::with_capacity(capacity / attribute_divisor),
             #[cfg(any(debug_assertions, test))]
-            trace: crate::debug::TraceStore::with_capacity(capacity.min(4096)),
+            trace: crate::debug::TraceStore::with_capacity(
+                (capacity / element_divisor).min(options.trace_capacity_limit),
+            ),
         }
     }
 
@@ -308,7 +357,7 @@ mod tests {
 
     #[test]
     fn with_capacity_reserves_arenas_conservatively() {
-        let store = Store::with_capacity(30_000, true);
+        let store = Store::with_capacity(30_000);
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
@@ -316,8 +365,14 @@ mod tests {
     }
 
     #[test]
-    fn with_capacity_can_skip_text_content_reservation() {
-        let store = Store::with_capacity(30_000, false);
+    fn with_capacity_options_can_skip_text_content_reservation() {
+        let store = Store::with_capacity_options(
+            30_000,
+            CapacityOptions {
+                reserve_text_content: false,
+                ..CapacityOptions::default()
+            },
+        );
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
@@ -325,12 +380,48 @@ mod tests {
     }
 
     #[test]
-    fn with_capacity_can_reserve_text_content() {
-        let store = Store::with_capacity(30_000, true);
+    fn with_capacity_options_can_reserve_text_content() {
+        let store = Store::with_capacity_options(
+            30_000,
+            CapacityOptions {
+                reserve_text_content: true,
+                ..CapacityOptions::default()
+            },
+        );
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
         assert_eq!(store.text_content.content.capacity(), 30_000);
+    }
+
+    #[test]
+    fn with_capacity_options_uses_custom_element_and_attribute_ratios() {
+        let store = Store::with_capacity_options(
+            1200,
+            CapacityOptions {
+                element_bytes_per_slot: 12,
+                attribute_bytes_per_slot: 6,
+                ..CapacityOptions::default()
+            },
+        );
+
+        assert_eq!(store.elements.capacity(), 100);
+        assert_eq!(store.attributes.capacity(), 200);
+    }
+
+    #[test]
+    fn with_capacity_options_handles_zero_ratios_without_panicking() {
+        let store = Store::with_capacity_options(
+            16,
+            CapacityOptions {
+                element_bytes_per_slot: 0,
+                attribute_bytes_per_slot: 0,
+                ..CapacityOptions::default()
+            },
+        );
+
+        assert_eq!(store.elements.capacity(), 16);
+        assert_eq!(store.attributes.capacity(), 16);
     }
 
     #[test]

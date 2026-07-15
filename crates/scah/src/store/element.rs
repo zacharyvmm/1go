@@ -109,7 +109,7 @@ impl<'html> Element<'html> {
         self.attributes.as_ref().and_then(|range| {
             dom.attributes.deref()[(range.start as usize)..(range.end as usize)]
                 .iter()
-                .find(|attr| attr.key == key)
+                .find(|attr| attr.key.eq_ignore_ascii_case(key))
                 .and_then(|kv| kv.value)
         })
     }
