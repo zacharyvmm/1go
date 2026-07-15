@@ -84,4 +84,22 @@ mod tests {
         let kind = AttributeSelectionKind::Substring;
         assert!(kind.find("world", "helloworldintest"));
     }
+
+    #[test]
+    fn test_prefix_unicode_no_panic() {
+        let kind = AttributeSelectionKind::Prefix;
+        assert!(!kind.find("e", "éclair"));
+    }
+
+    #[test]
+    fn test_suffix_unicode_no_panic() {
+        let kind = AttributeSelectionKind::Suffix;
+        assert!(!kind.find("e", "café"));
+    }
+
+    #[test]
+    fn test_hyphen_separated_unicode_no_panic() {
+        let kind = AttributeSelectionKind::HyphenSeparated;
+        assert!(!kind.find("e", "é-fr"));
+    }
 }

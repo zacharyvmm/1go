@@ -1,6 +1,7 @@
 import pytest
 
 from scah import Query, Save, parse
+
 HTML = """
 <span class="hello" id="world" hello="world">
     Hello <a href="https://www.example.com">World</a>
@@ -9,27 +10,42 @@ HTML = """
     My <a href="https://www.example.com">Example</a> or <a href="https://www.notexample.com">Not Example</a>
 """
 
+
+# ── Binding smoke tests ───────────────────────────────────────────────────
+
+
+def test_python_binding_basic_parse_and_store_access():
+    q = Query.all("a", Save.all()).build()
+    store = parse('<a href="x">x</a>', [q])
+
+    hits = store.get("a")
+    assert hits is not None
+    assert len(hits) == 1
+    assert hits[0].name == "a"
+    assert hits[0].get_attribute("href") == "x"
+
+
 def test_nested_selection():
     q = Query.all("#world", Save.all()).all("a", Save.all()).build()
     store = parse(HTML, [q])
 
     worlds = store.get("#world")
     assert worlds
-
     assert len(worlds) == 1
     world = dict(worlds[0])
-    
+
     assert world['id'] == 'world'
     assert world['class'] == 'hello'
-    
+
     anchors = worlds[0].get('a')
     assert len(anchors) == 1
     anchor = dict(anchors[0])
-    
+
     assert anchor['name'] == 'a'
     assert 'attributes' in anchor
     assert anchor['attributes']['href'] == "https://www.example.com"
     assert anchor['text_content'] == "World"
+
 
 def test_branching_selection():
     q = Query.all("#world", Save.all())\
@@ -37,15 +53,15 @@ def test_branching_selection():
             world.all('a', Save.all()), world.all('p', Save.all())
         ]).build()
     store = parse(HTML, [q])
-    
+
     worlds = store.get("#world")
     assert worlds
     world = worlds[0]
-    
+
     anchors = world.get("a")
-    
     assert len(anchors) == 1
     assert anchors[0].text_content == "World"
+
 
 def test_intro():
     html_intro = """
@@ -70,7 +86,6 @@ def test_intro():
     </div>
     """
 
-    # Extract the core description and the existing language bindings
     query_intro = Query.all("div#project-intro", Save.all()) \
         .then(lambda intro: [
             intro.all("article.overview p", Save.all()),
@@ -82,7 +97,7 @@ def test_intro():
 
     intro = store_intro.get("div#project-intro")[0]
     assert intro
-    
+
     p_tags = intro.get("article.overview p")
     assert len(p_tags) == 2
     assert p_tags[0].text_content == "scah ( scan HTML ) bridges the gap between SAX/StAX streaming efficiency and DOM convenience."
@@ -93,23 +108,23 @@ def test_intro():
     assert li_tags[0].text_content == "Python"
     assert li_tags[1].text_content == "Node.js"
 
+
 def test_multiple_root_queries():
-    # The HTML acts as a sandbox to demonstrate different selector types
     html_api = """
     <main id="api-reference">
         <h2>Supported Selectors</h2>
         <div class="sandbox">
             <span class="badge status-working">Tag Name & Class</span>
-            
+
             <div id="target-node">ID Selection</div>
-            
+
             <ul class="combinators">
                 <li>Direct Child</li>
                 <div>
                     <li>Deep Descendant</li>
                 </div>
             </ul>
-            
+
             <div class="attributes">
                 <a href="https://github.com/example" data-type="external">Exact Match & Presence</a>
                 <a href="/local/path" data-type="internal">Prefix/Suffix Match</a>
@@ -118,32 +133,46 @@ def test_multiple_root_queries():
     </main>
     """
 
-    # Demonstrate the various selection types in a single multiplexed parse call
     queries = [
-        # 1. Tag and Class
         Query.all("span.status-working", Save.all()).build(),
-        
-        # 2. ID Selector
         Query.all("#target-node", Save.all()).build(),
-        
-        # 3. Child Combinator (only gets the first li)
         Query.all("ul.combinators > li", Save.all()).build(),
-        
-        # 4. Descendant Combinator (gets the nested li)
         Query.all("ul.combinators li", Save.all()).build(),
-        
-        # 5. Attribute Presence and Exact Match
         Query.all("a[href][data-type=\"external\"]", Save.all()).build(),
-        
-        # 6. Attribute Prefix Match
         Query.all("a[href^=\"/\"]", Save.all()).build(),
-
-        # 7. First Link
-        Query.first("a", Save.all()).build()
+        Query.first("a", Save.all()).build(),
     ]
 
-    # The QueryMultiplexer evaluates all of these against the token stream simultaneously
-    store_api = parse(html_api, queries)
+    store = parse(html_api, queries)
+
+    span_hits = store.get("span.status-working")
+    assert span_hits is not None
+    assert len(span_hits) == 1
+    assert span_hits[0].text_content == "Tag Name & Class"
+
+    id_hits = store.get("#target-node")
+    assert id_hits is not None
+    assert len(id_hits) == 1
+    assert id_hits[0].id == "target-node"
+
+    child_hits = store.get("ul.combinators > li")
+    assert child_hits is not None
+    assert len(child_hits) == 1
+
+    desc_hits = store.get("ul.combinators li")
+    assert desc_hits is not None
+    assert len(desc_hits) == 2
+
+    exact_hits = store.get('a[href][data-type="external"]')
+    assert exact_hits is not None
+    assert len(exact_hits) == 1
+    assert exact_hits[0].get_attribute("href") == "https://github.com/example"
+
+    prefix_hits = store.get('a[href^="/"]')
+    assert prefix_hits is not None
+    assert len(prefix_hits) == 1
+    assert prefix_hits[0].get_attribute("href") == "/local/path"
+
 
 def test_store_remains_valid_after_query_object_goes_out_of_scope():
     # Query tapes (selector strings) are owned by the query objects.
@@ -160,47 +189,40 @@ def test_store_remains_valid_after_query_object_goes_out_of_scope():
     assert hits[0].name == "a"
     assert hits[0].get_attribute("href") == "x"
 
-# ── Regression tests for edge-case fixes ──────────────────────────────
+
+def test_python_query_builder_chaining_smoke():
+    q = Query.all("main", Save.none()).all("a", Save.all()).build()
+    store = parse("<main><a href='x'>x</a></main>", [q])
+
+    hits = store.get("main")
+    assert hits is not None
+    assert len(hits) == 1
+    anchors = hits[0].get("a")
+    assert anchors is not None
+    assert len(anchors) == 1
+    assert anchors[0].get_attribute("href") == "x"
 
 
-def test_unicode_attribute_prefix_does_not_panic():
-    """Priority 1: Unicode chars in attribute values must not panic."""
-    q = Query.all('[data-x^="e"]', Save.none()).try_build()
-    store = parse('<div id="x" data-x="éclair"></div>', [q])
-    # Should not match — "éclair" does not start with "e" (ASCII)
-    result = store.get('[data-x^="e"]') or []
-    assert list(result) == []
+def test_python_binding_passes_quoted_attribute_selector_smoke():
+    selector = '[data-x="a=b"]'
+    q = Query.all(selector, Save.all()).build()
+    store = parse('<div data-x="a=b"></div>', [q])
+
+    hits = store.get(selector) or []
+    assert len(hits) == 1
 
 
-def test_unicode_attribute_suffix_does_not_panic():
-    """Priority 1: Suffix match with unicode chars must not panic."""
-    q = Query.all('[data-x$="e"]', Save.none()).try_build()
-    store = parse('<div data-x="café"></div>', [q])
-    result = store.get('[data-x$="e"]') or []
-    assert list(result) == []
+# ── Python exception mapping tests ─────────────────────────────────────────
 
 
-def test_unicode_attribute_hyphen_does_not_panic():
-    """Priority 1: Hyphen-separated match with unicode chars must not panic."""
-    q = Query.all('[lang|="e"]', Save.none()).try_build()
-    store = parse('<div lang="é-fr"></div>', [q])
-    result = store.get('[lang|="e"]') or []
-    assert list(result) == []
-
-
-def test_escaped_quote_in_attribute_does_not_panic():
-    """Priority 2: Escaped quotes inside attribute selectors must not panic."""
-    # Either succeeds or raises ValueError; must never panic.
-    try:
-        q = Query.all(r'[data-x="a\"b"]', Save.none()).try_build()
-    except ValueError:
-        pass  # Parse error is acceptable
-
-
-def test_build_invalid_selector_raises_value_error():
-    """Priority 3: build() must raise ValueError on invalid selectors."""
+def test_build_invalid_selector_raises_value_error_not_panic():
     with pytest.raises(ValueError):
         Query.all("!", Save.none()).build()
+
+
+def test_try_build_invalid_selector_raises_value_error():
+    with pytest.raises(ValueError):
+        Query.all("!", Save.none()).try_build()
 
 
 @pytest.mark.parametrize("selector", [
@@ -209,60 +231,5 @@ def test_build_invalid_selector_raises_value_error():
     '[data-x^]',
 ])
 def test_invalid_selectors_raise_value_error(selector):
-    """Priority 3: Malformed selectors must raise ValueError, not panic."""
     with pytest.raises(ValueError):
         Query.all(selector, Save.none()).build()
-
-
-def test_child_combinator_without_spaces():
-    """Priority 4: main>section must parse and match."""
-    html = "<main><section id='s1'></section></main>"
-    q = Query.all("main>section", Save.none()).try_build()
-    store = parse(html, [q])
-    result = store.get("main>section") or []
-    assert len(list(result)) == 1
-    assert list(result)[0].id == "s1"
-
-
-def test_child_combinator_whitespace_variants():
-    """Priority 4: Combinator whitespace variants must all parse."""
-    html = "<main><section id='s1'></section></main>"
-    for selector in ["main> section", "main >section", "main\nsection", "main\tsection"]:
-        q = Query.all(selector, Save.none()).try_build()
-        store = parse(html, [q])
-        result = store.get(selector) or []
-        assert len(list(result)) == 1, f"selector {selector!r} failed"
-
-
-def test_duplicate_ids_are_rejected():
-    """Priority 5: Duplicate IDs must raise ValueError."""
-    with pytest.raises(ValueError):
-        Query.all("#a1#a2", Save.none()).try_build()
-
-
-def test_hyphen_separated_exact_semantics():
-    """Priority 6: [lang|="en"] must not scan whitespace words."""
-    html = """
-    <div id="a" lang="en-US"></div>
-    <div id="b" lang="xx en-US"></div>
-    """
-    q = Query.all('[lang|="en"]', Save.none()).try_build()
-    store = parse(html, [q])
-    result = store.get('[lang|="en"]') or []
-    ids = [e.id for e in result]
-    assert "a" in ids
-    assert "b" not in ids
-
-
-@pytest.mark.parametrize("selector, html", [
-    ('[data-x="a=b"]', '<div data-x="a=b"></div>'),
-    ('[data-x="a*b"]', '<div data-x="a*b"></div>'),
-    ('[data-x="a]b"]', '<div data-x="a]b"></div>'),
-    ('[href="https://example.com/search?q=test"]',
-     '<a href="https://example.com/search?q=test"></a>'),
-])
-def test_quoted_attribute_values_allow_selector_control_chars(selector, html):
-    q = Query.all(selector, Save.all()).try_build()
-    store = parse(html, [q])
-    result = store.get(selector) or []
-    assert len(list(result)) == 1

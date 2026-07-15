@@ -383,4 +383,11 @@ mod tests {
         let result = Lexer::try_next(&mut reader, false);
         assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
     }
+
+    #[test]
+    fn form_feed_descendant_combinator_parses() {
+        let mut reader = Reader::new("main\u{000C}section");
+        let result = Lexer::try_next(&mut reader, false);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+    }
 }
