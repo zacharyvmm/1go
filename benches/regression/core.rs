@@ -107,6 +107,18 @@ fn build_nested_first_query() -> Query<'static> {
     )
 }
 
+/// Build a "save_all" synthetic-link query with the given selector.
+///
+/// This is the single authoritative builder for synthetic-link Save::all()
+/// queries. All prebuilt, consume, end-to-end, and validation code paths use
+/// this function so the query structure cannot drift between validation and
+/// timed code.
+fn build_link_all_query(selector: &'static str) -> Query<'static> {
+    Query::all(selector, Save::all())
+        .expect("link selector should parse")
+        .build()
+}
+
 // ── Query building benchmarks ──────────────────────────────────────────────
 
 fn bench_query_building(c: &mut Criterion) {
@@ -241,9 +253,7 @@ fn bench_synthetic_links(c: &mut Criterion) {
         {
             let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_all");
             group.throughput(throughput.clone());
-            let queries = &[Query::all(LINK_SELECTOR, Save::all())
-                .expect("selector should parse")
-                .build()];
+            let queries = &[build_link_all_query(LINK_SELECTOR)];
             let store = parse(&html, queries).unwrap();
             assert_save_all_result(&store, LINK_SELECTOR, size);
 
@@ -260,9 +270,7 @@ fn bench_synthetic_links(c: &mut Criterion) {
         {
             let mut group = c.benchmark_group("parse/synthetic_links/consume/all/save_all");
             group.throughput(throughput.clone());
-            let queries = &[Query::all(LINK_SELECTOR, Save::all())
-                .expect("selector should parse")
-                .build()];
+            let queries = &[build_link_all_query(LINK_SELECTOR)];
             let store = parse(&html, queries).unwrap();
             assert_save_all_result(&store, LINK_SELECTOR, size);
             assert_has_href_attribute(&store, LINK_SELECTOR);
@@ -281,11 +289,15 @@ fn bench_synthetic_links(c: &mut Criterion) {
             let mut group = c.benchmark_group("parse/synthetic_links/end_to_end/all/save_all");
             group.throughput(throughput.clone());
 
+            // Validate the same builder outside the timed loop
+            let validation_queries = &[build_link_all_query(LINK_SELECTOR)];
+            let validation_store = parse(&html, validation_queries).unwrap();
+            assert_save_all_result(&validation_store, LINK_SELECTOR, size);
+            assert_has_href_attribute(&validation_store, LINK_SELECTOR);
+
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
-                    let queries = &[Query::all(black_box(LINK_SELECTOR), Save::all())
-                        .expect("selector should parse")
-                        .build()];
+                    let queries = &[build_link_all_query(black_box(LINK_SELECTOR))];
                     let store = parse(black_box(html), black_box(queries)).unwrap();
                     consume_link_results(black_box(&store));
                 })

@@ -47,8 +47,11 @@ if ! git -C "$ROOT" cat-file \
     echo >&2
     echo "Alternatively, compare against a revision that already contains the harness:" >&2
     echo >&2
-    echo "    BASE_REF=<commit> just bench-compare" >&2
-    exit 1
+    echo "    just bench-compare <commit>" >&2
+    echo >&2
+    echo "For direct script invocation:" >&2
+    echo >&2
+    echo "    BASE_REF=<commit> ./scripts/bench-compare.sh" >&2
 fi
 
 # ── Harness-integrity check ─────────────────────────────────────────────────
@@ -154,11 +157,13 @@ if [ ! -f "$BASE_WORKTREE/benches/regression/Cargo.toml" ]; then
     echo >&2
     echo "This is expected while introducing the benchmark infrastructure." >&2
     echo "Merge the infrastructure first, then use it as the baseline for subsequent performance changes." >&2
-    echo >&2
     echo "Alternatively, compare against a revision that already contains the harness:" >&2
     echo >&2
-    echo "    BASE_REF=<commit> just bench-compare" >&2
-    exit 1
+    echo "    just bench-compare <commit>" >&2
+    echo >&2
+    echo "For direct script invocation:" >&2
+    echo >&2
+    echo "    BASE_REF=<commit> ./scripts/bench-compare.sh" >&2
 fi
 
 # ── Environment ─────────────────────────────────────────────────────────────

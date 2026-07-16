@@ -89,7 +89,7 @@ for subsequent performance changes. Alternatively, compare against a revision
 that already contains the harness:
 
 ```bash
-BASE_REF=<commit> just bench-compare
+just bench-compare <commit>
 ```
 
 ### Harness-integrity check
@@ -131,6 +131,7 @@ Set `SCAH_BENCH_PROFILE` to control measurement depth:
 ```bash
 SCAH_BENCH_PROFILE=quick just bench-regression
 just bench-compare-quick   # shorthand
+```
 
 ## Benchmark scenarios
 

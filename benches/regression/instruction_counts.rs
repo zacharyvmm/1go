@@ -1,8 +1,9 @@
-//! Instruction-count benchmarks using Gungraun (Cachegrind).
+//! Instruction-count benchmarks using Gungraun/Callgrind.
 //!
-//! These benchmarks measure deterministic CPU-level metrics (instruction count,
-//! estimated cycles, cache behavior) rather than wall-clock time. They are
-//! Linux-only and require the `linux-instruction-benches` feature.
+//! These benchmarks collect deterministic instruction counts, estimated
+//! cycles, and cache metrics through Gungraun's default Callgrind-based
+//! library benchmark runner. They are Linux-only and require the
+//! `linux-instruction-benches` feature.
 //!
 //! # Distinction from Criterion benchmarks
 //!
