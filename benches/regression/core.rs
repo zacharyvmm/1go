@@ -188,17 +188,15 @@ fn consume_link_results(store: &scah::Store<'_, '_>) {
 }
 
 fn bench_synthetic_links(c: &mut Criterion) {
-    for &size in synthetic_sizes() {
-        let html = generate_link_list_html(size);
-        let throughput = Throughput::Bytes(html.len() as u64);
-
-        // --- Prebuilt, save_none ---
-        {
-            let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_none");
-            group.throughput(throughput.clone());
-            let queries = &[Query::all(LINK_SELECTOR, Save::none())
-                .expect("selector should parse")
-                .build()];
+    // --- Prebuilt, save_none ---
+    {
+        let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_none");
+        let queries = &[Query::all(LINK_SELECTOR, Save::none())
+            .expect("selector should parse")
+            .build()];
+        for &size in synthetic_sizes() {
+            let html = generate_link_list_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
             let store = parse(&html, queries).unwrap();
             assert_save_none_result(&store, LINK_SELECTOR, size);
 
@@ -208,16 +206,19 @@ fn bench_synthetic_links(c: &mut Criterion) {
                     black_box(store);
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- Prebuilt, save_inner_html ---
-        {
-            let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_inner_html");
-            group.throughput(throughput.clone());
-            let queries = &[Query::all(LINK_SELECTOR, Save::only_inner_html())
-                .expect("selector should parse")
-                .build()];
+    // --- Prebuilt, save_inner_html ---
+    {
+        let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_inner_html");
+        let queries = &[Query::all(LINK_SELECTOR, Save::only_inner_html())
+            .expect("selector should parse")
+            .build()];
+        for &size in synthetic_sizes() {
+            let html = generate_link_list_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
             let store = parse(&html, queries).unwrap();
             assert_save_inner_html_result(&store, LINK_SELECTOR, size);
 
@@ -227,16 +228,19 @@ fn bench_synthetic_links(c: &mut Criterion) {
                     black_box(store);
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- Prebuilt, save_text ---
-        {
-            let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_text");
-            group.throughput(throughput.clone());
-            let queries = &[Query::all(LINK_SELECTOR, Save::only_text_content())
-                .expect("selector should parse")
-                .build()];
+    // --- Prebuilt, save_text ---
+    {
+        let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_text");
+        let queries = &[Query::all(LINK_SELECTOR, Save::only_text_content())
+            .expect("selector should parse")
+            .build()];
+        for &size in synthetic_sizes() {
+            let html = generate_link_list_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
             let store = parse(&html, queries).unwrap();
             assert_save_text_result(&store, LINK_SELECTOR, size);
 
@@ -246,14 +250,17 @@ fn bench_synthetic_links(c: &mut Criterion) {
                     black_box(store);
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- Prebuilt, save_all ---
-        {
-            let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_all");
-            group.throughput(throughput.clone());
-            let queries = &[build_link_all_query(LINK_SELECTOR)];
+    // --- Prebuilt, save_all ---
+    {
+        let mut group = c.benchmark_group("parse/synthetic_links/prebuilt/all/save_all");
+        let queries = &[build_link_all_query(LINK_SELECTOR)];
+        for &size in synthetic_sizes() {
+            let html = generate_link_list_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
             let store = parse(&html, queries).unwrap();
             assert_save_all_result(&store, LINK_SELECTOR, size);
 
@@ -263,14 +270,17 @@ fn bench_synthetic_links(c: &mut Criterion) {
                     black_box(store);
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- Consume (parse + full result traversal) ---
-        {
-            let mut group = c.benchmark_group("parse/synthetic_links/consume/all/save_all");
-            group.throughput(throughput.clone());
-            let queries = &[build_link_all_query(LINK_SELECTOR)];
+    // --- Consume (parse + full result traversal) ---
+    {
+        let mut group = c.benchmark_group("parse/synthetic_links/consume/all/save_all");
+        let queries = &[build_link_all_query(LINK_SELECTOR)];
+        for &size in synthetic_sizes() {
+            let html = generate_link_list_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
             let store = parse(&html, queries).unwrap();
             assert_save_all_result(&store, LINK_SELECTOR, size);
             assert_has_href_attribute(&store, LINK_SELECTOR);
@@ -281,13 +291,16 @@ fn bench_synthetic_links(c: &mut Criterion) {
                     consume_link_results(black_box(&store));
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- End-to-end (query construction + parse + consume) ---
-        {
-            let mut group = c.benchmark_group("parse/synthetic_links/end_to_end/all/save_all");
-            group.throughput(throughput.clone());
+    // --- End-to-end (query construction + parse + consume) ---
+    {
+        let mut group = c.benchmark_group("parse/synthetic_links/end_to_end/all/save_all");
+        for &size in synthetic_sizes() {
+            let html = generate_link_list_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
 
             // Validate the same builder outside the timed loop
             let validation_queries = &[build_link_all_query(LINK_SELECTOR)];
@@ -302,8 +315,8 @@ fn bench_synthetic_links(c: &mut Criterion) {
                     consume_link_results(black_box(&store));
                 })
             });
-            group.finish();
         }
+        group.finish();
     }
 }
 
@@ -438,17 +451,14 @@ fn consume_product_results(store: &scah::Store<'_, '_>) {
         }
     }
 }
-
 fn bench_product_catalog(c: &mut Criterion) {
-    for &size in PRODUCT_SIZES {
-        let html = generate_product_catalog_html(size);
-        let throughput = Throughput::Bytes(html.len() as u64);
-
-        // --- Prebuilt nested_all ---
-        {
-            let mut group = c.benchmark_group("parse/product_catalog/prebuilt/nested_all/save_all");
-            group.throughput(throughput.clone());
-            let queries = &[build_nested_all_query()];
+    // --- Prebuilt nested_all ---
+    {
+        let mut group = c.benchmark_group("parse/product_catalog/prebuilt/nested_all/save_all");
+        let queries = &[build_nested_all_query()];
+        for &size in PRODUCT_SIZES {
+            let html = generate_product_catalog_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
             let store = parse(&html, queries).unwrap();
             assert_product_catalog_all(
                 &store,
@@ -465,15 +475,21 @@ fn bench_product_catalog(c: &mut Criterion) {
                     black_box(store);
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- Prebuilt nested_first ---
-        {
-            let mut group =
-                c.benchmark_group("parse/product_catalog/prebuilt/nested_first/save_all");
-            group.throughput(throughput.clone());
-            let queries = &[build_nested_first_query()];
+    // --- Prebuilt nested_first ---
+    //
+    // Intentionally no group.throughput(...).
+    // Query::first exits after the first product and nested child queries
+    // complete, so the full input document is not processed. Reporting
+    // html.len() as byte throughput would be misleading.
+    {
+        let mut group = c.benchmark_group("parse/product_catalog/prebuilt/nested_first/save_all");
+        let queries = &[build_nested_first_query()];
+        for &size in PRODUCT_SIZES {
+            let html = generate_product_catalog_html(size);
             let store = parse(&html, queries).unwrap();
             assert_product_catalog_first(
                 &store,
@@ -489,14 +505,17 @@ fn bench_product_catalog(c: &mut Criterion) {
                     black_box(store);
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- Consume nested_all ---
-        {
-            let mut group = c.benchmark_group("parse/product_catalog/consume/nested_all/save_all");
-            group.throughput(throughput.clone());
-            let queries = &[build_nested_all_query()];
+    // --- Consume nested_all ---
+    {
+        let mut group = c.benchmark_group("parse/product_catalog/consume/nested_all/save_all");
+        let queries = &[build_nested_all_query()];
+        for &size in PRODUCT_SIZES {
+            let html = generate_product_catalog_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
             let store = parse(&html, queries).unwrap();
             assert_product_catalog_all(
                 &store,
@@ -513,14 +532,16 @@ fn bench_product_catalog(c: &mut Criterion) {
                     consume_product_results(black_box(&store));
                 })
             });
-            group.finish();
         }
+        group.finish();
+    }
 
-        // --- End-to-end nested_all ---
-        {
-            let mut group =
-                c.benchmark_group("parse/product_catalog/end_to_end/nested_all/save_all");
-            group.throughput(throughput.clone());
+    // --- End-to-end nested_all ---
+    {
+        let mut group = c.benchmark_group("parse/product_catalog/end_to_end/nested_all/save_all");
+        for &size in PRODUCT_SIZES {
+            let html = generate_product_catalog_html(size);
+            group.throughput(Throughput::Bytes(html.len() as u64));
 
             // Validate the query builder itself before the timed loop.
             // The end-to-end benchmark constructs a fresh query inside the loop,
@@ -549,8 +570,8 @@ fn bench_product_catalog(c: &mut Criterion) {
                     consume_product_results(black_box(&store));
                 })
             });
-            group.finish();
         }
+        group.finish();
     }
 }
 
@@ -558,13 +579,11 @@ fn bench_product_catalog(c: &mut Criterion) {
 
 fn bench_multi_query(c: &mut Criterion) {
     let element_count = MULTI_QUERY_COUNT;
+    let mut group = c.benchmark_group("parse/multi_query/prebuilt");
 
     for &query_count in MULTI_QUERY_COUNTS {
         let html = generate_multi_query_html(element_count, query_count);
-        let throughput = Throughput::Bytes(html.len() as u64);
-
-        let mut group = c.benchmark_group("parse/multi_query/prebuilt");
-        group.throughput(throughput);
+        group.throughput(Throughput::Bytes(html.len() as u64));
 
         // Build queries targeting each class
         let selectors: Vec<String> = (0..query_count).map(|i| format!(".class-{i}")).collect();
@@ -591,9 +610,9 @@ fn bench_multi_query(c: &mut Criterion) {
                 })
             },
         );
-
-        group.finish();
     }
+
+    group.finish();
 }
 
 // ── Criterion harness ──────────────────────────────────────────────────────

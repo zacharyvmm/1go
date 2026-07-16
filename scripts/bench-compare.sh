@@ -18,6 +18,12 @@ if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     exit 1
 fi
 
+# Capture the exact working-tree state before any Cargo invocation so we can
+# detect mutations introduced by this script (for example a lockfile rewrite).
+INITIAL_WORKTREE_STATUS="$(
+    git -C "$ROOT" status --porcelain=v1 --untracked-files=all
+)"
+
 # ── Resolve revisions ───────────────────────────────────────────────────────
 
 if ! BASE_SHA="$(git -C "$ROOT" rev-parse "$BASE_REF" 2>/dev/null)"; then
@@ -114,9 +120,7 @@ fi
 
 # ── Dirty working tree check ────────────────────────────────────────────────
 
-WORKTREE_STATUS="$(git -C "$ROOT" status --porcelain)"
-
-if [ -n "$WORKTREE_STATUS" ]; then
+if [ -n "$INITIAL_WORKTREE_STATUS" ]; then
     echo "  working tree: dirty; current measurements include local changes"
 else
     echo "  working tree: clean"
@@ -173,6 +177,18 @@ fi
 export CARGO_INCREMENTAL=0
 export SCAH_BENCH_PROFILE="$PROFILE"
 
+run_cargo_bench() {
+    # Wrapper so --locked failures get an actionable message without rewriting
+    # Cargo.lock. Arguments are forwarded to `cargo bench`.
+    if ! cargo bench --locked "$@"; then
+        echo >&2
+        echo "error: cargo bench --locked failed." >&2
+        echo "The benchmark comparison requires Cargo.lock to be up to date." >&2
+        echo "Update and commit or stage the lockfile intentionally before rerunning." >&2
+        return 1
+    fi
+}
+
 # ── Compile both revisions before measuring ─────────────────────────────────
 
 echo
@@ -181,7 +197,7 @@ echo "Compiling baseline benchmark..."
 (
     cd "$BASE_WORKTREE"
     CARGO_TARGET_DIR="$BASE_TARGET" \
-        cargo bench \
+        run_cargo_bench \
         -p scah-regression-benches \
         --bench "$BENCH" \
         --no-run
@@ -193,7 +209,7 @@ echo "Compiling current benchmark..."
 (
     cd "$ROOT"
     CARGO_TARGET_DIR="$HEAD_TARGET" \
-        cargo bench \
+        run_cargo_bench \
         -p scah-regression-benches \
         --bench "$BENCH" \
         --no-run
@@ -207,7 +223,7 @@ echo "Measuring baseline..."
 (
     cd "$BASE_WORKTREE"
     CARGO_TARGET_DIR="$BASE_TARGET" \
-        cargo bench \
+        run_cargo_bench \
         -p scah-regression-benches \
         --bench "$BENCH" \
         -- \
@@ -234,7 +250,7 @@ echo "Measuring current working tree..."
 (
     cd "$ROOT"
     CARGO_TARGET_DIR="$HEAD_TARGET" \
-        cargo bench \
+        run_cargo_bench \
         -p scah-regression-benches \
         --bench "$BENCH" \
         -- \
@@ -253,9 +269,9 @@ mkdir -p "$REPORT_DIR"
 cp -a "$HEAD_TARGET/criterion/." "$REPORT_DIR/"
 # ── Metadata ────────────────────────────────────────────────────────────────
 
-if [ -n "$WORKTREE_STATUS" ]; then
+if [ -n "$INITIAL_WORKTREE_STATUS" ]; then
     DIRTY_COUNT="$(
-        printf '%s\n' "$WORKTREE_STATUS" |
+        printf '%s\n' "$INITIAL_WORKTREE_STATUS" |
         wc -l |
         tr -d ' '
     )"
@@ -272,6 +288,8 @@ base_ref=$BASE_REF
 base_sha=$BASE_SHA
 head_sha=$HEAD_SHA
 head_dirty_files=$DIRTY_COUNT
+working_tree_unchanged=true
+cargo_locked=true
 benchmark=$BENCH
 profile=$PROFILE
 rustc=$RUSTC_VERSION
@@ -281,6 +299,8 @@ benchmark_harness_diff_present=$HARNESS_DIFF_PRESENT
 benchmark_harness_diff_allowed=$ALLOW_BENCH_HARNESS_DIFF
 date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
+
+printf '%s\n' "$INITIAL_WORKTREE_STATUS" > "$REPORT_DIR/working-tree-status.txt"
 
 if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
     {
@@ -294,6 +314,31 @@ if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
             printf '%s\n' "$UNTRACKED_HARNESS_FILES"
         fi
     } > "$REPORT_DIR/harness-diff.txt"
+fi
+
+# ── Post-run mutation detection ─────────────────────────────────────────────
+
+FINAL_WORKTREE_STATUS="$(
+    git -C "$ROOT" status --porcelain=v1 --untracked-files=all
+)"
+
+if [ "$FINAL_WORKTREE_STATUS" != "$INITIAL_WORKTREE_STATUS" ]; then
+    echo "error: benchmark comparison modified the working tree" >&2
+    echo >&2
+    echo "Initial status:" >&2
+    if [ -n "$INITIAL_WORKTREE_STATUS" ]; then
+        printf '%s\n' "$INITIAL_WORKTREE_STATUS" | sed 's/^/  /' >&2
+    else
+        echo "  (clean)" >&2
+    fi
+    echo >&2
+    echo "Final status:" >&2
+    if [ -n "$FINAL_WORKTREE_STATUS" ]; then
+        printf '%s\n' "$FINAL_WORKTREE_STATUS" | sed 's/^/  /' >&2
+    else
+        echo "  (clean)" >&2
+    fi
+    exit 1
 fi
 
 echo

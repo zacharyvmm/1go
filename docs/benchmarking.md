@@ -142,10 +142,9 @@ The regression suite covers:
 | Query construction | Building `Query` objects independently from parsing |
 | Synthetic link parsing | Parsing link-heavy documents at 100/1K/10K scales |
 | First-match placement | `Query::first` with early/middle/late/no-match positions. Validates exactly one result with exact content, attributes, class, and expected position. Reports **latency** (not throughput). |
-| Nested product catalog | Hierarchical queries against product-like HTML |
+| Nested product catalog | Hierarchical queries against product-like HTML. `nested_all` scenarios report full-document byte throughput; `nested_first` reports **latency** only because `Query::first` exits after the first product and nested child queries complete. |
 | Multi-query pressure | Parsing one document with 1/4/16/32 independent queries |
 | Instruction counts | Deterministic CPU metrics via Gungraun (Linux only). Requires Valgrind and `gungraun-runner` to execute. On non-Linux targets, compiles to a small explanatory fallback. |
-
 Every benchmark validates its expected results before timing begins.
 A performance improvement that silently drops results will cause the
 benchmark setup to fail rather than appear faster.
