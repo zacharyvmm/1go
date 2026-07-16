@@ -52,6 +52,7 @@ if ! git -C "$ROOT" cat-file \
     echo "For direct script invocation:" >&2
     echo >&2
     echo "    BASE_REF=<commit> ./scripts/bench-compare.sh" >&2
+    exit 1
 fi
 
 # ── Harness-integrity check ─────────────────────────────────────────────────
@@ -164,6 +165,7 @@ if [ ! -f "$BASE_WORKTREE/benches/regression/Cargo.toml" ]; then
     echo "For direct script invocation:" >&2
     echo >&2
     echo "    BASE_REF=<commit> ./scripts/bench-compare.sh" >&2
+    exit 1
 fi
 
 # ── Environment ─────────────────────────────────────────────────────────────
