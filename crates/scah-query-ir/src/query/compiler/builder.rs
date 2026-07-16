@@ -428,10 +428,50 @@ mod tests {
             "a[]",
             "*",
             "a[123=\"321\"]",
+            r#"[data-x="unterminated]"#,
+            "[=value]",
+            "[data-x^]",
         ];
 
         for selector in invalid {
             assert!(Query::all(selector, Save::none()).is_err(), "{selector}");
+        }
+    }
+
+    // Priority 2: escaped quotes must not panic. The parser now correctly
+    // handles escaped quotes inside attribute values (via raw slicing).
+    #[test]
+    fn escaped_quote_in_attribute_selector_does_not_panic() {
+        let result = Query::all(r#"[data-x="a\"b"]"#, Save::none());
+        // Must not panic. Either ok (escape handled) or err (if unsupported).
+        let _ = result;
+    }
+
+    #[test]
+    fn duplicate_ids_are_rejected() {
+        let result = Query::all("#a1#a2", Save::none());
+        assert!(result.is_err(), "duplicate IDs should be rejected");
+    }
+
+    // Priority 4: combinator tokenization without spaces
+    #[test]
+    fn child_combinator_without_spaces_is_valid() {
+        assert!(Query::all("main>section", Save::none()).is_ok());
+    }
+
+    #[test]
+    fn complex_selector_with_child_combinator_is_valid() {
+        assert!(Query::all("main > section", Save::none()).is_ok());
+    }
+
+    // Priority 5: vertical tab must not be accepted as CSS whitespace
+    #[test]
+    fn vertical_tab_in_selector_is_rejected() {
+        for selector in ["main \u{000B}", "\u{000B}", "main\t\u{000B}"] {
+            assert!(
+                Query::all(selector, Save::none()).is_err(),
+                "{selector:?} must not treat vertical tab as CSS whitespace"
+            );
         }
     }
 

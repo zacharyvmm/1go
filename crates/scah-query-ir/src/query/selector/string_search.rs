@@ -15,33 +15,14 @@ impl AttributeSelectionKind {
             Self::Exact => query == source,
             Self::Presence => true,
             Self::WhitespaceSeparated => source.split_whitespace().any(|word| word == query),
-            Self::HyphenSeparated => source.split_whitespace().any(|word| {
-                if word == query {
-                    return true;
-                }
-
-                if query.len() + 1 > word.len() {
-                    return false;
-                }
-
-                let is_prefix = query == &word[0..query.len()];
-                let is_dash_next = "-" == &word[query.len()..query.len() + 1];
-
-                is_prefix && is_dash_next
-            }),
-            Self::Prefix => {
-                if query.len() > source.len() {
-                    return false;
-                }
-                query == &source[0..query.len()]
+            Self::HyphenSeparated => {
+                source == query
+                    || source
+                        .strip_prefix(query)
+                        .is_some_and(|rest| rest.starts_with('-'))
             }
-            Self::Suffix => {
-                if query.len() > source.len() {
-                    return false;
-                }
-                query == &source[(source.len() - query.len())..]
-            }
-
+            Self::Prefix => source.starts_with(query),
+            Self::Suffix => source.ends_with(query),
             Self::Substring => source.contains(query),
         }
     }
@@ -70,21 +51,26 @@ mod tests {
     }
 
     #[test]
+    fn test_prefix() {
+        let kind = AttributeSelectionKind::Prefix;
+        assert!(kind.find("hello wor", "hello world in test"));
+    }
+
+    #[test]
     fn test_with_hypen_separated() {
         let kind = AttributeSelectionKind::HyphenSeparated;
-        assert!(kind.find("en", "hello en-world"));
+        assert!(kind.find("en", "en"));
+        assert!(kind.find("en", "en-US"));
+        assert!(kind.find("en", "en-us"));
     }
 
     #[test]
     fn test_without_hypen_separated() {
         let kind = AttributeSelectionKind::HyphenSeparated;
-        assert!(kind.find("en", "hello en world"));
-    }
-
-    #[test]
-    fn test_prefix() {
-        let kind = AttributeSelectionKind::Prefix;
-        assert!(kind.find("hello wor", "hello world in test"));
+        assert!(!kind.find("en", "xx en-US"));
+        assert!(!kind.find("en", "xen-US"));
+        assert!(!kind.find("en", "hello en-world"));
+        assert!(!kind.find("en", "hello en world"));
     }
 
     #[test]
@@ -97,5 +83,23 @@ mod tests {
     fn test_substring() {
         let kind = AttributeSelectionKind::Substring;
         assert!(kind.find("world", "helloworldintest"));
+    }
+
+    #[test]
+    fn test_prefix_unicode_no_panic() {
+        let kind = AttributeSelectionKind::Prefix;
+        assert!(!kind.find("e", "éclair"));
+    }
+
+    #[test]
+    fn test_suffix_unicode_no_panic() {
+        let kind = AttributeSelectionKind::Suffix;
+        assert!(!kind.find("e", "café"));
+    }
+
+    #[test]
+    fn test_hyphen_separated_unicode_no_panic() {
+        let kind = AttributeSelectionKind::HyphenSeparated;
+        assert!(!kind.find("e", "é-fr"));
     }
 }

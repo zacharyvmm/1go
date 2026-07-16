@@ -1,11 +1,20 @@
+use super::is_css_whitespace;
 use super::string_search::AttributeSelectionKind;
 use crate::Reader;
 use crate::query::compiler::SelectorParseError;
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-enum QuoteKind {
-    DoubleQuoted,
-    SingleQuoted,
+#[inline]
+fn is_element_selector_boundary(byte: u8) -> bool {
+    is_css_whitespace(byte) || matches!(byte, b'#' | b'.' | b'[' | b'>' | b'+' | b'~' | b'|')
+}
+
+#[inline]
+fn is_attribute_selector_boundary(byte: u8) -> bool {
+    is_css_whitespace(byte)
+        || matches!(
+            byte,
+            b'"' | b'\'' | b'=' | b']' | b'~' | b'|' | b'^' | b'$' | b'*'
+        )
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -114,13 +123,22 @@ struct KeyValueAttributeSelection<'query> {
 }
 
 impl<'query> KeyValueAttributeSelection<'query> {
-    fn push(&mut self, content_inside_quotes: &'query str) {
+    fn push(
+        &mut self,
+        content_inside_quotes: &'query str,
+        position: usize,
+    ) -> Result<(), SelectorParseError> {
         if self.name.is_none() {
             self.name = Some(content_inside_quotes);
+            Ok(())
         } else if self.value.is_none() {
             self.value = Some(content_inside_quotes);
+            Ok(())
         } else {
-            unreachable!();
+            Err(SelectorParseError::new(
+                "attribute selector has multiple values",
+                position,
+            ))
         }
     }
 
@@ -139,9 +157,6 @@ impl<'query> From<&mut Reader<'query>> for AttributeSelection<'query> {
 
 impl<'query> AttributeSelection<'query> {
     fn try_from(reader: &mut Reader<'query>) -> Result<Self, SelectorParseError> {
-        let mut position = reader.get_position();
-
-        let mut opened_quote: Option<QuoteKind> = None;
         let mut equal = false;
         let mut operator_requires_equal = false;
 
@@ -163,34 +178,9 @@ impl<'query> AttributeSelection<'query> {
             }
 
             match token {
-                SelectionAttributeToken::Quote(kind) => {
-                    if opened_quote.is_none() {
-                        opened_quote = Some(kind);
-                        position = reader.get_position();
-                        continue;
-                    }
-
-                    if let Some(quote_kind) = &opened_quote
-                        && *quote_kind != kind
-                    {
-                        continue;
-                    }
-
-                    opened_quote = None;
-
-                    const SIZE_OF_QUOTE: usize = 1;
-                    let end_position = reader.get_position() - SIZE_OF_QUOTE;
-                    let content_inside_quotes = reader.slice(position..end_position);
-
-                    kv.push(content_inside_quotes);
-                }
-
-                SelectionAttributeToken::String(string_value) => {
-                    if opened_quote.is_some() {
-                        continue;
-                    }
-
-                    kv.push(string_value);
+                SelectionAttributeToken::String(string_value)
+                | SelectionAttributeToken::QuotedString(string_value) => {
+                    kv.push(string_value, reader.get_position())?;
                 }
 
                 SelectionAttributeToken::StringMatchSelector(equal_selector) => {
@@ -243,13 +233,6 @@ impl<'query> AttributeSelection<'query> {
             ));
         }
 
-        if opened_quote.is_some() {
-            return Err(SelectorParseError::new(
-                "attribute selector has an unclosed quoted value",
-                reader.get_position(),
-            ));
-        }
-
         if equal && kv.value.is_none() {
             return Err(SelectorParseError::new(
                 "attribute selector is missing a value",
@@ -275,13 +258,11 @@ enum SelectionKeyWords<'query> {
     OpenAttribute,
     CloseAttribute,
 }
-
 impl<'a> SelectionKeyWords<'a> {
     pub fn next(reader: &mut Reader<'a>) -> Option<Self> {
         let start_pos = reader.get_position();
-
         if let Some(token) = reader.peek()
-            && matches!(token, b'>' | b' ' | b'+' | b'~' | b'|')
+            && (matches!(token, b'>' | b'+' | b'~' | b'|') || is_css_whitespace(token))
         {
             return None;
         }
@@ -294,7 +275,12 @@ impl<'a> SelectionKeyWords<'a> {
             b'[' => Some(Self::OpenAttribute),
             b']' => Some(Self::CloseAttribute),
             _ => {
-                reader.next_until_list(&[b' ', b'#', b'.', b'[']);
+                while let Some(byte) = reader.peek() {
+                    if is_element_selector_boundary(byte) {
+                        break;
+                    }
+                    reader.skip();
+                }
                 Some(Self::String(reader.slice(start_pos..reader.get_position())))
             }
         }
@@ -303,14 +289,19 @@ impl<'a> SelectionKeyWords<'a> {
 
 enum SelectionAttributeToken<'a> {
     String(&'a str),
-    Quote(QuoteKind),
+    QuotedString(&'a str),
     Equal,
     StringMatchSelector(AttributeSelectionKind),
 }
 
 impl<'a> SelectionAttributeToken<'a> {
     pub fn next(reader: &mut Reader<'a>) -> Result<Option<Self>, SelectorParseError> {
-        reader.next_while(b' ');
+        while let Some(b) = reader.peek() {
+            if !is_css_whitespace(b) {
+                break;
+            }
+            reader.skip();
+        }
 
         let start_pos = reader.get_position();
 
@@ -325,8 +316,24 @@ impl<'a> SelectionAttributeToken<'a> {
         };
 
         Ok(match token {
-            b'"' => Some(Self::Quote(QuoteKind::DoubleQuoted)),
-            b'\'' => Some(Self::Quote(QuoteKind::SingleQuoted)),
+            b'"' | b'\'' => {
+                let quote = token;
+                let content_start = reader.get_position();
+
+                reader.next_until_unescaped(quote, b'\\');
+
+                if reader.peek() != Some(quote) {
+                    return Err(SelectorParseError::new(
+                        "attribute selector has an unclosed quoted value",
+                        reader.get_position(),
+                    ));
+                }
+
+                let value = reader.slice(content_start..reader.get_position());
+                reader.skip(); // consume closing quote
+
+                Some(Self::QuotedString(value))
+            }
             b'=' => Some(Self::Equal),
             b'~' => Some(Self::StringMatchSelector(
                 AttributeSelectionKind::WhitespaceSeparated,
@@ -339,9 +346,12 @@ impl<'a> SelectionAttributeToken<'a> {
             b'*' => Some(Self::StringMatchSelector(AttributeSelectionKind::Substring)),
             b']' => None,
             _ => {
-                reader.next_until_list(&[
-                    b' ', b'"', b'\'', b'=', b']', b'~', b'|', b'^', b'$', b'*',
-                ]);
+                while let Some(byte) = reader.peek() {
+                    if is_attribute_selector_boundary(byte) {
+                        break;
+                    }
+                    reader.skip();
+                }
                 Some(Self::String(reader.slice(start_pos..reader.get_position())))
             }
         })
@@ -419,9 +429,13 @@ impl<'a> ElementPredicate<'a> {
                             reader.get_position().saturating_sub(id_name.len()),
                         ));
                     }
-                    if element.id.is_none() {
-                        element.id = Some(*id_name);
+                    if element.id.is_some() {
+                        return Err(SelectorParseError::new(
+                            "selector has multiple IDs",
+                            reader.get_position().saturating_sub(id_name.len()),
+                        ));
                     }
+                    element.id = Some(*id_name);
                 }
                 (Some(SelectionKeyWords::Class), SelectionKeyWords::String(class_name)) => {
                     if !is_valid_selector_name(class_name) {
@@ -570,23 +584,11 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_duplicates_in_element_definition() {
+    fn test_duplicate_ids_are_rejected() {
         let mut reader = Reader::new("element#id.class[selected=true]#id#notid");
-        let element = ElementPredicate::from(&mut reader);
-
-        assert_eq!(
-            element,
-            ElementPredicate {
-                name: Some("element"),
-                id: Some("id"),
-                classes: ClassSelections::from_static(&["class"]),
-                attributes: AttributeSelections::from(vec![AttributeSelection {
-                    name: "selected",
-                    value: Some("true"),
-                    kind: AttributeSelectionKind::Exact
-                }]),
-            }
-        );
+        let result = ElementPredicate::try_from(&mut reader);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().message(), "selector has multiple IDs");
     }
 
     #[test]
@@ -603,5 +605,118 @@ mod tests {
                 attributes: AttributeSelections::from_static(&[]),
             }
         );
+    }
+
+    #[test]
+    fn selector_attribute_value_allows_escaped_double_quote() {
+        let mut reader = Reader::new(r#"a[title="hello \"world\""]"#);
+        let element = ElementPredicate::from(&mut reader);
+
+        assert_eq!(element.attributes.as_slice().len(), 1);
+        assert_eq!(element.attributes.as_slice()[0].name, "title");
+        assert_eq!(
+            element.attributes.as_slice()[0].value,
+            Some(r#"hello \"world\""#)
+        );
+    }
+
+    #[test]
+    fn quoted_attribute_value_allows_equals() {
+        let mut reader = Reader::new(r#"[data-x="a=b"]"#);
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("a=b"));
+    }
+
+    #[test]
+    fn quoted_attribute_value_allows_operator_characters() {
+        for (selector, expected_value) in [
+            (r#"[data-x="a*b"]"#, "a*b"),
+            (r#"[data-x="a~b"]"#, "a~b"),
+            (r#"[data-x="a|b"]"#, "a|b"),
+            (r#"[data-x="a^b"]"#, "a^b"),
+            (r#"[data-x="a$b"]"#, "a$b"),
+        ] {
+            let mut reader = Reader::new(selector);
+            let element = ElementPredicate::from(&mut reader);
+            let attr = &element.attributes.as_slice()[0];
+            assert_eq!(attr.value, Some(expected_value), "{selector} should parse");
+        }
+    }
+
+    #[test]
+    fn quoted_attribute_value_allows_closing_bracket_character() {
+        let mut reader = Reader::new(r#"[data-x="a]b"]"#);
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("a]b"));
+    }
+
+    #[test]
+    fn quoted_attribute_value_allows_url_query_string() {
+        let mut reader = Reader::new(r#"[href="https://example.com/search?q=test"]"#);
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "href");
+        assert_eq!(attr.value, Some("https://example.com/search?q=test"));
+    }
+
+    // ── CSS whitespace around attribute selector operators ──────
+
+    #[test]
+    fn attribute_selector_with_tab_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\t=\t\"value\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_with_newline_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\n=\n\"value\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_with_cr_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\r=\r\"value\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_with_form_feed_around_equals_parses() {
+        let mut reader = Reader::new("[data-x\u{000C}=\u{000C}\"value\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn attribute_selector_unquoted_value_with_css_whitespace_around_operator_parses() {
+        // Unquoted value with tab around `=`.
+        let mut reader = Reader::new("[data-x\t=\tvalue]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("value"));
+    }
+
+    #[test]
+    fn whitespace_inside_quoted_attribute_value_is_preserved() {
+        let mut reader = Reader::new("[data-x=\"a   b\"]");
+        let element = ElementPredicate::from(&mut reader);
+        let attr = &element.attributes.as_slice()[0];
+        assert_eq!(attr.name, "data-x");
+        assert_eq!(attr.value, Some("a   b"));
     }
 }

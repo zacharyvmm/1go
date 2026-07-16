@@ -403,3 +403,53 @@ fn test_macro_query_matches_runtime_store_contents() {
         );
     }
 }
+
+#[test]
+fn escaped_quote_in_attribute_matches() {
+    let html = r#"<a title="hello \"world\"">x</a>"#;
+    let query = Query::all(r#"a[title="hello \"world\""]"#, Save::all())
+        .unwrap()
+        .build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    assert_eq!(
+        store.get(r#"a[title="hello \"world\""]"#).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn quoted_attribute_selector_matches_url_with_query_string() {
+    let html = r#"<a href="https://example.com/search?q=test">x</a>"#;
+    let selector = r#"a[href="https://example.com/search?q=test"]"#;
+
+    let query = Query::all(selector, Save::all()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+
+    assert_eq!(store.get(selector).unwrap().count(), 1);
+}
+
+#[test]
+fn quoted_attribute_selector_matches_value_with_selector_control_chars() {
+    let html = r#"<div data-x="a=b*c]d"></div>"#;
+    let selector = r#"div[data-x="a=b*c]d"]"#;
+
+    let query = Query::all(selector, Save::all()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+
+    assert_eq!(store.get(selector).unwrap().count(), 1);
+}
+
+#[test]
+fn form_feed_descendant_combinator_matches() {
+    let html = "<main><section id='s1'></section></main>";
+    let selector = "main\u{000C}section";
+
+    let query = Query::all(selector, Save::all()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+
+    assert_eq!(store.get(selector).unwrap().count(), 1);
+}
