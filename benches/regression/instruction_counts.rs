@@ -16,8 +16,13 @@
 //! # Measured boundaries
 //!
 //! Each benchmark measures exactly **one** parse. Fixture generation, query
-//! construction, and correctness validation all happen inside Gungraun setup
-//! functions and are excluded from instruction counts.
+//! construction, correctness validation, and destruction of setup inputs all
+//! happen outside the measured instruction-count region.
+//!
+//! The setup input is returned from the benchmark function for teardown so its
+//! large fixture allocations are destroyed outside the measured region.
+//! The parsed `Store` is intentionally dropped inside the measured function,
+//! matching the Criterion parse benchmark's per-iteration drop behavior.
 //!
 //! # Runtime requirements
 //!
@@ -127,41 +132,82 @@ fn setup_first_match_no_match() -> ParseInput {
     ParseInput { html, queries }
 }
 
+// ── Teardown function ──────────────────────────────────────────────────────
+
+/// Destroy the setup input outside the measured instruction-count region.
+///
+/// Gungraun calls this teardown function after measurement concludes, so the
+/// large fixture allocations (HTML string, query vector) are deallocated
+/// outside the profiled window.
+fn drop_parse_input(input: ParseInput) {
+    drop(input);
+}
+
 // ── Benchmark functions (one measured parse each) ──────────────────────────
+//
+// Each benchmark returns the setup input so the teardown function can destroy
+// it outside the measured region. The parsed Store is intentionally dropped
+// inside the measured function, matching the Criterion parse benchmark which
+// drops the Store at the end of each `b.iter(|| ...)` iteration.
 
 #[library_benchmark]
-#[bench::synthetic_links_save_none(setup_synthetic_links_save_none())]
-fn bench_synthetic_links_save_none(input: ParseInput) {
+#[bench::synthetic_links_save_none(
+    args = (),
+    setup = setup_synthetic_links_save_none,
+    teardown = drop_parse_input,
+)]
+fn bench_synthetic_links_save_none(input: ParseInput) -> ParseInput {
     let store = parse(black_box(&input.html), black_box(&input.queries)).unwrap();
     black_box(store);
+    input
 }
 
 #[library_benchmark]
-#[bench::synthetic_links_save_all(setup_synthetic_links_save_all())]
-fn bench_synthetic_links_save_all(input: ParseInput) {
+#[bench::synthetic_links_save_all(
+    args = (),
+    setup = setup_synthetic_links_save_all,
+    teardown = drop_parse_input,
+)]
+fn bench_synthetic_links_save_all(input: ParseInput) -> ParseInput {
     let store = parse(black_box(&input.html), black_box(&input.queries)).unwrap();
     black_box(store);
+    input
 }
 
 #[library_benchmark]
-#[bench::first_match_early(setup_first_match_early())]
-fn bench_first_match_early(input: ParseInput) {
+#[bench::first_match_early(
+    args = (),
+    setup = setup_first_match_early,
+    teardown = drop_parse_input,
+)]
+fn bench_first_match_early(input: ParseInput) -> ParseInput {
     let store = parse(black_box(&input.html), black_box(&input.queries)).unwrap();
     black_box(store);
+    input
 }
 
 #[library_benchmark]
-#[bench::first_match_late(setup_first_match_late())]
-fn bench_first_match_late(input: ParseInput) {
+#[bench::first_match_late(
+    args = (),
+    setup = setup_first_match_late,
+    teardown = drop_parse_input,
+)]
+fn bench_first_match_late(input: ParseInput) -> ParseInput {
     let store = parse(black_box(&input.html), black_box(&input.queries)).unwrap();
     black_box(store);
+    input
 }
 
 #[library_benchmark]
-#[bench::first_match_no_match(setup_first_match_no_match())]
-fn bench_first_match_no_match(input: ParseInput) {
+#[bench::first_match_no_match(
+    args = (),
+    setup = setup_first_match_no_match,
+    teardown = drop_parse_input,
+)]
+fn bench_first_match_no_match(input: ParseInput) -> ParseInput {
     let store = parse(black_box(&input.html), black_box(&input.queries)).unwrap();
     black_box(store);
+    input
 }
 
 // ── Harness entry point ────────────────────────────────────────────────────

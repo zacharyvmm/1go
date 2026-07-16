@@ -42,6 +42,27 @@ jobs:
           --features linux-instruction-benches
           --no-run
 
+  benchmark-portability:
+    name: Benchmark Package Portability
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Check regression benchmark package
+        run: >
+          cargo check
+          -p scah-regression-benches
+          --all-targets
+          --all-features
+
   python:
     name: Python Binding Tests
     runs-on: ubuntu-latest

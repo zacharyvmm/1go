@@ -13,17 +13,15 @@ criterion = {
     version = "0.8.1",
     features = ["html_reports"],
 }
-
-[features]
-default = []
-linux-instruction-benches = ["dep:gungraun"]
-
-[target.'cfg(target_os = "linux")'.dependencies]
 gungraun = {
     version = "0.17",
     features = ["cachegrind"],
     optional = true,
 }
+
+[features]
+default = []
+linux-instruction-benches = ["dep:gungraun"]
 
 [[bench]]
 name = "core_regression"

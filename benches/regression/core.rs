@@ -42,32 +42,69 @@ fn is_quick() -> bool {
 
 // ── Query builder helpers (not timed — used outside measured loops) ────────
 
-fn build_nested_all_query() -> Query<'static> {
-    Query::all(PRODUCT_SELECTOR, Save::all())
+/// Build a nested "all" query with the given selectors.
+///
+/// This is the single authoritative builder for nested-all queries. All
+/// prebuilt, query-construction, end-to-end, and validation code paths use
+/// this function so the query structure cannot drift between validation and
+/// timed code.
+fn build_nested_all_query_with(
+    product_selector: &'static str,
+    title_selector: &'static str,
+    rating_selector: &'static str,
+    description_selector: &'static str,
+) -> Query<'static> {
+    Query::all(product_selector, Save::all())
         .expect("parent selector should parse")
         .then(|product| {
             Ok([
-                product.all(PRODUCT_TITLE_SELECTOR, Save::all())?,
-                product.all(PRODUCT_RATING_SELECTOR, Save::all())?,
-                product.all(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
+                product.all(title_selector, Save::all())?,
+                product.all(rating_selector, Save::all())?,
+                product.all(description_selector, Save::all())?,
             ])
         })
         .expect("child selectors should parse")
         .build()
 }
 
-fn build_nested_first_query() -> Query<'static> {
-    Query::first(PRODUCT_SELECTOR, Save::all())
+/// Build a nested "first" query with the given selectors.
+fn build_nested_first_query_with(
+    product_selector: &'static str,
+    title_selector: &'static str,
+    rating_selector: &'static str,
+    description_selector: &'static str,
+) -> Query<'static> {
+    Query::first(product_selector, Save::all())
         .expect("parent selector should parse")
         .then(|product| {
             Ok([
-                product.first(PRODUCT_TITLE_SELECTOR, Save::all())?,
-                product.first(PRODUCT_RATING_SELECTOR, Save::all())?,
-                product.first(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
+                product.first(title_selector, Save::all())?,
+                product.first(rating_selector, Save::all())?,
+                product.first(description_selector, Save::all())?,
             ])
         })
         .expect("child selectors should parse")
         .build()
+}
+
+/// Convenience wrapper using the default product catalog selectors.
+fn build_nested_all_query() -> Query<'static> {
+    build_nested_all_query_with(
+        PRODUCT_SELECTOR,
+        PRODUCT_TITLE_SELECTOR,
+        PRODUCT_RATING_SELECTOR,
+        PRODUCT_DESCRIPTION_SELECTOR,
+    )
+}
+
+/// Convenience wrapper using the default product catalog selectors.
+fn build_nested_first_query() -> Query<'static> {
+    build_nested_first_query_with(
+        PRODUCT_SELECTOR,
+        PRODUCT_TITLE_SELECTOR,
+        PRODUCT_RATING_SELECTOR,
+        PRODUCT_DESCRIPTION_SELECTOR,
+    )
 }
 
 // ── Query building benchmarks ──────────────────────────────────────────────
@@ -98,17 +135,12 @@ fn bench_query_building(c: &mut Criterion) {
     // --- nested/all ---
     group.bench_function("nested/all", |b| {
         b.iter(|| {
-            let query = Query::all(black_box(PRODUCT_SELECTOR), Save::all())
-                .expect("parent selector should parse")
-                .then(|product| {
-                    Ok([
-                        product.all(black_box(PRODUCT_TITLE_SELECTOR), Save::all())?,
-                        product.all(black_box(PRODUCT_RATING_SELECTOR), Save::all())?,
-                        product.all(black_box(PRODUCT_DESCRIPTION_SELECTOR), Save::all())?,
-                    ])
-                })
-                .expect("child selectors should parse")
-                .build();
+            let query = build_nested_all_query_with(
+                black_box(PRODUCT_SELECTOR),
+                black_box(PRODUCT_TITLE_SELECTOR),
+                black_box(PRODUCT_RATING_SELECTOR),
+                black_box(PRODUCT_DESCRIPTION_SELECTOR),
+            );
             black_box(query);
         })
     });
@@ -116,17 +148,12 @@ fn bench_query_building(c: &mut Criterion) {
     // --- nested/first ---
     group.bench_function("nested/first", |b| {
         b.iter(|| {
-            let query = Query::first(black_box(PRODUCT_SELECTOR), Save::all())
-                .expect("parent selector should parse")
-                .then(|product| {
-                    Ok([
-                        product.first(black_box(PRODUCT_TITLE_SELECTOR), Save::all())?,
-                        product.first(black_box(PRODUCT_RATING_SELECTOR), Save::all())?,
-                        product.first(black_box(PRODUCT_DESCRIPTION_SELECTOR), Save::all())?,
-                    ])
-                })
-                .expect("child selectors should parse")
-                .build();
+            let query = build_nested_first_query_with(
+                black_box(PRODUCT_SELECTOR),
+                black_box(PRODUCT_TITLE_SELECTOR),
+                black_box(PRODUCT_RATING_SELECTOR),
+                black_box(PRODUCT_DESCRIPTION_SELECTOR),
+            );
             black_box(query);
         })
     });
@@ -494,20 +521,29 @@ fn bench_product_catalog(c: &mut Criterion) {
                 c.benchmark_group("parse/product_catalog/end_to_end/nested_all/save_all");
             group.throughput(throughput.clone());
 
+            // Validate the query builder itself before the timed loop.
+            // The end-to-end benchmark constructs a fresh query inside the loop,
+            // so its output cannot be validated without a separate parse. We
+            // validate the builder outside the loop to guard against drift.
+            let validation_queries = &[build_nested_all_query()];
+            let validation_store = parse(&html, validation_queries).unwrap();
+            assert_product_catalog_all(
+                &validation_store,
+                PRODUCT_SELECTOR,
+                PRODUCT_TITLE_SELECTOR,
+                PRODUCT_RATING_SELECTOR,
+                PRODUCT_DESCRIPTION_SELECTOR,
+                size,
+            );
+
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
-                    let queries = &[Query::all(black_box(PRODUCT_SELECTOR), Save::all())
-                        .expect("parent selector should parse")
-                        .then(|product| {
-                            Ok([
-                                product.all(black_box(PRODUCT_TITLE_SELECTOR), Save::all())?,
-                                product.all(black_box(PRODUCT_RATING_SELECTOR), Save::all())?,
-                                product
-                                    .all(black_box(PRODUCT_DESCRIPTION_SELECTOR), Save::all())?,
-                            ])
-                        })
-                        .expect("child selectors should parse")
-                        .build()];
+                    let queries = &[build_nested_all_query_with(
+                        black_box(PRODUCT_SELECTOR),
+                        black_box(PRODUCT_TITLE_SELECTOR),
+                        black_box(PRODUCT_RATING_SELECTOR),
+                        black_box(PRODUCT_DESCRIPTION_SELECTOR),
+                    )];
                     let store = parse(black_box(html), black_box(queries)).unwrap();
                     consume_product_results(black_box(&store));
                 })

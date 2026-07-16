@@ -41,11 +41,37 @@ pub fn assert_first_match_result(
     }
 }
 
+// ── Expected-value helpers ──────────────────────────────────────────────────
+
+/// Expected href attribute for a synthetic link at `index`.
+fn expected_href(index: usize) -> String {
+    format!("/post/{index}")
+}
+
+/// Expected inner HTML for a synthetic link at `index`.
+///
+/// SCaH preserves source-level entity encoding in inner HTML.
+fn expected_link_inner_html(index: usize) -> String {
+    format!("<b>Post</b> &lt;{index}&gt;")
+}
+
+/// Expected text content for a synthetic link at `index`.
+///
+/// SCaH preserves source-level entity encoding in text content.
+fn expected_link_text(index: usize) -> String {
+    format!("Post &lt;{index}&gt;")
+}
+
 // ── Save-mode field validation ─────────────────────────────────────────────
 
 /// Validate `Save::none()` semantics: elements have counts and attributes but
 /// no inner HTML or text content.
 pub fn assert_save_none_result(store: &Store<'_, '_>, selector: &str, expected_count: usize) {
+    assert!(
+        expected_count > 0,
+        "save_none: save validation requires non-empty input"
+    );
+
     let elements: Vec<_> = store
         .get(selector)
         .unwrap_or_else(|| panic!("save_none: no results for {selector:?}"))
@@ -57,7 +83,7 @@ pub fn assert_save_none_result(store: &Store<'_, '_>, selector: &str, expected_c
         elements.len()
     );
 
-    // Validate first and last representative elements
+    // Validate first representative element
     let first = &elements[0];
     assert!(
         first.inner_html.is_none(),
@@ -73,21 +99,35 @@ pub fn assert_save_none_result(store: &Store<'_, '_>, selector: &str, expected_c
         "save_none: expected href=/post/0 for {selector:?}[0]"
     );
 
-    if elements.len() > 1 {
-        let last = &elements[elements.len() - 1];
-        assert!(
-            last.inner_html.is_none(),
-            "save_none: inner_html should be None for {selector:?}[last]"
-        );
-        assert!(
-            last.text_content(store).is_none(),
-            "save_none: text_content should be None for {selector:?}[last]"
-        );
-    }
+    // Validate last representative element
+    let last_index = expected_count - 1;
+    let last = &elements[last_index];
+    let expected_last_href = expected_href(last_index);
+    assert!(
+        last.inner_html.is_none(),
+        "save_none: inner_html should be None for {selector:?}[{last_index}]"
+    );
+    assert!(
+        last.text_content(store).is_none(),
+        "save_none: text_content should be None for {selector:?}[{last_index}]"
+    );
+    assert_eq!(
+        last.attribute(store, "href"),
+        Some(expected_last_href.as_str()),
+        "save_none: expected href={expected_last_href:?} for {selector:?}[{last_index}]"
+    );
 }
 
 /// Validate `Save::only_inner_html()` semantics: inner HTML present, text absent.
+///
+/// Asserts exact inner HTML content for the first and last elements, catching
+/// truncation, wrong element association, missing entity fragments, and stale indexes.
 pub fn assert_save_inner_html_result(store: &Store<'_, '_>, selector: &str, expected_count: usize) {
+    assert!(
+        expected_count > 0,
+        "save_inner_html: save validation requires non-empty input"
+    );
+
     let elements: Vec<_> = store
         .get(selector)
         .unwrap_or_else(|| panic!("save_inner_html: no results for {selector:?}"))
@@ -99,10 +139,13 @@ pub fn assert_save_inner_html_result(store: &Store<'_, '_>, selector: &str, expe
         elements.len()
     );
 
+    // Validate first element
     let first = &elements[0];
-    assert!(
-        first.inner_html.is_some(),
-        "save_inner_html: inner_html should be Some for {selector:?}[0]"
+    let expected_inner = expected_link_inner_html(0);
+    assert_eq!(
+        first.inner_html,
+        Some(expected_inner.as_str()),
+        "save_inner_html: wrong inner HTML for {selector:?}[0]"
     );
     assert!(
         first.text_content(store).is_none(),
@@ -114,32 +157,37 @@ pub fn assert_save_inner_html_result(store: &Store<'_, '_>, selector: &str, expe
         "save_inner_html: expected href=/post/0 for {selector:?}[0]"
     );
 
-    // Verify representative inner HTML content
-    let inner = first.inner_html.unwrap();
-    assert!(
-        inner.contains("<b>Post</b>"),
-        "save_inner_html: expected <b>Post</b> in inner_html, got {inner:?}"
+    // Validate last element
+    let last_index = expected_count - 1;
+    let last = &elements[last_index];
+    let expected_inner = expected_link_inner_html(last_index);
+    let expected_last_href = expected_href(last_index);
+    assert_eq!(
+        last.inner_html,
+        Some(expected_inner.as_str()),
+        "save_inner_html: wrong inner HTML for {selector:?}[{last_index}]"
     );
     assert!(
-        inner.contains("&lt;0&gt;"),
-        "save_inner_html: expected &lt;0&gt; in inner_html, got {inner:?}"
+        last.text_content(store).is_none(),
+        "save_inner_html: text_content should be None for {selector:?}[{last_index}]"
     );
-
-    if elements.len() > 1 {
-        let last = &elements[elements.len() - 1];
-        assert!(
-            last.inner_html.is_some(),
-            "save_inner_html: inner_html should be Some for {selector:?}[last]"
-        );
-        assert!(
-            last.text_content(store).is_none(),
-            "save_inner_html: text_content should be None for {selector:?}[last]"
-        );
-    }
+    assert_eq!(
+        last.attribute(store, "href"),
+        Some(expected_last_href.as_str()),
+        "save_inner_html: expected href={expected_last_href:?} for {selector:?}[{last_index}]"
+    );
 }
 
 /// Validate `Save::only_text_content()` semantics: text present, inner HTML absent.
+///
+/// Asserts exact text content for the first and last elements. SCaH preserves
+/// source-level entity encoding in text content (not decoded).
 pub fn assert_save_text_result(store: &Store<'_, '_>, selector: &str, expected_count: usize) {
+    assert!(
+        expected_count > 0,
+        "save_text: save validation requires non-empty input"
+    );
+
     let elements: Vec<_> = store
         .get(selector)
         .unwrap_or_else(|| panic!("save_text: no results for {selector:?}"))
@@ -151,42 +199,56 @@ pub fn assert_save_text_result(store: &Store<'_, '_>, selector: &str, expected_c
         elements.len()
     );
 
+    // Validate first element
     let first = &elements[0];
+    let expected_text = expected_link_text(0);
     assert!(
         first.inner_html.is_none(),
         "save_text: inner_html should be None for {selector:?}[0]"
     );
-    assert!(
-        first.text_content(store).is_some(),
-        "save_text: text_content should be Some for {selector:?}[0]"
+    assert_eq!(
+        first.text_content(store),
+        Some(expected_text.as_str()),
+        "save_text: wrong text content for {selector:?}[0]"
+    );
+    assert_eq!(
+        first.attribute(store, "href"),
+        Some("/post/0"),
+        "save_text: expected href=/post/0 for {selector:?}[0]"
     );
 
-    // Verify representative text content (SCaH preserves source entities)
-    let text = first.text_content(store).unwrap();
+    // Validate last element
+    let last_index = expected_count - 1;
+    let last = &elements[last_index];
+    let expected_text = expected_link_text(last_index);
+    let expected_last_href = expected_href(last_index);
     assert!(
-        text.contains("Post"),
-        "save_text: expected 'Post' in text_content, got {text:?}"
+        last.inner_html.is_none(),
+        "save_text: inner_html should be None for {selector:?}[{last_index}]"
     );
-    assert!(
-        text.contains("&lt;0&gt;") || text.contains("<0>"),
-        "save_text: expected entity representation in text_content, got {text:?}"
+    assert_eq!(
+        last.text_content(store),
+        Some(expected_text.as_str()),
+        "save_text: wrong text content for {selector:?}[{last_index}]"
     );
-
-    if elements.len() > 1 {
-        let last = &elements[elements.len() - 1];
-        assert!(
-            last.inner_html.is_none(),
-            "save_text: inner_html should be None for {selector:?}[last]"
-        );
-        assert!(
-            last.text_content(store).is_some(),
-            "save_text: text_content should be Some for {selector:?}[last]"
-        );
-    }
+    assert_eq!(
+        last.attribute(store, "href"),
+        Some(expected_last_href.as_str()),
+        "save_text: expected href={expected_last_href:?} for {selector:?}[{last_index}]"
+    );
 }
 
 /// Validate `Save::all()` semantics: both inner HTML and text content present.
+///
+/// Asserts exact inner HTML and text content for the first and last elements.
+/// A regression that returns empty strings, truncated content, or incorrect
+/// entity encoding will fail validation before timing begins.
 pub fn assert_save_all_result(store: &Store<'_, '_>, selector: &str, expected_count: usize) {
+    assert!(
+        expected_count > 0,
+        "save_all: save validation requires non-empty input"
+    );
+
     let elements: Vec<_> = store
         .get(selector)
         .unwrap_or_else(|| panic!("save_all: no results for {selector:?}"))
@@ -198,14 +260,19 @@ pub fn assert_save_all_result(store: &Store<'_, '_>, selector: &str, expected_co
         elements.len()
     );
 
+    // Validate first element
     let first = &elements[0];
-    assert!(
-        first.inner_html.is_some(),
-        "save_all: inner_html should be Some for {selector:?}[0]"
+    let expected_inner = expected_link_inner_html(0);
+    let expected_text = expected_link_text(0);
+    assert_eq!(
+        first.inner_html,
+        Some(expected_inner.as_str()),
+        "save_all: wrong inner HTML for {selector:?}[0]"
     );
-    assert!(
-        first.text_content(store).is_some(),
-        "save_all: text_content should be Some for {selector:?}[0]"
+    assert_eq!(
+        first.text_content(store),
+        Some(expected_text.as_str()),
+        "save_all: wrong text content for {selector:?}[0]"
     );
     assert_eq!(
         first.attribute(store, "href"),
@@ -213,17 +280,27 @@ pub fn assert_save_all_result(store: &Store<'_, '_>, selector: &str, expected_co
         "save_all: expected href=/post/0 for {selector:?}[0]"
     );
 
-    if elements.len() > 1 {
-        let last = &elements[elements.len() - 1];
-        assert!(
-            last.inner_html.is_some(),
-            "save_all: inner_html should be Some for {selector:?}[last]"
-        );
-        assert!(
-            last.text_content(store).is_some(),
-            "save_all: text_content should be Some for {selector:?}[last]"
-        );
-    }
+    // Validate last element
+    let last_index = expected_count - 1;
+    let last = &elements[last_index];
+    let expected_inner = expected_link_inner_html(last_index);
+    let expected_text = expected_link_text(last_index);
+    let expected_last_href = expected_href(last_index);
+    assert_eq!(
+        last.inner_html,
+        Some(expected_inner.as_str()),
+        "save_all: wrong inner HTML for {selector:?}[{last_index}]"
+    );
+    assert_eq!(
+        last.text_content(store),
+        Some(expected_text.as_str()),
+        "save_all: wrong text content for {selector:?}[{last_index}]"
+    );
+    assert_eq!(
+        last.attribute(store, "href"),
+        Some(expected_last_href.as_str()),
+        "save_all: expected href={expected_last_href:?} for {selector:?}[{last_index}]"
+    );
 }
 
 // ── Nested product catalog validation ──────────────────────────────────────

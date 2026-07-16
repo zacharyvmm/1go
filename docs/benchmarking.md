@@ -134,11 +134,36 @@ The regression suite covers:
 | First-match placement | `Query::first` with early/middle/late/no-match positions. Reports **latency** (not throughput), since early exit may process only part of the input. |
 | Nested product catalog | Hierarchical queries against product-like HTML |
 | Multi-query pressure | Parsing one document with 1/4/16/32 independent queries |
-| Instruction counts | Deterministic CPU metrics via Gungraun (Linux only). Fixture construction and validation occur outside the measured region. Requires Valgrind and `gungraun-runner` to execute. |
+| Instruction counts | Deterministic CPU metrics via Gungraun (Linux only). Requires Valgrind and `gungraun-runner` to execute. Compilation succeeds on macOS and other platforms. |
 
 Every benchmark validates its expected results before timing begins.
 A performance improvement that silently drops results will cause the
 benchmark setup to fail rather than appear faster.
+
+### Save-mode validation
+
+Save-mode benchmarks (`Save::none`, `Save::only_inner_html`, `Save::only_text_content`,
+`Save::all`) validate exact representative inner HTML, text content, attributes,
+and first/last element association before timing begins. Empty strings, truncated
+content, wrong element association, and incorrect entity encoding all cause
+validation failures before measurement starts. SCaH preserves source-level entity
+encoding in both inner HTML and text content.
+
+### Gungraun setup and teardown
+
+Fixture creation, query construction, correctness validation, and destruction of
+setup inputs occur outside the measured instruction-count region. Each benchmark
+returns its setup input so the teardown function deallocates the large fixture
+allocations after measurement concludes. The parsed `Store` is intentionally
+dropped inside the measured operation to match Criterion's per-iteration parse
+behavior.
+
+### Portability
+
+The instruction-count benchmark is executable only on Linux with Valgrind and
+`gungraun-runner`. The package remains compile-checkable on supported development
+platforms, including macOS, via `cargo check -p scah-regression-benches
+--all-targets --all-features`.
 
 ## CI
 
@@ -146,3 +171,5 @@ Criterion validation runs in `--test` mode on every PR, exercising benchmark
 setup and correctness checks. The instruction-count benchmark target is
 compiled with its `linux-instruction-benches` feature enabled but is not
 executed in standard CI (execution requires Valgrind and `gungraun-runner`).
+A macOS portability check ensures the benchmark package compiles with all
+features on non-Linux platforms.
