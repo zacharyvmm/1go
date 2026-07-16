@@ -35,8 +35,9 @@ echo "  profile:   $PROFILE"
 
 # ── Dirty working tree check ────────────────────────────────────────────────
 
-if ! git -C "$ROOT" diff --quiet ||
-   ! git -C "$ROOT" diff --cached --quiet; then
+WORKTREE_STATUS="$(git -C "$ROOT" status --porcelain)"
+
+if [ -n "$WORKTREE_STATUS" ]; then
     echo "  working tree: dirty; current measurements include local changes"
 else
     echo "  working tree: clean"
@@ -168,14 +169,17 @@ rm -rf "$REPORT_DIR"
 mkdir -p "$REPORT_DIR"
 
 cp -a "$HEAD_TARGET/criterion/." "$REPORT_DIR/"
-
 # ── Metadata ────────────────────────────────────────────────────────────────
 
-DIRTY_COUNT="$(
-    git -C "$ROOT" status --porcelain |
-    wc -l |
-    tr -d ' '
-)"
+if [ -n "$WORKTREE_STATUS" ]; then
+    DIRTY_COUNT="$(
+        printf '%s\n' "$WORKTREE_STATUS" |
+        wc -l |
+        tr -d ' '
+    )"
+else
+    DIRTY_COUNT=0
+fi
 
 RUSTC_VERSION="$(rustc --version 2>/dev/null || echo "unknown")"
 CARGO_VERSION="$(cargo --version 2>/dev/null || echo "unknown")"

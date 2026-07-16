@@ -8,7 +8,9 @@ use support::fixtures::{
     generate_product_catalog_html,
 };
 use support::validation::{
-    assert_first_match_result, assert_has_href_attribute, assert_match_count,
+    assert_first_match_result, assert_has_href_attribute, assert_multi_query_results,
+    assert_product_catalog_all, assert_product_catalog_first, assert_save_all_result,
+    assert_save_inner_html_result, assert_save_none_result, assert_save_text_result,
 };
 
 // ── Bench sizes ────────────────────────────────────────────────────────────
@@ -36,6 +38,36 @@ fn synthetic_sizes() -> &'static [usize] {
 
 fn is_quick() -> bool {
     std::env::var("SCAH_BENCH_PROFILE").as_deref() == Ok("quick")
+}
+
+// ── Query builder helpers (not timed — used outside measured loops) ────────
+
+fn build_nested_all_query() -> Query<'static> {
+    Query::all(PRODUCT_SELECTOR, Save::all())
+        .expect("parent selector should parse")
+        .then(|product| {
+            Ok([
+                product.all(PRODUCT_TITLE_SELECTOR, Save::all())?,
+                product.all(PRODUCT_RATING_SELECTOR, Save::all())?,
+                product.all(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
+            ])
+        })
+        .expect("child selectors should parse")
+        .build()
+}
+
+fn build_nested_first_query() -> Query<'static> {
+    Query::first(PRODUCT_SELECTOR, Save::all())
+        .expect("parent selector should parse")
+        .then(|product| {
+            Ok([
+                product.first(PRODUCT_TITLE_SELECTOR, Save::all())?,
+                product.first(PRODUCT_RATING_SELECTOR, Save::all())?,
+                product.first(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
+            ])
+        })
+        .expect("child selectors should parse")
+        .build()
 }
 
 // ── Query building benchmarks ──────────────────────────────────────────────
@@ -66,13 +98,13 @@ fn bench_query_building(c: &mut Criterion) {
     // --- nested/all ---
     group.bench_function("nested/all", |b| {
         b.iter(|| {
-            let query = Query::all("div.product", Save::all())
+            let query = Query::all(black_box(PRODUCT_SELECTOR), Save::all())
                 .expect("parent selector should parse")
                 .then(|product| {
                     Ok([
-                        product.all("> h1", Save::all())?,
-                        product.all("> span.rating", Save::all())?,
-                        product.all("> p.description", Save::all())?,
+                        product.all(black_box(PRODUCT_TITLE_SELECTOR), Save::all())?,
+                        product.all(black_box(PRODUCT_RATING_SELECTOR), Save::all())?,
+                        product.all(black_box(PRODUCT_DESCRIPTION_SELECTOR), Save::all())?,
                     ])
                 })
                 .expect("child selectors should parse")
@@ -84,13 +116,13 @@ fn bench_query_building(c: &mut Criterion) {
     // --- nested/first ---
     group.bench_function("nested/first", |b| {
         b.iter(|| {
-            let query = Query::first("div.product", Save::all())
+            let query = Query::first(black_box(PRODUCT_SELECTOR), Save::all())
                 .expect("parent selector should parse")
                 .then(|product| {
                     Ok([
-                        product.first("> h1", Save::all())?,
-                        product.first("> span.rating", Save::all())?,
-                        product.first("> p.description", Save::all())?,
+                        product.first(black_box(PRODUCT_TITLE_SELECTOR), Save::all())?,
+                        product.first(black_box(PRODUCT_RATING_SELECTOR), Save::all())?,
+                        product.first(black_box(PRODUCT_DESCRIPTION_SELECTOR), Save::all())?,
                     ])
                 })
                 .expect("child selectors should parse")
@@ -128,9 +160,8 @@ fn bench_synthetic_links(c: &mut Criterion) {
             let queries = &[Query::all(LINK_SELECTOR, Save::none())
                 .expect("selector should parse")
                 .build()];
-            // Validate
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, LINK_SELECTOR, size);
+            assert_save_none_result(&store, LINK_SELECTOR, size);
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
@@ -149,7 +180,7 @@ fn bench_synthetic_links(c: &mut Criterion) {
                 .expect("selector should parse")
                 .build()];
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, LINK_SELECTOR, size);
+            assert_save_inner_html_result(&store, LINK_SELECTOR, size);
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
@@ -168,7 +199,7 @@ fn bench_synthetic_links(c: &mut Criterion) {
                 .expect("selector should parse")
                 .build()];
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, LINK_SELECTOR, size);
+            assert_save_text_result(&store, LINK_SELECTOR, size);
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
@@ -187,7 +218,7 @@ fn bench_synthetic_links(c: &mut Criterion) {
                 .expect("selector should parse")
                 .build()];
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, LINK_SELECTOR, size);
+            assert_save_all_result(&store, LINK_SELECTOR, size);
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
@@ -206,7 +237,7 @@ fn bench_synthetic_links(c: &mut Criterion) {
                 .expect("selector should parse")
                 .build()];
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, LINK_SELECTOR, size);
+            assert_save_all_result(&store, LINK_SELECTOR, size);
             assert_has_href_attribute(&store, LINK_SELECTOR);
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
@@ -238,6 +269,11 @@ fn bench_synthetic_links(c: &mut Criterion) {
 }
 
 // ── First-match placement benchmarks ───────────────────────────────────────
+//
+// These benchmarks report **latency** rather than full-document byte throughput
+// because `Query::first` can exit early once a match is found. Reporting bytes
+// processed would be misleading: early/middle/late cases may not scan the
+// entire document.
 
 const FIRST_MATCH_SELECTOR: &str = "a.target";
 
@@ -247,8 +283,8 @@ fn bench_first_match(c: &mut Criterion) {
     // --- early ---
     {
         let mut group = c.benchmark_group("parse/first_match/early");
+        // No group.throughput(...) — first-match measures latency, not throughput
         let html = generate_first_match_html(count, Some(0));
-        group.throughput(Throughput::Bytes(html.len() as u64));
         let queries = &[Query::first(FIRST_MATCH_SELECTOR, Save::all())
             .expect("selector should parse")
             .build()];
@@ -267,9 +303,9 @@ fn bench_first_match(c: &mut Criterion) {
     // --- middle ---
     {
         let mut group = c.benchmark_group("parse/first_match/middle");
+        // No group.throughput(...)
         let mid = count / 2;
         let html = generate_first_match_html(count, Some(mid));
-        group.throughput(Throughput::Bytes(html.len() as u64));
         let queries = &[Query::first(FIRST_MATCH_SELECTOR, Save::all())
             .expect("selector should parse")
             .build()];
@@ -293,9 +329,9 @@ fn bench_first_match(c: &mut Criterion) {
     // --- late ---
     {
         let mut group = c.benchmark_group("parse/first_match/late");
+        // No group.throughput(...)
         let last = count - 1;
         let html = generate_first_match_html(count, Some(last));
-        group.throughput(Throughput::Bytes(html.len() as u64));
         let queries = &[Query::first(FIRST_MATCH_SELECTOR, Save::all())
             .expect("selector should parse")
             .build()];
@@ -319,8 +355,8 @@ fn bench_first_match(c: &mut Criterion) {
     // --- no_match ---
     {
         let mut group = c.benchmark_group("parse/first_match/no_match");
+        // No group.throughput(...) — consistent with other first-match cases
         let html = generate_first_match_html(count, None);
-        group.throughput(Throughput::Bytes(html.len() as u64));
         let queries = &[Query::first(FIRST_MATCH_SELECTOR, Save::all())
             .expect("selector should parse")
             .build()];
@@ -345,12 +381,32 @@ const PRODUCT_RATING_SELECTOR: &str = "> span.rating";
 const PRODUCT_DESCRIPTION_SELECTOR: &str = "> p.description";
 
 fn consume_product_results(store: &scah::Store<'_, '_>) {
-    // Consume parent results: iterate over matched product divs and access fields
-    if let Some(elements) = store.get(PRODUCT_SELECTOR) {
-        for element in elements {
-            black_box(element.attribute(store, "class"));
-            black_box(&element.inner_html);
-            black_box(&element.text_content(store));
+    // Consume both parent and nested child results
+    if let Some(products) = store.get(PRODUCT_SELECTOR) {
+        for product in products {
+            black_box(product.attribute(store, "class"));
+            black_box(&product.inner_html);
+            black_box(&product.text_content(store));
+
+            // Consume nested child results for each product
+            if let Some(titles) = product.get(store, PRODUCT_TITLE_SELECTOR) {
+                for title in titles {
+                    black_box(&title.inner_html);
+                    black_box(&title.text_content(store));
+                }
+            }
+            if let Some(ratings) = product.get(store, PRODUCT_RATING_SELECTOR) {
+                for rating in ratings {
+                    black_box(&rating.inner_html);
+                    black_box(&rating.text_content(store));
+                }
+            }
+            if let Some(descriptions) = product.get(store, PRODUCT_DESCRIPTION_SELECTOR) {
+                for description in descriptions {
+                    black_box(&description.inner_html);
+                    black_box(&description.text_content(store));
+                }
+            }
         }
     }
 }
@@ -364,19 +420,16 @@ fn bench_product_catalog(c: &mut Criterion) {
         {
             let mut group = c.benchmark_group("parse/product_catalog/prebuilt/nested_all/save_all");
             group.throughput(throughput.clone());
-            let queries = &[Query::all(PRODUCT_SELECTOR, Save::all())
-                .expect("parent selector should parse")
-                .then(|product| {
-                    Ok([
-                        product.all(PRODUCT_TITLE_SELECTOR, Save::all())?,
-                        product.all(PRODUCT_RATING_SELECTOR, Save::all())?,
-                        product.all(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
-                    ])
-                })
-                .expect("child selectors should parse")
-                .build()];
+            let queries = &[build_nested_all_query()];
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, PRODUCT_SELECTOR, size);
+            assert_product_catalog_all(
+                &store,
+                PRODUCT_SELECTOR,
+                PRODUCT_TITLE_SELECTOR,
+                PRODUCT_RATING_SELECTOR,
+                PRODUCT_DESCRIPTION_SELECTOR,
+                size,
+            );
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
@@ -392,19 +445,15 @@ fn bench_product_catalog(c: &mut Criterion) {
             let mut group =
                 c.benchmark_group("parse/product_catalog/prebuilt/nested_first/save_all");
             group.throughput(throughput.clone());
-            let queries = &[Query::first(PRODUCT_SELECTOR, Save::all())
-                .expect("parent selector should parse")
-                .then(|product| {
-                    Ok([
-                        product.first(PRODUCT_TITLE_SELECTOR, Save::all())?,
-                        product.first(PRODUCT_RATING_SELECTOR, Save::all())?,
-                        product.first(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
-                    ])
-                })
-                .expect("child selectors should parse")
-                .build()];
+            let queries = &[build_nested_first_query()];
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, PRODUCT_SELECTOR, 1);
+            assert_product_catalog_first(
+                &store,
+                PRODUCT_SELECTOR,
+                PRODUCT_TITLE_SELECTOR,
+                PRODUCT_RATING_SELECTOR,
+                PRODUCT_DESCRIPTION_SELECTOR,
+            );
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
@@ -419,19 +468,16 @@ fn bench_product_catalog(c: &mut Criterion) {
         {
             let mut group = c.benchmark_group("parse/product_catalog/consume/nested_all/save_all");
             group.throughput(throughput.clone());
-            let queries = &[Query::all(PRODUCT_SELECTOR, Save::all())
-                .expect("parent selector should parse")
-                .then(|product| {
-                    Ok([
-                        product.all(PRODUCT_TITLE_SELECTOR, Save::all())?,
-                        product.all(PRODUCT_RATING_SELECTOR, Save::all())?,
-                        product.all(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
-                    ])
-                })
-                .expect("child selectors should parse")
-                .build()];
+            let queries = &[build_nested_all_query()];
             let store = parse(&html, queries).unwrap();
-            assert_match_count(&store, PRODUCT_SELECTOR, size);
+            assert_product_catalog_all(
+                &store,
+                PRODUCT_SELECTOR,
+                PRODUCT_TITLE_SELECTOR,
+                PRODUCT_RATING_SELECTOR,
+                PRODUCT_DESCRIPTION_SELECTOR,
+                size,
+            );
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
@@ -450,13 +496,14 @@ fn bench_product_catalog(c: &mut Criterion) {
 
             group.bench_with_input(BenchmarkId::from_parameter(size), &html, |b, html| {
                 b.iter(|| {
-                    let queries = &[Query::all(PRODUCT_SELECTOR, Save::all())
+                    let queries = &[Query::all(black_box(PRODUCT_SELECTOR), Save::all())
                         .expect("parent selector should parse")
                         .then(|product| {
                             Ok([
-                                product.all(PRODUCT_TITLE_SELECTOR, Save::all())?,
-                                product.all(PRODUCT_RATING_SELECTOR, Save::all())?,
-                                product.all(PRODUCT_DESCRIPTION_SELECTOR, Save::all())?,
+                                product.all(black_box(PRODUCT_TITLE_SELECTOR), Save::all())?,
+                                product.all(black_box(PRODUCT_RATING_SELECTOR), Save::all())?,
+                                product
+                                    .all(black_box(PRODUCT_DESCRIPTION_SELECTOR), Save::all())?,
                             ])
                         })
                         .expect("child selectors should parse")
@@ -493,17 +540,9 @@ fn bench_multi_query(c: &mut Criterion) {
             })
             .collect();
 
-        // Validate: each selector matches element_count / query_count elements
+        // Validate each selector independently with class verification
         let store = parse(&html, &queries).unwrap();
-        // Validate: total across all selectors equals element_count
-        let total: usize = selectors
-            .iter()
-            .map(|s| store.get(s).map(|e| e.count()).unwrap_or(0))
-            .sum();
-        assert_eq!(
-            total, element_count,
-            "total matches across all selectors should equal element_count"
-        );
+        assert_multi_query_results(&store, element_count, query_count);
 
         group.bench_with_input(
             BenchmarkId::from_parameter(query_count),

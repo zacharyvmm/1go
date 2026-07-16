@@ -33,7 +33,9 @@ to detect performance regressions during development.
 
 **Location**: `benches/regression/` (the `scah-regression-benches` package)
 
-**Dependencies**: SCaH and Criterion only. No competitor libraries. Fast to compile.
+**Dependencies**: SCaH and Criterion only for the core regression benchmarks.
+The package also has an optional Linux-only Gungraun dependency for
+instruction-count benchmarks (`linux-instruction-benches` feature).
 
 **Commands**:
 
@@ -129,10 +131,10 @@ The regression suite covers:
 |----------|-------------|
 | Query construction | Building `Query` objects independently from parsing |
 | Synthetic link parsing | Parsing link-heavy documents at 100/1K/10K scales |
-| First-match placement | `Query::first` with early/middle/late/no-match positions |
+| First-match placement | `Query::first` with early/middle/late/no-match positions. Reports **latency** (not throughput), since early exit may process only part of the input. |
 | Nested product catalog | Hierarchical queries against product-like HTML |
 | Multi-query pressure | Parsing one document with 1/4/16/32 independent queries |
-| Instruction counts | Deterministic CPU metrics via Gungraun (Linux only) |
+| Instruction counts | Deterministic CPU metrics via Gungraun (Linux only). Fixture construction and validation occur outside the measured region. Requires Valgrind and `gungraun-runner` to execute. |
 
 Every benchmark validates its expected results before timing begins.
 A performance improvement that silently drops results will cause the
@@ -140,6 +142,7 @@ benchmark setup to fail rather than appear faster.
 
 ## CI
 
-The CI workflow compiles the regression benchmark harness to ensure it
-stays valid, but does not gate PRs on wall-clock results due to runner noise.
-A smoke test (`cargo bench --no-run`) runs on every PR.
+Criterion validation runs in `--test` mode on every PR, exercising benchmark
+setup and correctness checks. The instruction-count benchmark target is
+compiled with its `linux-instruction-benches` feature enabled but is not
+executed in standard CI (execution requires Valgrind and `gungraun-runner`).

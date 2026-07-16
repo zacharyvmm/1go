@@ -32,8 +32,15 @@ jobs:
         run: cargo test --workspace --exclude scah-benches
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
-      - name: Compile regression benchmarks
-        run: cargo bench -p scah-regression-benches --bench core_regression --no-run
+      - name: Smoke-test regression benchmarks
+        run: cargo bench -p scah-regression-benches --bench core_regression -- --test
+      - name: Compile instruction benchmarks (Linux, feature-gated)
+        run: >
+          cargo bench
+          -p scah-regression-benches
+          --bench instruction_counts
+          --features linux-instruction-benches
+          --no-run
 
   python:
     name: Python Binding Tests

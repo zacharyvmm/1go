@@ -80,6 +80,20 @@ bench-regression-quick:
         -p scah-regression-benches \
         --bench core_regression
 
+# ── Instruction-count benchmarks (Linux only, requires Valgrind + gungraun-runner) ──
+bench-instructions:
+    cargo bench \
+        -p scah-regression-benches \
+        --bench instruction_counts \
+        --features linux-instruction-benches
+
+check-bench-instructions:
+    cargo bench \
+        -p scah-regression-benches \
+        --bench instruction_counts \
+        --features linux-instruction-benches \
+        --no-run
+
 bench-compare base="origin/main":
     BASE_REF="{{base}}" \
         ./scripts/bench-compare.sh
