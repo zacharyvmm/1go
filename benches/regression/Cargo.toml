@@ -1,0 +1,37 @@
+[package]
+name = "scah-regression-benches"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+scah = {
+    path = "../../crates/scah",
+    features = ["bench-internals"],
+}
+criterion = {
+    version = "0.8.1",
+    features = ["html_reports"],
+}
+
+[features]
+default = []
+linux-instruction-benches = ["dep:gungraun"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gungraun = {
+    version = "0.17",
+    features = ["cachegrind"],
+    optional = true,
+}
+
+[[bench]]
+name = "core_regression"
+path = "core.rs"
+harness = false
+
+[[bench]]
+name = "instruction_counts"
+path = "instruction_counts.rs"
+harness = false
+required-features = ["linux-instruction-benches"]

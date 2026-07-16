@@ -1,4 +1,3 @@
-/target
+/target/
 /benches/bench_data/
-
-criterion.json
+/criterion.json
