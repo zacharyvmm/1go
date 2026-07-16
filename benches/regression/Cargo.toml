@@ -13,9 +13,10 @@ criterion = {
     version = "0.8.1",
     features = ["html_reports"],
 }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 gungraun = {
     version = "0.17",
-    features = ["cachegrind"],
     optional = true,
 }
 

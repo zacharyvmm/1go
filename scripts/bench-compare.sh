@@ -7,7 +7,8 @@ BASE_REF="${BASE_REF:-origin/main}"
 BENCH="${BENCH:-core_regression}"
 PROFILE="${SCAH_BENCH_PROFILE:-full}"
 BASELINE_NAME="${BASELINE_NAME:-main}"
-
+ALLOW_BENCH_HARNESS_DIFF="${ALLOW_BENCH_HARNESS_DIFF:-0}"
+BENCH_HARNESS_PATH="benches/regression"
 # ── Resolve repository root ─────────────────────────────────────────────────
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -32,6 +33,80 @@ echo "  base SHA:  $BASE_SHA"
 echo "  head SHA:  $HEAD_SHA"
 echo "  benchmark: $BENCH"
 echo "  profile:   $PROFILE"
+
+# ── Pre-flight: baseline must contain the regression package ────────────────
+
+if ! git -C "$ROOT" cat-file \
+    -e "$BASE_SHA:benches/regression/Cargo.toml" \
+    2>/dev/null; then
+    echo
+    echo "error: The baseline revision does not contain the SCaH regression benchmark package." >&2
+    echo >&2
+    echo "This is expected while introducing the benchmark infrastructure." >&2
+    echo "Merge the infrastructure first, then use it as the baseline for subsequent performance changes." >&2
+    echo >&2
+    echo "Alternatively, compare against a revision that already contains the harness:" >&2
+    echo >&2
+    echo "    BASE_REF=<commit> just bench-compare" >&2
+    exit 1
+fi
+
+# ── Harness-integrity check ─────────────────────────────────────────────────
+
+TRACKED_HARNESS_DIFF="$(
+    git -C "$ROOT" diff \
+        --name-only \
+        "$BASE_SHA" \
+        -- "$BENCH_HARNESS_PATH"
+)"
+
+UNTRACKED_HARNESS_FILES="$(
+    git -C "$ROOT" ls-files \
+        --others \
+        --exclude-standard \
+        -- "$BENCH_HARNESS_PATH"
+)"
+
+if [ -n "$TRACKED_HARNESS_DIFF" ] ||
+   [ -n "$UNTRACKED_HARNESS_FILES" ]; then
+    HARNESS_DIFF_PRESENT=1
+else
+    HARNESS_DIFF_PRESENT=0
+fi
+
+if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
+    echo >&2
+    echo "error: regression benchmark harness differs from the baseline revision" >&2
+    echo >&2
+
+    if [ -n "$TRACKED_HARNESS_DIFF" ]; then
+        echo "Tracked benchmark differences:" >&2
+        printf '%s\n' "$TRACKED_HARNESS_DIFF" |
+            sed 's/^/  /' >&2
+    fi
+
+    if [ -n "$UNTRACKED_HARNESS_FILES" ]; then
+        echo "Untracked benchmark files:" >&2
+        printf '%s\n' "$UNTRACKED_HARNESS_FILES" |
+            sed 's/^/  /' >&2
+    fi
+
+    echo >&2
+    echo "Criterion can compare only equivalent workloads." >&2
+    echo "Merge benchmark-harness changes separately before benchmarking production changes." >&2
+
+    if [ "$ALLOW_BENCH_HARNESS_DIFF" != "1" ]; then
+        echo >&2
+        echo "For benchmark-infrastructure development only, override with:" >&2
+        echo >&2
+        echo "  ALLOW_BENCH_HARNESS_DIFF=1 just bench-compare <base>" >&2
+        exit 1
+    fi
+
+    echo >&2
+    echo "WARNING: ALLOW_BENCH_HARNESS_DIFF=1 is set." >&2
+    echo "The resulting performance comparison may compare different workloads." >&2
+fi
 
 # ── Dirty working tree check ────────────────────────────────────────────────
 
@@ -195,8 +270,24 @@ profile=$PROFILE
 rustc=$RUSTC_VERSION
 cargo=$CARGO_VERSION
 host=$HOST_TRIPLE
+benchmark_harness_diff_present=$HARNESS_DIFF_PRESENT
+benchmark_harness_diff_allowed=$ALLOW_BENCH_HARNESS_DIFF
 date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
+
+if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
+    {
+        if [ -n "$TRACKED_HARNESS_DIFF" ]; then
+            echo "[tracked]"
+            printf '%s\n' "$TRACKED_HARNESS_DIFF"
+        fi
+
+        if [ -n "$UNTRACKED_HARNESS_FILES" ]; then
+            echo "[untracked]"
+            printf '%s\n' "$UNTRACKED_HARNESS_FILES"
+        fi
+    } > "$REPORT_DIR/harness-diff.txt"
+fi
 
 echo
 echo "Benchmark comparison complete."

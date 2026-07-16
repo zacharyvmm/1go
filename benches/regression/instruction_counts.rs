@@ -15,9 +15,10 @@
 //!
 //! # Measured boundaries
 //!
-//! Each benchmark measures exactly **one** parse. Fixture generation, query
-//! construction, correctness validation, and destruction of setup inputs all
-//! happen outside the measured instruction-count region.
+//! Each benchmark performs exactly one parse. Fixture construction,
+//! query construction, validation, and setup-input destruction are excluded
+//! from measurement. Parsed Store destruction remains included to match the
+//! Criterion parse benchmark.
 //!
 //! The setup input is returned from the benchmark function for teardown so its
 //! large fixture allocations are destroyed outside the measured region.
@@ -29,25 +30,36 @@
 //! Execution requires Linux, Valgrind, and `gungraun-runner`. Compilation only
 //! requires the `linux-instruction-benches` feature.
 
+#[cfg(target_os = "linux")]
 mod support;
 
+#[cfg(target_os = "linux")]
 use gungraun::{library_benchmark, library_benchmark_group, main};
+#[cfg(target_os = "linux")]
 use scah::{Query, Save, parse};
+#[cfg(target_os = "linux")]
 use std::hint::black_box;
+#[cfg(target_os = "linux")]
 use support::fixtures::{generate_first_match_html, generate_link_list_html};
+#[cfg(target_os = "linux")]
 use support::validation::{
     assert_first_match_result, assert_save_all_result, assert_save_none_result,
 };
 
 // ── Sizes ──────────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 const LINK_SIZE: usize = 1_000;
+#[cfg(target_os = "linux")]
 const FIRST_MATCH_COUNT: usize = 10_000;
+#[cfg(target_os = "linux")]
 const LINK_SELECTOR: &str = "a";
+#[cfg(target_os = "linux")]
 const FIRST_MATCH_SELECTOR: &str = "a.target";
 
 // ── Input types ────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 struct ParseInput {
     html: String,
     queries: Vec<Query<'static>>,
@@ -55,6 +67,7 @@ struct ParseInput {
 
 // ── Setup functions (outside measured region) ──────────────────────────────
 
+#[cfg(target_os = "linux")]
 fn setup_synthetic_links_save_none() -> ParseInput {
     let html = generate_link_list_html(LINK_SIZE);
 
@@ -71,6 +84,7 @@ fn setup_synthetic_links_save_none() -> ParseInput {
     ParseInput { html, queries }
 }
 
+#[cfg(target_os = "linux")]
 fn setup_synthetic_links_save_all() -> ParseInput {
     let html = generate_link_list_html(LINK_SIZE);
 
@@ -86,6 +100,7 @@ fn setup_synthetic_links_save_all() -> ParseInput {
     ParseInput { html, queries }
 }
 
+#[cfg(target_os = "linux")]
 fn setup_first_match_early() -> ParseInput {
     let html = generate_first_match_html(FIRST_MATCH_COUNT, Some(0));
 
@@ -96,11 +111,12 @@ fn setup_first_match_early() -> ParseInput {
     ];
 
     let store = parse(&html, &queries).unwrap();
-    assert_first_match_result(&store, FIRST_MATCH_SELECTOR, true, Some("Post 0"));
+    assert_first_match_result(&store, FIRST_MATCH_SELECTOR, Some(0));
 
     ParseInput { html, queries }
 }
 
+#[cfg(target_os = "linux")]
 fn setup_first_match_late() -> ParseInput {
     let html = generate_first_match_html(FIRST_MATCH_COUNT, Some(FIRST_MATCH_COUNT - 1));
 
@@ -111,12 +127,12 @@ fn setup_first_match_late() -> ParseInput {
     ];
 
     let store = parse(&html, &queries).unwrap();
-    let expected_text = format!("Post {}", FIRST_MATCH_COUNT - 1);
-    assert_first_match_result(&store, FIRST_MATCH_SELECTOR, true, Some(&expected_text));
+    assert_first_match_result(&store, FIRST_MATCH_SELECTOR, Some(FIRST_MATCH_COUNT - 1));
 
     ParseInput { html, queries }
 }
 
+#[cfg(target_os = "linux")]
 fn setup_first_match_no_match() -> ParseInput {
     let html = generate_first_match_html(FIRST_MATCH_COUNT, None);
 
@@ -127,7 +143,7 @@ fn setup_first_match_no_match() -> ParseInput {
     ];
 
     let store = parse(&html, &queries).unwrap();
-    assert_first_match_result(&store, FIRST_MATCH_SELECTOR, false, None);
+    assert_first_match_result(&store, FIRST_MATCH_SELECTOR, None);
 
     ParseInput { html, queries }
 }
@@ -139,6 +155,7 @@ fn setup_first_match_no_match() -> ParseInput {
 /// Gungraun calls this teardown function after measurement concludes, so the
 /// large fixture allocations (HTML string, query vector) are deallocated
 /// outside the profiled window.
+#[cfg(target_os = "linux")]
 fn drop_parse_input(input: ParseInput) {
     drop(input);
 }
@@ -150,6 +167,7 @@ fn drop_parse_input(input: ParseInput) {
 // inside the measured function, matching the Criterion parse benchmark which
 // drops the Store at the end of each `b.iter(|| ...)` iteration.
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::synthetic_links_save_none(
     args = (),
@@ -162,6 +180,7 @@ fn bench_synthetic_links_save_none(input: ParseInput) -> ParseInput {
     input
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::synthetic_links_save_all(
     args = (),
@@ -174,6 +193,7 @@ fn bench_synthetic_links_save_all(input: ParseInput) -> ParseInput {
     input
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::first_match_early(
     args = (),
@@ -186,6 +206,7 @@ fn bench_first_match_early(input: ParseInput) -> ParseInput {
     input
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::first_match_late(
     args = (),
@@ -198,6 +219,7 @@ fn bench_first_match_late(input: ParseInput) -> ParseInput {
     input
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::first_match_no_match(
     args = (),
@@ -212,6 +234,7 @@ fn bench_first_match_no_match(input: ParseInput) -> ParseInput {
 
 // ── Harness entry point ────────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 library_benchmark_group!(
     name = instruction_group;
     benchmarks =
@@ -222,4 +245,10 @@ library_benchmark_group!(
         bench_first_match_no_match
 );
 
+#[cfg(target_os = "linux")]
 main!(library_benchmark_groups = instruction_group);
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("instruction-count benchmarks require Linux, Valgrind, and gungraun-runner");
+}

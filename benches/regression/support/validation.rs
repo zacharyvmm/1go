@@ -13,30 +13,64 @@ pub fn assert_has_href_attribute(store: &Store<'_, '_>, selector: &str) {
 }
 
 /// Validate that the first-match benchmark produced the expected result.
+///
+/// When `expected_index` is `Some(index)`, requires exactly one result whose
+/// text, inner HTML, href, and class match the fixture at that index.
+/// When `None`, requires zero results.
 pub fn assert_first_match_result(
     store: &Store<'_, '_>,
     selector: &str,
-    expects_match: bool,
-    expected_position_text: Option<&str>,
+    expected_index: Option<usize>,
 ) {
-    let elements = store.get(selector);
-    if expects_match {
-        let mut elements = elements.expect("expected matches for first-match selector");
-        if let Some(first) = elements.next() {
-            if let Some(expected_text) = expected_position_text {
-                let text = first.text_content(store).unwrap_or("");
-                assert!(
-                    text.contains(expected_text),
-                    "expected first match text to contain {expected_text:?}, got {text:?}"
-                );
-            }
-        } else {
-            panic!("expected at least one match for first-match selector");
+    let elements: Vec<_> = store
+        .get(selector)
+        .map(|elements| elements.collect())
+        .unwrap_or_default();
+
+    match expected_index {
+        Some(index) => {
+            assert_eq!(
+                elements.len(),
+                1,
+                "first-match selector {selector:?}: expected exactly one result, got {}",
+                elements.len(),
+            );
+
+            let element = &elements[0];
+            let expected_text = format!("Post {index}");
+            let expected_href = format!("/post/{index}");
+
+            assert_eq!(
+                element.text_content(store),
+                Some(expected_text.as_str()),
+                "first-match selector {selector:?}: wrong text content",
+            );
+
+            assert_eq!(
+                element.inner_html,
+                Some(expected_text.as_str()),
+                "first-match selector {selector:?}: wrong inner HTML",
+            );
+
+            assert_eq!(
+                element.attribute(store, "href"),
+                Some(expected_href.as_str()),
+                "first-match selector {selector:?}: wrong href",
+            );
+
+            assert_eq!(
+                element.class,
+                Some("target"),
+                "first-match selector {selector:?}: wrong class",
+            );
         }
-    } else {
-        match elements {
-            None => {} // no matches, expected
-            Some(els) => assert_eq!(els.count(), 0, "expected no matches for no_match scenario"),
+
+        None => {
+            assert!(
+                elements.is_empty(),
+                "first-match selector {selector:?}: expected no results, got {}",
+                elements.len(),
+            );
         }
     }
 }

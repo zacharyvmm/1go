@@ -33,9 +33,9 @@ to detect performance regressions during development.
 
 **Location**: `benches/regression/` (the `scah-regression-benches` package)
 
-**Dependencies**: SCaH and Criterion only for the core regression benchmarks.
-The package also has an optional Linux-only Gungraun dependency for
-instruction-count benchmarks (`linux-instruction-benches` feature).
+**Dependencies**: The Criterion benchmark target depends on SCaH and Criterion. The regression
+benchmark package also declares an optional, Linux-targeted Gungraun
+dependency for instruction-count benchmarking.
 
 **Commands**:
 
@@ -92,6 +92,16 @@ that already contains the harness:
 BASE_REF=<commit> just bench-compare
 ```
 
+### Harness-integrity check
+
+bench-compare refuses to run when `benches/regression` differs from the selected
+baseline. Criterion benchmark IDs are meaningful only when both revisions use
+the same workload.
+
+For benchmark-infrastructure development only, this check can be bypassed with
+`ALLOW_BENCH_HARNESS_DIFF=1`. Results produced with that override may not be
+valid performance comparisons.
+
 ## Best practices
 
 ### Machine stability
@@ -121,7 +131,6 @@ Set `SCAH_BENCH_PROFILE` to control measurement depth:
 ```bash
 SCAH_BENCH_PROFILE=quick just bench-regression
 just bench-compare-quick   # shorthand
-```
 
 ## Benchmark scenarios
 
@@ -131,10 +140,10 @@ The regression suite covers:
 |----------|-------------|
 | Query construction | Building `Query` objects independently from parsing |
 | Synthetic link parsing | Parsing link-heavy documents at 100/1K/10K scales |
-| First-match placement | `Query::first` with early/middle/late/no-match positions. Reports **latency** (not throughput), since early exit may process only part of the input. |
+| First-match placement | `Query::first` with early/middle/late/no-match positions. Validates exactly one result with exact content, attributes, class, and expected position. Reports **latency** (not throughput). |
 | Nested product catalog | Hierarchical queries against product-like HTML |
 | Multi-query pressure | Parsing one document with 1/4/16/32 independent queries |
-| Instruction counts | Deterministic CPU metrics via Gungraun (Linux only). Requires Valgrind and `gungraun-runner` to execute. Compilation succeeds on macOS and other platforms. |
+| Instruction counts | Deterministic CPU metrics via Gungraun (Linux only). Requires Valgrind and `gungraun-runner` to execute. On non-Linux targets, compiles to a small explanatory fallback. |
 
 Every benchmark validates its expected results before timing begins.
 A performance improvement that silently drops results will cause the
@@ -158,12 +167,26 @@ allocations after measurement concludes. The parsed `Store` is intentionally
 dropped inside the measured operation to match Criterion's per-iteration parse
 behavior.
 
+### First-match correctness
+
+Every first-match setup validates all of the following before timing begins:
+
+- Exactly one result is returned (no spurious extra matches).
+- The result appears at the expected position in the document.
+- The text content matches exactly (no substring or partial matching).
+- The inner HTML matches exactly.
+- The `href` attribute matches exactly.
+- The target class is exactly `target`.
+
+A regression that returns multiple elements, the wrong element, corrupted
+content, or empty fields causes validation failure before measurement starts.
+
 ### Portability
 
-The instruction-count benchmark is executable only on Linux with Valgrind and
-`gungraun-runner`. The package remains compile-checkable on supported development
-platforms, including macOS, via `cargo check -p scah-regression-benches
---all-targets --all-features`.
+The instruction-count benchmark executes only on Linux with Valgrind and
+gungraun-runner. On non-Linux targets, the benchmark binary compiles to a
+small explanatory fallback. Gungraun itself is included only for Linux
+targets.
 
 ## CI
 

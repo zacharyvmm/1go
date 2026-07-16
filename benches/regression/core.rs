@@ -316,7 +316,7 @@ fn bench_first_match(c: &mut Criterion) {
             .expect("selector should parse")
             .build()];
         let store = parse(&html, queries).unwrap();
-        assert_first_match_result(&store, FIRST_MATCH_SELECTOR, true, Some("Post 0"));
+        assert_first_match_result(&store, FIRST_MATCH_SELECTOR, Some(0));
 
         group.bench_with_input(BenchmarkId::from_parameter(count), &html, |b, html| {
             b.iter(|| {
@@ -337,12 +337,7 @@ fn bench_first_match(c: &mut Criterion) {
             .expect("selector should parse")
             .build()];
         let store = parse(&html, queries).unwrap();
-        assert_first_match_result(
-            &store,
-            FIRST_MATCH_SELECTOR,
-            true,
-            Some(&format!("Post {mid}")),
-        );
+        assert_first_match_result(&store, FIRST_MATCH_SELECTOR, Some(mid));
 
         group.bench_with_input(BenchmarkId::from_parameter(count), &html, |b, html| {
             b.iter(|| {
@@ -363,13 +358,7 @@ fn bench_first_match(c: &mut Criterion) {
             .expect("selector should parse")
             .build()];
         let store = parse(&html, queries).unwrap();
-        assert_first_match_result(
-            &store,
-            FIRST_MATCH_SELECTOR,
-            true,
-            Some(&format!("Post {last}")),
-        );
-
+        assert_first_match_result(&store, FIRST_MATCH_SELECTOR, Some(last));
         group.bench_with_input(BenchmarkId::from_parameter(count), &html, |b, html| {
             b.iter(|| {
                 let store = parse(black_box(html), black_box(queries)).unwrap();
@@ -388,7 +377,7 @@ fn bench_first_match(c: &mut Criterion) {
             .expect("selector should parse")
             .build()];
         let store = parse(&html, queries).unwrap();
-        assert_first_match_result(&store, FIRST_MATCH_SELECTOR, false, None);
+        assert_first_match_result(&store, FIRST_MATCH_SELECTOR, None);
 
         group.bench_with_input(BenchmarkId::from_parameter(count), &html, |b, html| {
             b.iter(|| {
