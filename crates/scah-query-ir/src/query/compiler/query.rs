@@ -85,8 +85,7 @@ pub trait QuerySpec<'query> {
             let kind = self.get_section_selection_kind(position.selection);
             // Nested All-section matches are distinct output parents when
             // child query sections exist.
-            return matches!(kind, SelectionKind::All)
-                && position.next_child(self).is_some();
+            return matches!(kind, SelectionKind::All) && position.next_child(self).is_some();
         }
 
         let next = position

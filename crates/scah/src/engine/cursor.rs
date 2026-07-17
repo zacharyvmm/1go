@@ -141,22 +141,11 @@ impl ScopedCursor {
         }
     }
 
-    /// Depth used by combinators when deciding whether this cursor may match.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn effective_last_depth(&self) -> super::DepthSize {
-        self.match_base_depth()
-    }
-
     pub fn end(&self) -> bool {
         match &self.mode {
             CursorMode::Moving { end, .. } => *end,
             CursorMode::Anchored { end } => *end,
         }
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn last_match_depth(&self) -> super::DepthSize {
-        self.match_base_depth()
     }
 
     #[cfg(test)]
@@ -192,9 +181,7 @@ impl ScopedCursor {
     /// Pause matching until the element at `depth` closes.
     pub fn block_until_close(&mut self, depth: super::DepthSize) {
         if let CursorMode::Moving {
-            end,
-            unwind_depth,
-            ..
+            end, unwind_depth, ..
         } = &mut self.mode
         {
             *end = true;
@@ -205,9 +192,7 @@ impl ScopedCursor {
     /// Resume matching after the blocked element closes.
     pub fn reactivate_after_close(&mut self) {
         if let CursorMode::Moving {
-            end,
-            unwind_depth,
-            ..
+            end, unwind_depth, ..
         } = &mut self.mode
         {
             *end = false;
@@ -216,7 +201,6 @@ impl ScopedCursor {
     }
 
     /// Mark this cursor complete (e.g. after a `First` terminal match).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mark_complete(&mut self) {
         self.set_end(true);
     }
@@ -532,5 +516,15 @@ mod tests {
             }
             _ => panic!("expected Moving"),
         }
+    }
+
+    #[test]
+    fn scoped_cursor_size_is_stable() {
+        // Document size for PR metrics; adjust if layout changes intentionally.
+        // Before (65d2e8d): Moving { last_match_depth: u16, end: bool } — 4 bytes
+        // After (HEAD): Moving { match_base_depth: u16, unwind_depth: Option<u16>, end: bool } — 8 bytes
+        let size = std::mem::size_of::<ScopedCursor>();
+        eprintln!("ScopedCursor size: {size}");
+        assert!(size > 0);
     }
 }

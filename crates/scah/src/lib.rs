@@ -128,7 +128,42 @@ pub use store::{CapacityOptions, Element, ElementId, Store};
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub mod bench_internals {
+    pub use crate::engine::cursor::ScopedCursor;
+    use crate::engine::multiplexer::QueryMultiplexer;
     pub use crate::html::tag::{ScopeKind, TagFlags};
+    use crate::store::Store;
+    use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
+
+    /// Parse HTML while recording the peak total live cursor count across all
+    /// query runners (root + spawned cursors).
+    pub fn parse_with_cursor_stats<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+        html: &'html str,
+        queries: &'a [Q],
+    ) -> Result<(Store<'html, 'query>, usize), ParseError>
+    where
+        Q: QuerySpec<'query>,
+    {
+        if queries.is_empty() {
+            return Err(ParseError::EmptyQueries);
+        }
+
+        let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
+
+        let selectors = QueryMultiplexer::new(queries);
+        selectors.track_live_cursors();
+
+        let mut parser = if no_extra_allocations {
+            XHtmlParser::new(selectors)
+        } else {
+            XHtmlParser::with_capacity(selectors, html.len())
+        };
+
+        let mut reader = Reader::new(html);
+        while parser.next(&mut reader) {}
+
+        let max_live_cursors = parser.selectors.max_live_cursors();
+        Ok((parser.finish(), max_live_cursors))
+    }
 }
 
 /// Errors that can occur during parsing.
@@ -341,5 +376,33 @@ mod tests {
         assert_eq!(a.attribute(&store, "href"), Some("x"));
         assert_eq!(a.attribute(&store, "HREF"), Some("x"));
         assert_eq!(a.attribute(&store, "Href"), Some("x"));
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn peak_live_cursors_adversarial_depths() {
+        use crate::bench_internals::parse_with_cursor_stats;
+
+        fn nested_div_p(depth: u16) -> String {
+            format!(
+                "{opens}<p>x</p>{closes}",
+                opens = "<div>".repeat(depth as usize),
+                closes = "</div>".repeat(depth as usize),
+            )
+        }
+
+        for depth in [8_u16, 512] {
+            let html = nested_div_p(depth);
+            let div_p = Query::all("div p", Save::none()).unwrap().build();
+            let (_, max_div_p) = parse_with_cursor_stats(&html, &[div_p]).unwrap();
+            eprintln!("peak cursors div p depth={depth}: {max_div_p}");
+
+            let div_gt_div_p = Query::all("div > div p", Save::none()).unwrap().build();
+            let (_, max_child) = parse_with_cursor_stats(&html, &[div_gt_div_p]).unwrap();
+            eprintln!("peak cursors div > div p depth={depth}: {max_child}");
+
+            assert!(max_div_p >= 1);
+            assert!(max_child >= 1);
+        }
     }
 }

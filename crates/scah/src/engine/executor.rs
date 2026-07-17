@@ -2,12 +2,12 @@ use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
 use crate::debug::ScopedCursorReason;
 #[cfg(any(debug_assertions, test))]
-use crate::debug::{
-    CursorSuppressionReason, CursorTraceKind, TraceEvent, TransitionRejectReason,
-};
+use crate::debug::{CursorSuppressionReason, CursorTraceKind, TraceEvent, TransitionRejectReason};
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
+use crate::{
+    Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement,
+};
 use smallvec::SmallVec;
 
 enum SpawnOutcome {
@@ -106,11 +106,10 @@ where
         }
     }
 
-    fn existing_dominates(
-        existing: &ScopedCursor,
-        candidate: &ScopedCursor,
-        query: &Q,
-    ) -> bool {
+    /// For descendant steps, live cursors at the same `(parent, position)` form
+    /// an antichain on `match_base_depth`: shallower bases dominate deeper ones,
+    /// so at most one non-`end` cursor survives per obligation key.
+    fn existing_dominates(existing: &ScopedCursor, candidate: &ScopedCursor, query: &Q) -> bool {
         if existing.end() {
             return false;
         }
@@ -126,10 +125,7 @@ where
                 if existing_base <= candidate_base {
                     true
                 } else {
-                    debug_assert!(
-                        false,
-                        "shallower descendant candidate while deeper exists"
-                    );
+                    debug_assert!(false, "shallower descendant candidate while deeper exists");
                     false
                 }
             }
@@ -140,6 +136,8 @@ where
         }
     }
 
+    /// Push `candidate` unless an existing live cursor already dominates it
+    /// (same parent+position, antichain on match_base_depth for descendants).
     fn try_push_cursor(
         &mut self,
         candidate: ScopedCursor,
@@ -338,8 +336,7 @@ where
 
                     spawned_positions = self.cursors[i].next_positions(self.query);
                     for pos in &spawned_positions {
-                        let continuation =
-                            ScopedCursor::new_moving(depth, saved_parent, *pos);
+                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
                         let _ = self.try_push_cursor(continuation, runner_index, store, None);
                     }
                 }
@@ -404,11 +401,8 @@ where
                             );
                             emitted_this_step.push((save_parent, position.selection));
                         }
-                        let mut base = ScopedCursor::new_moving(
-                            depth,
-                            save_parent,
-                            self.cursors[i].position,
-                        );
+                        let mut base =
+                            ScopedCursor::new_moving(depth, save_parent, self.cursors[i].position);
                         let hit = Self::save_element(
                             runner_index,
                             self.query,
@@ -423,12 +417,11 @@ where
                     };
 
                     if is_first && is_section_end {
-                        self.cursors[i].set_end(true);
+                        self.cursors[i].mark_complete();
                     }
 
                     for pos in &spawned_positions {
-                        let continuation =
-                            ScopedCursor::new_moving(depth, saved_parent, *pos);
+                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
                         let _ = self.try_push_cursor(continuation, runner_index, store, None);
                     }
                 }
@@ -586,10 +579,7 @@ mod tests {
             .cursors
             .iter()
             .filter(|c| {
-                !c.end()
-                    && c.is_moving()
-                    && c.position.state == state
-                    && c.parent == parent
+                !c.end() && c.is_moving() && c.position.state == state && c.parent == parent
             })
             .count()
     }
@@ -1508,7 +1498,7 @@ mod tests {
         assert_eq!(
             live_moving_cursors_at(&selection, p_state, output_parent),
             1,
-            "CURSOR INVARIANT (expected to fail until admission): nested div must not spawn duplicate live p cursors for same parent+position"
+            "nested div must not spawn duplicate live p cursors for same parent+position"
         );
 
         // depth 3: <p>
@@ -1553,7 +1543,7 @@ mod tests {
         assert_eq!(
             live_moving_cursors_at(&selection, p_state, output_parent),
             1,
-            "CURSOR INVARIANT (expected to fail): overlapping nested main>div prefixes must not leave two live p cursors with same parent+position"
+            "overlapping nested main>div prefixes must not leave two live p cursors with same parent+position"
         );
 
         selection.next(0, &elem("p"), &doc_pos(4), &mut store, &mut save_hits);
@@ -1577,11 +1567,10 @@ mod tests {
         selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
 
         let output_parent = ElementId::default();
-        let p_count_after_second_div =
-            live_moving_cursors_at(&selection, p_state, output_parent);
+        let p_count_after_second_div = live_moving_cursors_at(&selection, p_state, output_parent);
         assert_eq!(
             p_count_after_second_div, 1,
-            "CURSOR INVARIANT (expected to fail): only one live p cursor after first div>div match"
+            "only one live p cursor after first div>div match"
         );
 
         // Third nested div must not rebased-match as another direct child.
@@ -1589,7 +1578,7 @@ mod tests {
         assert_eq!(
             live_moving_cursors_at(&selection, p_state, output_parent),
             1,
-            "CURSOR INVARIANT (expected to fail): innermost div must not spawn another p cursor"
+            "innermost div must not spawn another p cursor"
         );
 
         selection.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
@@ -1695,20 +1684,18 @@ mod tests {
         let divs: Vec<_> = store2.get("div").unwrap().collect();
         assert_eq!(divs.len(), 1);
         let child_ps: Vec<_> = divs[0].get(&store2, "p").unwrap().collect();
-        assert_eq!(child_ps.len(), 1, "then first('p') must match one p per parent");
+        assert_eq!(
+            child_ps.len(),
+            1,
+            "then first('p') must match one p per parent"
+        );
 
         // Early exit for flat first() is covered by the single global result above;
         // verify first('div') still triggers early_exit on the executor directly.
         let div_only = Query::first("div", Save::all()).unwrap().build();
         let mut selection = QueryExecutor::new(&div_only);
         let mut store3 = Store::default();
-        selection.next(
-            0,
-            &elem("div"),
-            &doc_pos(0),
-            &mut store3,
-            &mut Vec::new(),
-        );
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store3, &mut Vec::new());
         assert!(
             selection.early_exit(),
             "first('div') must set early_exit after terminal match"

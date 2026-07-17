@@ -80,6 +80,11 @@ path = "tag_classification/speed_bench.rs"
 harness = false
 
 [[bench]]
+name = "speed_bench_cursor_dominance"
+path = "cursor_dominance/speed_bench.rs"
+harness = false
+
+[[bench]]
 name = "speed_bench_escape_scanner"
 path = "escape_scanner/speed_bench.rs"
 harness = false

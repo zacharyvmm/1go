@@ -25,6 +25,8 @@ type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
 
 pub struct QueryMultiplexer<'query, Q> {
     runners: Runner<'query, Q>,
+    #[cfg(feature = "bench-internals")]
+    max_live_cursors: std::cell::Cell<usize>,
 }
 
 impl<'html, 'query: 'html, Q> QueryMultiplexer<'query, Q>
@@ -38,7 +40,23 @@ where
                 .iter()
                 .map(|query| QueryExecutor::new(query))
                 .collect::<Runner<'query, Q>>(),
+            #[cfg(feature = "bench-internals")]
+            max_live_cursors: std::cell::Cell::new(0),
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn track_live_cursors(&self) {
+        let total: usize = self.runners.iter().map(|runner| runner.cursors.len()).sum();
+        let current = self.max_live_cursors.get();
+        if total > current {
+            self.max_live_cursors.set(total);
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn max_live_cursors(&self) -> usize {
+        self.max_live_cursors.get()
     }
 
     pub(crate) fn requires_text_content(&self) -> bool {
@@ -59,6 +77,8 @@ where
         for (runner_index, session) in self.runners.iter_mut().enumerate() {
             session.next(runner_index, xhtml_element, position, store, save_hits);
         }
+        #[cfg(feature = "bench-internals")]
+        self.track_live_cursors();
         if len == store.elements.len() {
             xhtml_element.remove_attributes(&mut store.attributes);
         }
@@ -87,6 +107,9 @@ where
         for idx in remove_indices.into_iter().rev() {
             self.runners.remove(idx);
         }
+
+        #[cfg(feature = "bench-internals")]
+        self.track_live_cursors();
 
         self.runners.is_empty()
     }
