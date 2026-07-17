@@ -211,13 +211,8 @@ where
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();
 
-        // A single element visit can be reached by several descendant forks.
-        // Track saves keyed by (parent scope, section) so the same physical
-        // element is stored once per scope+section: a flat descendant selector
-        // dedups globally (shared root parent), while distinct `.then()`
-        // parents each keep their own copy (distinct parent ids).
-        let mut saved_this_step: SmallVec<[(ElementId, QuerySectionId, ElementId); 4]> =
-            SmallVec::new();
+        #[cfg(any(debug_assertions, test))]
+        let mut emitted_this_step: SmallVec<[(ElementId, QuerySectionId); 4]> = SmallVec::new();
 
         for i in 0..snapshot_len {
             if self.cursors[i].end() {
@@ -286,35 +281,35 @@ where
 
                     let saved_parent = if is_save_point {
                         let save_parent = self.cursors[i].parent;
-                        if let Some(existing) = saved_this_step
-                            .iter()
-                            .find(|(parent, section, _)| {
-                                *parent == save_parent && *section == position.selection
-                            })
-                            .map(|(_, _, element_id)| *element_id)
+                        #[cfg(any(debug_assertions, test))]
                         {
-                            // Same physical element already saved under this
-                            // parent scope + section this visit: skip the
-                            // duplicate store push, keep parenting consistent.
-                            if self.query.is_last_save_point(&position) {
-                                save_parent
-                            } else {
-                                existing
-                            }
-                        } else {
-                            let hit = Self::save_element(
-                                runner_index,
-                                self.query,
-                                store,
-                                element.clone(),
-                                &mut self.cursors[i],
+                            debug_assert!(
+                                !emitted_this_step.iter().any(|(parent, section)| {
+                                    *parent == save_parent && *section == position.selection
+                                }),
+                                "duplicate cursor emission for one physical element: \
+                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                element.name,
+                                depth,
+                                save_parent,
+                                position.selection,
+                                position.state,
+                                i,
+                                self.cursors,
                             );
-                            let sp = self.cursors[i].parent;
-                            self.cursors[i].parent = original_parent;
-                            saved_this_step.push((save_parent, position.selection, hit.element_id));
-                            save_hits.push(hit);
-                            sp
+                            emitted_this_step.push((save_parent, position.selection));
                         }
+                        let hit = Self::save_element(
+                            runner_index,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut self.cursors[i],
+                        );
+                        let sp = self.cursors[i].parent;
+                        self.cursors[i].parent = original_parent;
+                        save_hits.push(hit);
+                        sp
                     } else {
                         original_parent
                     };
@@ -352,50 +347,24 @@ where
                     if self_closing {
                         if is_save_point {
                             let save_parent = self.cursors[i].parent;
-                            let already = saved_this_step.iter().any(|(parent, section, _)| {
-                                *parent == save_parent && *section == position.selection
-                            });
-                            if !already {
-                                let mut base = ScopedCursor::new_moving(
+                            #[cfg(any(debug_assertions, test))]
+                            {
+                                debug_assert!(
+                                    !emitted_this_step.iter().any(|(parent, section)| {
+                                        *parent == save_parent && *section == position.selection
+                                    }),
+                                    "duplicate cursor emission for one physical element: \
+                                     element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                    element.name,
                                     depth,
                                     save_parent,
-                                    self.cursors[i].position,
-                                );
-                                let hit = Self::save_element(
-                                    runner_index,
-                                    self.query,
-                                    store,
-                                    element.clone(),
-                                    &mut base,
-                                );
-                                saved_this_step.push((
-                                    save_parent,
                                     position.selection,
-                                    hit.element_id,
-                                ));
-                                save_hits.push(hit);
+                                    position.state,
+                                    i,
+                                    self.cursors,
+                                );
+                                emitted_this_step.push((save_parent, position.selection));
                             }
-                        }
-                        continue;
-                    }
-
-                    spawned_positions = self.cursors[i].next_positions(self.query);
-
-                    let saved_parent = if is_save_point {
-                        let save_parent = self.cursors[i].parent;
-                        if let Some(existing) = saved_this_step
-                            .iter()
-                            .find(|(parent, section, _)| {
-                                *parent == save_parent && *section == position.selection
-                            })
-                            .map(|(_, _, element_id)| *element_id)
-                        {
-                            if self.query.is_last_save_point(&position) {
-                                save_parent
-                            } else {
-                                existing
-                            }
-                        } else {
                             let mut base = ScopedCursor::new_moving(
                                 depth,
                                 save_parent,
@@ -408,10 +377,47 @@ where
                                 element.clone(),
                                 &mut base,
                             );
-                            saved_this_step.push((save_parent, position.selection, hit.element_id));
                             save_hits.push(hit);
-                            base.parent
                         }
+                        continue;
+                    }
+
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+
+                    let saved_parent = if is_save_point {
+                        let save_parent = self.cursors[i].parent;
+                        #[cfg(any(debug_assertions, test))]
+                        {
+                            debug_assert!(
+                                !emitted_this_step.iter().any(|(parent, section)| {
+                                    *parent == save_parent && *section == position.selection
+                                }),
+                                "duplicate cursor emission for one physical element: \
+                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                element.name,
+                                depth,
+                                save_parent,
+                                position.selection,
+                                position.state,
+                                i,
+                                self.cursors,
+                            );
+                            emitted_this_step.push((save_parent, position.selection));
+                        }
+                        let mut base = ScopedCursor::new_moving(
+                            depth,
+                            save_parent,
+                            self.cursors[i].position,
+                        );
+                        let hit = Self::save_element(
+                            runner_index,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut base,
+                        );
+                        save_hits.push(hit);
+                        base.parent
                     } else {
                         self.cursors[i].parent
                     };
