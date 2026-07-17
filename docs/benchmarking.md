@@ -52,58 +52,60 @@ just bench-compare HEAD~1    # Compare against a specific revision
 `just bench-compare` (backed by `scripts/bench-compare.sh` and Python helpers):
 
 1. Resolves the baseline and current revisions.
-2. Scans the live repository for special files (FIFOs, sockets, block/character
-   devices) that Git may omit from `ls-files`, and rejects them before any
-   Cargo invocation (`scripts/scan-special-files.py`).
-3. Captures the current source state in a **verified retry loop** (up to three
-   attempts): records a binary-safe tracked diff, an untracked path inventory,
-   and stages non-ignored untracked entries into a capture directory
-   (`scripts/capture-untracked.py`). After staging, re-reads the tracked diff
-   and untracked inventory and inspects live untracked entries without
-   modifying the capture. Accepts the capture only when all three agree
-   (tracked diff, path inventory, and path/type/mode/content manifest). This is
-   not a true atomic filesystem snapshot — concurrent mutation is detected and
-   retried rather than silently included.
-4. Creates a temporary detached Git worktree for the baseline revision.
-5. Creates a second temporary detached worktree for the current revision,
-   applies tracked dirty changes, and copies untracked files from the capture
-   directory — producing an **isolated source snapshot** that never reads
-   bytes from the live repository during measurement.
-6. Validates that no symlink in either snapshot escapes the snapshot root
+2. Captures the current source state in a **verified retry loop** (up to three
+   attempts): records a binary-safe tracked diff and an untracked path inventory,
+   stages non-ignored untracked entries into a capture directory
+   (`scripts/capture-untracked.py`), and scans for unsupported special files
+   (FIFOs, sockets, block/character devices) at **both** the start and end of
+   each attempt (`scripts/scan-special-files.py`). After staging, re-reads the
+   tracked diff and untracked inventory and inspects live untracked entries
+   without modifying the capture. Accepts the capture only when tracked diff,
+   path inventory, path/type/mode/content manifest, and both special-file scans
+   agree. This is not a fully atomic filesystem snapshot — the workflow verifies
+   stable endpoint state and retries when endpoint observations differ. It does
+   not detect mutations that appear and disappear entirely between observations.
+3. Creates a temporary detached Git worktree for the baseline revision.
+4. Creates a second temporary detached worktree for the current revision,
+   applies tracked dirty changes, and restores untracked entries from the staged
+   capture via Python (`scripts/capture-untracked.py restore`) — never reading
+   bytes from the live repository. Independently inspects the reconstructed
+   entries; their path/type/mode/content manifest must exactly equal the
+   accepted capture manifest before benchmarking begins.
+5. Validates that no symlink in either snapshot escapes the snapshot root
    (rejects absolute targets, `../` escapes, and chained escapes).
-7. Fingerprints both snapshots before any Cargo invocation
+6. Fingerprints both snapshots before any Cargo invocation
    (`scripts/source-fingerprint.py`). The fingerprint depends only on relative
    source paths, file types, modes, file contents, and symlink targets — it
    does not depend on clone or temporary-directory location. `.git`
    administration metadata is excluded.
-8. Hashes both `Cargo.lock` files before any Cargo invocation.
-9. Compiles the benchmark binary for both baseline and current snapshot in
+7. Hashes both `Cargo.lock` files before any Cargo invocation.
+8. Compiles the benchmark binary for both baseline and current snapshot in
    **separate** `CARGO_TARGET_DIR` directories.
-10. Fingerprints both snapshots after compilation to detect persistent mutation.
-11. Runs the baseline benchmarks and saves Criterion baseline data.
-12. Copies only exact saved-baseline measurement directories named in a
+9. Fingerprints both snapshots after compilation to detect persistent mutation.
+10. Runs the baseline benchmarks and saves Criterion baseline data.
+11. Copies only exact saved-baseline measurement directories named in a
     Criterion inventory (`scripts/copy-criterion-baseline.py`), excluding
     `report/`, `new/`, and `change/`. Records a deterministic
     path/type/mode/content manifest of the copied baseline measurements before
     the current run (`scripts/criterion-baseline-manifest.py`).
-13. Runs the current benchmarks against the saved baseline — from the snapshot,
+12. Runs the current benchmarks against the saved baseline — from the snapshot,
     not the live repository. Validates that every copied baseline benchmark
     produced fresh `new/` measurement data and `change/` comparison estimates
     (`scripts/validate-criterion-comparison.py`).
-14. Re-generates the baseline measurement manifest after the current run.
+13. Re-generates the baseline measurement manifest after the current run.
     Publication is aborted if the before/after manifests differ — copied
     baseline data must remain unchanged.
-15. Fingerprints both snapshots after measurement to detect persistent mutation.
-16. Re-fingerprints both snapshots and re-hashes both lockfiles **after** all
+14. Fingerprints both snapshots after measurement to detect persistent mutation.
+15. Re-fingerprints both snapshots and re-hashes both lockfiles **after** all
     Cargo commands complete.
-17. Verifies that all before/after values are identical. If any snapshot or
+16. Verifies that all before/after values are identical. If any snapshot or
     lockfile changed during compilation or measurement, publication is aborted
     with a diagnostic identifying the phase and affected resource.
-18. Stages the Criterion report, metadata, source manifest, untracked capture
+17. Stages the Criterion report, metadata, source manifest, untracked capture
     manifest, and baseline integrity artifacts. Validates that all required
     artifacts are present.
-19. Atomically publishes the report to `target/bench-compare/latest/`.
-20. Cleans up the temporary worktrees, capture directories, and the
+18. Atomically publishes the report to `target/bench-compare/latest/`.
+19. Cleans up the temporary worktrees, capture directories, and the
     repository-common lock.
 
 Helper scripts:
@@ -111,19 +113,22 @@ Helper scripts:
 | Script | Role |
 |--------|------|
 | `scripts/source-fingerprint.py` | Deterministic source-tree fingerprint |
-| `scripts/capture-untracked.py` | Stage and inspect untracked entries with manifests |
-| `scripts/scan-special-files.py` | Reject FIFOs, sockets, and devices Git may omit |
+| `scripts/capture-untracked.py` | Capture, restore, and inspect untracked entries with manifests |
+| `scripts/scan-special-files.py` | Reject FIFOs, sockets, and devices at both capture endpoints |
 | `scripts/copy-criterion-baseline.py` | Copy only inventoried saved-baseline directories |
 | `scripts/criterion-baseline-manifest.py` | Baseline path/type/mode/content manifest |
 | `scripts/validate-criterion-comparison.py` | Require fresh `new/` and `change/` per benchmark |
 
 - Both baseline and current measurements run in detached temporary worktrees.
 - Dirty tracked changes are applied to the current snapshot; non-ignored
-  untracked files are captured during the verified retry loop and copied from
-  the staging directory — the live repository is never read during snapshot
+  untracked files are captured during the verified retry loop and restored from
+  the staged capture via Python with capture-versus-reconstructed manifest
+  verification — the live repository is never read during snapshot
   reconstruction or measurement.
-- Special files (FIFOs, sockets, devices) are scanned and rejected even when
-  Git omits them from `ls-files`, preventing hangs.
+- Every capture attempt scans for unsupported special entries both before
+  capture and before acceptance, preventing FIFOs, sockets, or device nodes
+  omitted by Git's untracked inventory from being silently excluded at either
+  verified endpoint.
 - Edits made to the live repository **after** a successful capture are not part
   of the measurement.
 - Your current branch is never switched. No `git checkout` or `git switch`.
