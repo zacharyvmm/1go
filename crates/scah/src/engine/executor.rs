@@ -4,7 +4,7 @@ use super::multiplexer::{DocumentPosition, SaveHit};
 use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRejectReason};
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
+use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
 use smallvec::SmallVec;
 
 /// NFA execution engine for streaming StAX events.
@@ -96,36 +96,6 @@ where
         } else {
             CursorTraceKind::Scoped { index }
         }
-    }
-
-    fn continuation_match_base(
-        &self,
-        next_state: TransitionId,
-        matched_depth: super::DepthSize,
-        from_match_base: super::DepthSize,
-    ) -> super::DepthSize {
-        if self.query.get_transition(next_state).guard == Combinator::Child {
-            matched_depth
-        } else {
-            from_match_base
-        }
-    }
-
-    fn push_moving_continuation(
-        &mut self,
-        matched_depth: super::DepthSize,
-        from_match_base: super::DepthSize,
-        saved_parent: ElementId,
-        position: Position,
-    ) {
-        let match_base =
-            self.continuation_match_base(position.state, matched_depth, from_match_base);
-        self.cursors.push(ScopedCursor::new_moving_with_match_base(
-            matched_depth,
-            match_base,
-            saved_parent,
-            position,
-        ));
     }
 
     pub fn next(
@@ -289,9 +259,9 @@ where
                     }
 
                     spawned_positions = self.cursors[i].next_positions(self.query);
-                    let from_match_base = self.cursors[i].match_base_depth();
                     for pos in &spawned_positions {
-                        self.push_moving_continuation(depth, from_match_base, saved_parent, *pos);
+                        self.cursors
+                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
@@ -367,12 +337,8 @@ where
                     }
 
                     for pos in &spawned_positions {
-                        self.push_moving_continuation(
-                            depth,
-                            self.cursors[i].match_base_depth(),
-                            saved_parent,
-                            *pos,
-                        );
+                        self.cursors
+                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
                     }
                 }
             }
@@ -1409,9 +1375,29 @@ mod tests {
         selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
 
         let main_depth = 0u16;
+        let div_depth = 1u16;
         let output_parent = ElementId::default();
 
-        // CURSOR INVARIANT (expected to fail): p cursors keep main as match base.
+        // Child-div obligation keeps main as match base after matching a direct child.
+        let child_div_state = TransitionId(1); // `main > div` transition after `main`
+        let child_div_cursors: Vec<_> = selection
+            .cursors
+            .iter()
+            .filter(|c| c.is_moving() && c.position.state == child_div_state)
+            .collect();
+        assert!(
+            !child_div_cursors.is_empty(),
+            "Expected child-div cursors after direct-child div match"
+        );
+        for cursor in &child_div_cursors {
+            assert_eq!(
+                cursor.match_base_depth(),
+                main_depth,
+                "child-div cursor match base must remain main depth ({main_depth})"
+            );
+        }
+
+        // Descendant-p continuation is rooted at the matched div depth.
         let p_cursors: Vec<_> = selection
             .cursors
             .iter()
@@ -1424,8 +1410,8 @@ mod tests {
         for cursor in &p_cursors {
             assert_eq!(
                 cursor.match_base_depth(),
-                main_depth,
-                "p cursor match base must remain main depth ({main_depth}), not rebased to matched div depth"
+                div_depth,
+                "p cursor match base must be matched div depth ({div_depth})"
             );
         }
 
@@ -1435,7 +1421,7 @@ mod tests {
         assert_eq!(
             live_moving_cursors_at(&selection, p_state, output_parent),
             1,
-            "CURSOR INVARIANT (expected to fail): nested div must not spawn duplicate live p cursors for same parent+position"
+            "CURSOR INVARIANT (expected to fail until admission): nested div must not spawn duplicate live p cursors for same parent+position"
         );
 
         // depth 3: <p>
