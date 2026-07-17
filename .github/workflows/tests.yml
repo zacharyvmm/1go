@@ -42,6 +42,9 @@ jobs:
           --features linux-instruction-benches
           --no-run
 
+      - name: Check benchmark comparison script syntax
+        run: bash -n scripts/bench-compare.sh
+
   benchmark-portability:
     name: Benchmark Package Portability
     runs-on: macos-latest

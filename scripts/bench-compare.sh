@@ -137,8 +137,18 @@ REPORT_ROOT="$ROOT/target/bench-compare"
 REPORT_DIR="$REPORT_ROOT/latest"
 REPORT_STAGING="$REPORT_ROOT/.latest-staging-$$"
 REPORT_BACKUP="$REPORT_ROOT/.latest-backup-$$"
+REPORT_LOCK="$REPORT_ROOT/.bench-compare-lock"
+REPORT_LOCK_HELD=0
+
+cleanup_done=0
 
 cleanup() {
+    if [ "${cleanup_done:-0}" = "1" ]; then
+        return
+    fi
+
+    cleanup_done=1
+
     git -C "$ROOT" worktree remove --force "$BASE_WORKTREE" \
         >/dev/null 2>&1 || true
 
@@ -153,11 +163,65 @@ cleanup() {
        [ ! -e "${REPORT_DIR:-}" ]; then
         mv "$REPORT_BACKUP" "$REPORT_DIR" >/dev/null 2>&1 || true
     fi
+
+    if [ "${REPORT_LOCK_HELD:-0}" = "1" ]; then
+        rm -rf "$REPORT_LOCK"
+        REPORT_LOCK_HELD=0
+    fi
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# ── Create detached worktree for baseline ───────────────────────────────────
+# ── Lock helpers ─────────────────────────────────────────────────────────────
+
+acquire_report_lock() {
+    mkdir -p "$REPORT_ROOT"
+
+    if ! mkdir "$REPORT_LOCK" 2>/dev/null; then
+        echo "error: another benchmark comparison is already running" >&2
+
+        if [ -f "$REPORT_LOCK/pid" ]; then
+            local lock_pid
+            lock_pid="$(cat "$REPORT_LOCK/pid" 2>/dev/null || true)"
+
+            if [ -n "$lock_pid" ]; then
+                echo "  lock owner PID: $lock_pid" >&2
+            fi
+        fi
+
+        echo "  lock path: $REPORT_LOCK" >&2
+        echo >&2
+        echo "If no comparison is running, remove the stale lock directory manually." >&2
+        return 1
+    fi
+
+    REPORT_LOCK_HELD=1
+
+    printf '%s\n' "$$" > "$REPORT_LOCK/pid"
+    printf '%s\n' "$HEAD_SHA" > "$REPORT_LOCK/head-sha"
+    printf '%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+        > "$REPORT_LOCK/started-at"
+    hostname > "$REPORT_LOCK/hostname" 2>/dev/null || true
+}
+
+release_report_lock() {
+    if [ "${REPORT_LOCK_HELD:-0}" = "1" ]; then
+        rm -rf "$REPORT_LOCK"
+        REPORT_LOCK_HELD=0
+    fi
+}
+
+# ── Acquire benchmark lock ───────────────────────────────────────────────────
+
+echo
+echo "Acquiring benchmark lock..."
+
+if ! acquire_report_lock; then
+    exit 1
+fi
+
 
 echo
 echo "Creating detached worktree for baseline..."
@@ -298,7 +362,6 @@ fi
 
 # ── Build staged report ─────────────────────────────────────────────────────
 
-mkdir -p "$REPORT_ROOT"
 rm -rf "$REPORT_STAGING" "$REPORT_BACKUP"
 mkdir -p "$REPORT_STAGING"
 
