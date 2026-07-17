@@ -22,10 +22,13 @@ Validates:
  18. Unreadable or unsupported entries fail.
  19. Manifest hash file exists and matches.
  20+. Full-workflow safety: FIFO/socket rejection, capture races,
+     untracked reconstruction (byte-exact restore and manifest checks),
      symlink policy, Criterion failure paths, linked-worktree locking,
      and baseline integrity via portable manifest controls.
 """
 
+import ast
+import json
 import os
 import signal
 import shutil
@@ -283,6 +286,8 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
 
     Logs CWD and args on every call. When SCAH_BENCH_TEST_READ_FILE is
     set, reads that file (relative to CWD) and logs its content.
+    When SCAH_BENCH_TEST_READLINK is set, logs the symlink target via
+    Python os.readlink (READLINK_REPR=...).
     Supports CARGO_BLOCK_FILE for concurrency tests.
     When *mutate_when_cwd_contains* is set:
       - *mutate_file* is overwritten with *mutate_content*.
@@ -319,6 +324,22 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
             f' "${{SCAH_BENCH_TEST_READ_FILE}}" >> {shlex_quote(cargo_log)}'
         ),
         "    fi",
+        "fi",
+        "",
+        'if [ -n "${SCAH_BENCH_TEST_READLINK:-}" ]; then',
+        "    python3 -c '",
+        "import os, sys",
+        "path = os.path.join(os.getcwd(), sys.argv[1])",
+        "try:",
+        "    target = os.readlink(path)",
+        "except OSError as exc:",
+        '    print(f"READLINK_ERROR={exc}")',
+        "    raise SystemExit(0)",
+        'print(f"READLINK_REPR={target!r}")',
+        (
+            "' \"${SCAH_BENCH_TEST_READLINK}\" >> "
+            f"{shlex_quote(cargo_log)}"
+        ),
         "fi",
         "",
         'CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"',
@@ -547,6 +568,90 @@ def assert_cargo_ran(cargo_log, label):
     else:
         _fail(f"{label}: Cargo bench was not invoked")
         print(log_content, file=sys.stderr)
+
+
+def parse_cargo_log_entries(cargo_log):
+    """Parse cargo stub log into per-invocation dicts."""
+    entries = []
+    current = {}
+    if not os.path.isfile(cargo_log):
+        return entries
+    with open(cargo_log) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if line.startswith("CWD="):
+                if current:
+                    entries.append(current)
+                current = {
+                    "cwd": line[4:],
+                    "args": "",
+                    "file_content": None,
+                    "readlink_repr": None,
+                    "readlink_error": None,
+                }
+            elif line.startswith("ARGS="):
+                if current:
+                    current["args"] = line[5:]
+            elif line.startswith("FILE_CONTENT="):
+                if current:
+                    current["file_content"] = line[len("FILE_CONTENT="):]
+            elif line.startswith("READLINK_REPR="):
+                if current:
+                    current["readlink_repr"] = ast.literal_eval(
+                        line[len("READLINK_REPR="):]
+                    )
+            elif line.startswith("READLINK_ERROR="):
+                if current:
+                    current["readlink_error"] = line[len("READLINK_ERROR="):]
+    if current:
+        entries.append(current)
+    return entries
+
+
+def snapshot_bench_entries(cargo_log, live_repo):
+    """Return --bench cargo log entries from isolated worktrees."""
+    repo_prefix = live_repo + os.sep
+    entries = []
+    for entry in parse_cargo_log_entries(cargo_log):
+        cwd = entry.get("cwd", "")
+        if cwd == live_repo or cwd.startswith(repo_prefix):
+            continue
+        if "--bench" in entry.get("args", ""):
+            entries.append(entry)
+    return entries
+
+
+def readlink_from_snapshot_cargo(cargo_log, live_repo):
+    """Return the symlink target from the latest snapshot bench invocation."""
+    for entry in reversed(snapshot_bench_entries(cargo_log, live_repo)):
+        if entry.get("readlink_repr") is not None:
+            return entry["readlink_repr"]
+    return None
+
+
+def file_content_from_snapshot_cargo(cargo_log, live_repo):
+    """Return FILE_CONTENT from the latest snapshot bench invocation."""
+    for entry in reversed(snapshot_bench_entries(cargo_log, live_repo)):
+        if entry.get("file_content") is not None:
+            return entry["file_content"]
+    return None
+
+
+def read_untracked_capture_manifest(repo):
+    """Load published untracked-capture-manifest.jsonl as a list of dicts."""
+    path = os.path.join(
+        repo,
+        "target/bench-compare/latest/untracked-capture-manifest.jsonl",
+    )
+    if not os.path.isfile(path):
+        return None
+    records = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
 
 
 def run_bench_compare(repo, stub_dir, extra_env=None, timeout=60):
@@ -2675,14 +2780,9 @@ def test_capture_race_mode_mutation_after_list(tmp):
     with open(stderr_path) as f:
         stderr = f.read()
 
-    if proc.returncode == 0:
-        _pass("mode mutation retry succeeded")
-    else:
-        assert_text_contains(
-            stderr,
-            "working tree changed during snapshot capture",
-            "mode mutation caused capture failure",
-        )
+    assert_eq("mode mutation retry succeeds", 0, proc.returncode)
+    if "working tree changed during snapshot capture" in stderr:
+        _pass("stderr mentions capture retry")
     assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
     assert_lock_absent(repo, "lock released")
 
@@ -2726,14 +2826,9 @@ def test_capture_race_file_to_symlink_after_capture(tmp):
     with open(stderr_path) as f:
         stderr = f.read()
 
-    if proc.returncode == 0:
-        _pass("file-to-symlink mutation retry succeeded")
-    else:
-        assert_text_contains(
-            stderr,
-            "working tree changed during snapshot capture",
-            "file-to-symlink caused capture failure",
-        )
+    assert_eq("file-to-symlink mutation retry succeeds", 0, proc.returncode)
+    if "working tree changed during snapshot capture" in stderr:
+        _pass("stderr mentions capture retry")
     assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
     assert_lock_absent(repo, "lock released")
 
@@ -2787,14 +2882,9 @@ def test_capture_race_symlink_target_mutation(tmp):
     with open(stderr_path) as f:
         stderr = f.read()
 
-    if proc.returncode == 0:
-        _pass("symlink target mutation retry succeeded")
-    else:
-        assert_text_contains(
-            stderr,
-            "working tree changed during snapshot capture",
-            "symlink target mutation caused capture failure",
-        )
+    assert_eq("symlink target mutation retry succeeds", 0, proc.returncode)
+    if "working tree changed during snapshot capture" in stderr:
+        _pass("stderr mentions capture retry")
     assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
     assert_lock_absent(repo, "lock released")
 
@@ -2835,14 +2925,9 @@ def test_capture_race_added_file_after_list(tmp):
     with open(stderr_path) as f:
         stderr = f.read()
 
-    if proc.returncode == 0:
-        _pass("added file mutation retry succeeded")
-    else:
-        assert_text_contains(
-            stderr,
-            "working tree changed during snapshot capture",
-            "added file caused capture failure",
-        )
+    assert_eq("added file mutation retry succeeds", 0, proc.returncode)
+    if "working tree changed during snapshot capture" in stderr:
+        _pass("stderr mentions capture retry")
     assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
     assert_lock_absent(repo, "lock released")
 
@@ -2850,6 +2935,8 @@ def test_capture_race_added_file_after_list(tmp):
 def test_capture_race_deleted_file_before_inspect(tmp):
     print()
     print("=== Test 36: Capture race — deleted untracked file before inspect ===")
+    # One-time delete after capture but before inspect makes inspect fail
+    # immediately (no retry). bench-compare exits before Cargo runs.
     test_dir, repo = _capture_race_repo(tmp, 36)
     block = os.path.join(test_dir, "capture-block")
     stub_dir = os.path.join(test_dir, "stub")
@@ -2885,18 +2972,13 @@ def test_capture_race_deleted_file_before_inspect(tmp):
     with open(stderr_path) as f:
         stderr = f.read()
 
-    if proc.returncode == 0:
-        _pass("deleted file mutation retry succeeded")
-        assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
-    else:
-        if "working tree changed during snapshot capture" in stderr:
-            _pass("deleted file caused capture retry failure")
-        elif "failed to inspect live untracked entries" in stderr:
-            _pass("deleted file caused inspect failure")
-        else:
-            _fail("deleted file failure missing expected error")
-            print(f"stderr: {stderr}", file=sys.stderr)
-        assert_cargo_not_run(cargo_log, "Cargo not invoked after deleted file")
+    assert_ne("deleted file before inspect fails", 0, proc.returncode)
+    assert_text_contains(
+        stderr,
+        "failed to inspect live untracked entries",
+        "deleted file caused immediate inspect failure",
+    )
+    assert_cargo_not_run(cargo_log, "Cargo not invoked after deleted file")
     assert_lock_absent(repo, "lock released")
 
 
@@ -3288,6 +3370,278 @@ def test_capture_race_fifo_after_capture_one_time_success(tmp):
 
     if os.path.exists(fifo_path):
         os.unlink(fifo_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Untracked reconstruction workflow tests (55–60)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _reconstruction_symlink_workflow(tmp, test_id, target, link_name="newline-link"):
+    """Run full workflow with an untracked symlink; assert exact readlink in snapshot."""
+    if not hasattr(os, "symlink"):
+        return None
+
+    test_dir = os.path.join(tmp, f"test{test_id}")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    try:
+        os.symlink(target, os.path.join(repo, link_name))
+    except OSError as exc:
+        return exc
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env={"SCAH_BENCH_TEST_READLINK": link_name},
+        timeout=60,
+    )
+
+    assert_eq(f"reconstruction symlink test {test_id} succeeds", 0, result.returncode)
+    actual = readlink_from_snapshot_cargo(cargo_log, repo)
+    assert_eq(
+        f"symlink target exact (test {test_id})",
+        target,
+        actual,
+    )
+    assert_cargo_ran(cargo_log, f"Cargo ran (test {test_id})")
+    assert_lock_absent(repo, f"lock released (test {test_id})")
+    return None
+
+
+def test_reconstruction_symlink_trailing_newline(tmp):
+    print()
+    print("=== Test 55: Reconstruction — symlink target with trailing newline ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+    err = _reconstruction_symlink_workflow(
+        tmp, 55, "target-with-newline\n", "newline-link"
+    )
+    if err is not None:
+        _pass(f"skipped: symlink creation failed ({err})")
+
+
+def test_reconstruction_symlink_multiple_trailing_newlines(tmp):
+    print()
+    print("=== Test 56: Reconstruction — symlink with multiple trailing newlines ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+    err = _reconstruction_symlink_workflow(tmp, 56, "target\n\n", "multi-newline-link")
+    if err is not None:
+        _pass(f"skipped: symlink creation failed ({err})")
+
+
+def test_reconstruction_symlink_dash_target(tmp):
+    print()
+    print("=== Test 57: Reconstruction — symlink target beginning with dash ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+    err = _reconstruction_symlink_workflow(tmp, 57, "-target", "dash-link")
+    if err is not None:
+        _pass(f"skipped: symlink creation failed ({err})")
+
+
+def test_reconstruction_symlink_whitespace_target(tmp):
+    print()
+    print("=== Test 58: Reconstruction — whitespace-only symlink target ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+    for target, link_name in ((" ", "ws-space"), ("\t", "ws-tab")):
+        err = _reconstruction_symlink_workflow(
+            tmp, f"58-{link_name}", target, link_name
+        )
+        if err is None:
+            return
+    _pass(f"skipped: whitespace symlink creation failed ({err})")
+
+
+def _setup_reconstruction_mixed_fixture(repo):
+    """Create regular, executable, normal symlink, and newline symlink entries."""
+    write_file(repo, "plain.txt", "plain content\n")
+    exec_path = os.path.join(repo, "exec.sh")
+    with open(exec_path, "w") as fh:
+        fh.write("#!/bin/sh\n")
+    os.chmod(exec_path, 0o755)
+    write_file(repo, "link-target.txt", "link target\n")
+    os.symlink("link-target.txt", os.path.join(repo, "normal-link"))
+    os.symlink("target-with-newline\n", os.path.join(repo, "newline-link"))
+
+
+def test_reconstruction_manifest_verified(tmp):
+    print()
+    print("=== Test 59: Reconstruction — manifest verified and corruption fails ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    test_dir = os.path.join(tmp, "test59")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    _setup_reconstruction_mixed_fixture(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(repo, stub_dir, timeout=60)
+    assert_eq("mixed fixture reconstruction succeeds", 0, result.returncode)
+    assert_cargo_ran(cargo_log, "Cargo ran for mixed fixture")
+
+    meta = read_metadata(repo)
+    assert_eq(
+        "untracked_capture_reconstruction_verified",
+        "true",
+        meta.get("untracked_capture_reconstruction_verified", ""),
+    )
+
+    manifest_path = os.path.join(
+        repo, "target/bench-compare/latest/untracked-capture-manifest.jsonl"
+    )
+    assert_file_exists(
+        manifest_path,
+        "published untracked-capture-manifest.jsonl exists",
+    )
+
+    records = read_untracked_capture_manifest(repo)
+    if records is None:
+        _fail("could not read untracked capture manifest")
+        return
+    paths = {rec["path"] for rec in records}
+    for expected in ("plain.txt", "exec.sh", "normal-link", "newline-link"):
+        if expected in paths:
+            _pass(f"manifest includes {expected}")
+        else:
+            _fail(f"manifest missing {expected}")
+
+    # Corruption path: mutate reconstructed entry before verification.
+    test_dir_bad = os.path.join(tmp, "test59bad")
+    repo_bad = os.path.join(test_dir_bad, "repo")
+    create_test_repo(repo_bad)
+    _setup_reconstruction_mixed_fixture(repo_bad)
+    setup_prior_report(repo_bad)
+
+    block = os.path.join(test_dir_bad, "restore-block")
+    stub_dir_bad = os.path.join(test_dir_bad, "stub")
+    cargo_log_bad = os.path.join(test_dir_bad, "cargo.log")
+    make_stub_cargo(stub_dir_bad, cargo_log_bad)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo_bad,
+        stub_dir_bad,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_RESTORE",
+    )
+
+    if not wait_for_capture_hook_start(block):
+        proc.kill()
+        proc.wait()
+        f_out.close()
+        f_err.close()
+        _fail("restore hook did not start")
+        return
+
+    worktree_path = os.path.join(block + ".worktree")
+    assert_file_exists(worktree_path, "restore hook wrote worktree path")
+    with open(worktree_path) as fh:
+        worktree = fh.read().strip()
+
+    corrupt_path = os.path.join(worktree, "plain.txt")
+    with open(corrupt_path, "w") as fh:
+        fh.write("corrupted before verification\n")
+
+    release_capture_hook(block)
+    proc.wait(timeout=120)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_ne("corrupted reconstruction fails", 0, proc.returncode)
+    assert_text_contains(
+        stderr,
+        "does not match accepted untracked capture",
+        "corruption detected before Cargo",
+    )
+    assert_cargo_not_run(cargo_log_bad, "Cargo not invoked after corruption")
+    assert_prior_report_preserved(repo_bad)
+    assert_lock_absent(repo_bad, "lock released after corruption failure")
+
+
+def test_reconstruction_live_mutation_isolation(tmp):
+    print()
+    print("=== Test 60: Reconstruction — restore ignores live mutation ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    test_dir = os.path.join(tmp, "test60")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    write_file(repo, "data.txt", "captured-content")
+    os.symlink("data.txt", os.path.join(repo, "link.txt"))
+
+    block = os.path.join(test_dir, "capture-accepted-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED",
+        extra_env={
+            "SCAH_BENCH_TEST_READ_FILE": "data.txt",
+            "SCAH_BENCH_TEST_READLINK": "link.txt",
+        },
+    )
+
+    if not wait_for_capture_hook_start(block):
+        proc.kill()
+        proc.wait()
+        f_out.close()
+        f_err.close()
+        _fail("capture-accepted hook did not start")
+        return
+    _pass("capture accepted; mutating live repository")
+
+    write_file(repo, "data.txt", "live-mutated-content\n")
+    os.remove(os.path.join(repo, "link.txt"))
+    os.symlink("live-other.txt", os.path.join(repo, "link.txt"))
+
+    release_capture_hook(block)
+    proc.wait(timeout=120)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+    if proc.returncode != 0:
+        _fail(f"workflow failed after live mutation: {stderr}")
+        return
+
+    assert_eq(
+        "snapshot sees captured file content",
+        "captured-content",
+        file_content_from_snapshot_cargo(cargo_log, repo),
+    )
+    assert_eq(
+        "snapshot sees captured symlink target",
+        "data.txt",
+        readlink_from_snapshot_cargo(cargo_log, repo),
+    )
+    assert_cargo_ran(cargo_log, "Cargo ran after isolated restore")
+    assert_lock_absent(repo, "lock released")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3706,6 +4060,12 @@ def main():
         test_capture_race_socket_after_capture_continuous(tmp)
         test_capture_race_fifo_after_list_continuous(tmp)
         test_capture_race_fifo_after_capture_one_time_success(tmp)
+        test_reconstruction_symlink_trailing_newline(tmp)
+        test_reconstruction_symlink_multiple_trailing_newlines(tmp)
+        test_reconstruction_symlink_dash_target(tmp)
+        test_reconstruction_symlink_whitespace_target(tmp)
+        test_reconstruction_manifest_verified(tmp)
+        test_reconstruction_live_mutation_isolation(tmp)
         test_symlink_relative_escape_harness(tmp)
         test_symlink_chained_escape(tmp)
         test_symlink_broken_escape(tmp)

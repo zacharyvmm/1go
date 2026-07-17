@@ -243,6 +243,18 @@ PY
     else
         HEAD_DIRTY_FILES=0
     fi
+
+    # Test hook: block after capture accepted so tests can mutate live files
+    # before snapshot reconstruction reads from staged capture only.
+    if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED:-}" ]; then
+        printf '%s\n' "1" \
+            > "${SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED}.started"
+        rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED}.released"
+        while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED}.released" ]; do
+            sleep 0.05
+        done
+        rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED}.released"
+    fi
 }
 
 # ── Harness-integrity check ─────────────────────────────────────────────────
@@ -424,6 +436,20 @@ create_current_snapshot() {
             echo "error: failed to restore untracked capture into current worktree" >&2
             exit 1
         fi
+    fi
+
+    # Test hook: block after restore so tests can corrupt reconstructed entries
+    # before capture-versus-reconstructed manifest verification.
+    if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_RESTORE:-}" ]; then
+        printf '%s\n' "1" \
+            > "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_RESTORE}.started"
+        printf '%s\n' "$CURRENT_WORKTREE" \
+            > "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_RESTORE}.worktree"
+        rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_RESTORE}.released"
+        while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_RESTORE}.released" ]; do
+            sleep 0.05
+        done
+        rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_RESTORE}.released"
     fi
 
     RECONSTRUCTED_UNTRACKED_MANIFEST="$TEMP_ROOT/untracked-reconstructed-manifest.jsonl"
