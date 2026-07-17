@@ -8,6 +8,7 @@ use crate::store::Store;
 use crate::{
     Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement,
 };
+#[cfg(any(debug_assertions, test))]
 use smallvec::SmallVec;
 
 enum SpawnOutcome {
@@ -130,9 +131,19 @@ where
                 }
             }
             Combinator::Child => existing_base == candidate_base,
-            Combinator::NextSibling | Combinator::SubsequentSibling | Combinator::Namespace => {
-                existing_base == candidate_base
+            // Future sibling admission will key on more than depth:
+            // - Adjacent (+): exact key including sibling stream + SiblingsRemaining(1)
+            // - Subsequent (~): one Scope watcher per sibling stream + position + output parent
+            // - Nth countdown: sibling stream + remaining/formula state
+            // Depth-only equivalence is insufficient, so never dominate here yet.
+            Combinator::NextSibling | Combinator::SubsequentSibling => {
+                debug_assert!(
+                    false,
+                    "sibling cursor admission requires sibling-stream identity"
+                );
+                false
             }
+            Combinator::Namespace => false,
         }
     }
 
@@ -141,8 +152,11 @@ where
     fn try_push_cursor(
         &mut self,
         candidate: ScopedCursor,
-        runner_index: usize,
-        store: &mut Store<'html, 'query>,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
+            'html,
+            'query,
+        >,
         create_reason: Option<ScopedCursorReason>,
     ) -> SpawnOutcome {
         for existing in self.cursors.iter().rev() {
@@ -176,23 +190,23 @@ where
             }
         }
 
+        #[cfg(any(debug_assertions, test))]
         if let Some(reason) = create_reason {
-            #[cfg(any(debug_assertions, test))]
-            {
-                crate::scah_trace!(
-                    store,
-                    TraceEvent::ScopedCursorCreated {
-                        runner_index,
-                        depth: candidate.scope_depth,
-                        scope_depth: candidate.scope_depth,
-                        parent: candidate.parent,
-                        selection: candidate.position.selection,
-                        state: candidate.position.state,
-                        reason,
-                    }
-                );
-            }
+            crate::scah_trace!(
+                store,
+                TraceEvent::ScopedCursorCreated {
+                    runner_index,
+                    depth: candidate.scope_depth,
+                    scope_depth: candidate.scope_depth,
+                    parent: candidate.parent,
+                    selection: candidate.position.selection,
+                    state: candidate.position.state,
+                    reason,
+                }
+            );
         }
+        #[cfg(not(any(debug_assertions, test)))]
+        let _ = create_reason;
 
         self.cursors.push(candidate);
         SpawnOutcome::Inserted
@@ -278,9 +292,9 @@ where
                         needs_anchor.then(|| self.cursors[i].anchor_clone(depth));
 
                     let saved_parent = if is_save_point {
-                        let save_parent = self.cursors[i].parent;
                         #[cfg(any(debug_assertions, test))]
                         {
+                            let save_parent = self.cursors[i].parent;
                             debug_assert!(
                                 !emitted_this_step.iter().any(|(parent, section)| {
                                     *parent == save_parent && *section == position.selection
@@ -313,11 +327,16 @@ where
                     };
 
                     if self_closing {
+                        if terminal_all {
+                            continue;
+                        }
+                        if is_descendant || is_section_end {
+                            self.cursors[i].block_until_close(depth);
+                        }
                         continue;
                     }
 
                     if terminal_all {
-                        self.cursors[i].set_unwind_depth(depth);
                         continue;
                     }
 
@@ -375,6 +394,9 @@ where
                                 &mut base,
                             );
                             save_hits.push(hit);
+                        }
+                        if is_first && is_section_end {
+                            self.cursors[i].mark_complete();
                         }
                         continue;
                     }
@@ -478,6 +500,7 @@ where
                             .get_section_selection_kind(cur.position.selection);
                         if matches!(section_kind, SelectionKind::First) {
                             self.cursors[i].position.back(self.query);
+                            self.cursors[i].complete_after_close();
                             #[cfg(any(debug_assertions, test))]
                             if let Some(section) = self.query.exit_at_section_end() {
                                 crate::scah_trace!(
@@ -521,6 +544,7 @@ where
                         .get_section_selection_kind(cur.position.selection);
                     if matches!(section_kind, SelectionKind::First) {
                         self.cursors[i].position.back(self.query);
+                        self.cursors[i].complete_after_close();
                     } else {
                         self.cursors[i].reactivate_after_close();
                     }
@@ -785,10 +809,10 @@ mod tests {
         store.text_content.set_start(4);
 
         assert_eq!(selection.cursors[0].position.state, TransitionId(0));
-        assert!(!selection.cursors.is_empty());
+        assert!(!selection.cursors[0].end());
 
         store.text_content.push(&Reader::new("<div></div>"), 4);
-        let reactivated = selection.back(
+        let _significant_close = selection.back(
             0,
             "div",
             &DocumentPosition {
@@ -800,7 +824,7 @@ mod tests {
             &mut store,
         );
 
-        assert!(reactivated);
+        // Terminal `all()` keeps matching live without an unwind close handshake.
         assert!(!selection.cursors[0].end());
     }
 
@@ -1769,5 +1793,268 @@ mod tests {
 
         let ps2: Vec<_> = store2.get("div > div p").unwrap().collect();
         assert_eq!(ps2.len(), 1);
+    }
+
+    #[test]
+    fn first_then_early_exit_after_root_close() {
+        let query = Query::first("article", Save::all())
+            .unwrap()
+            .then(|a| Ok([a.all("p", Save::all())?]))
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        let root = &selection.cursors[0];
+        assert!(root.end());
+        assert_eq!(root.unwind_depth(), Some(0));
+        assert!(!selection.early_exit());
+
+        selection.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+
+        selection.back(0, "p", &doc_pos(1), &mut store);
+        let root = &selection.cursors[0];
+        assert!(root.end());
+        assert_eq!(root.unwind_depth(), Some(0));
+        assert!(!selection.early_exit());
+
+        selection.back(0, "article", &doc_pos(0), &mut store);
+        let root = &selection.cursors[0];
+        assert!(root.end());
+        assert_eq!(root.unwind_depth(), None);
+        assert!(selection.early_exit());
+    }
+
+    #[test]
+    fn first_void_element_matches_once() {
+        for tag in ["br", "img"] {
+            let html = format!("<{tag}><{tag}>");
+            let reader = &mut Reader::new(&html);
+            let query = &[Query::first(tag, Save::all()).unwrap().build()];
+            let manager = QueryMultiplexer::new(query);
+            let mut parser = XHtmlParser::new(manager);
+            while parser.next(reader) {}
+            let store = parser.matches();
+            let hits: Vec<_> = store.get(tag).unwrap().collect();
+            assert_eq!(hits.len(), 1, "first('{tag}') must match once");
+        }
+    }
+
+    #[test]
+    fn all_void_elements_match_all() {
+        let html = "<br><br>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::all("br", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+        let hits: Vec<_> = store.get("br").unwrap().collect();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn terminal_all_has_no_unwind_after_match() {
+        let query = Query::all("div", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        let root = &selection.cursors[0];
+        assert!(!root.end());
+        assert_eq!(root.unwind_depth(), None);
+
+        let html = "<div><div><div></div></div></div>";
+        let reader = &mut Reader::new(html);
+        let nested = &[Query::all("div", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(nested);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+        assert_eq!(store.get("div").unwrap().count(), 3);
+
+        // Sibling terminal `all()` rematches without needing a close reactivation.
+        let sibling_html = "<main><section></section><section></section></main>";
+        let reader = &mut Reader::new(sibling_html);
+        let sibling_q = &[Query::all("main > section", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(sibling_q);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+        assert_eq!(store.get("main > section").unwrap().count(), 2);
+    }
+
+    #[test]
+    fn self_closing_match_prunes_scoped_state_immediately() {
+        let html = "<div><br><p>x</p></div><div><br></div>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::all("div br", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+        assert_eq!(store.get("div br").unwrap().count(), 2);
+
+        // Drive manually: void First under `.then()` completes on synthetic close
+        // (position.back may walk to the parent section; unwind must clear).
+        let query = Query::first("div", Save::none())
+            .unwrap()
+            .then(|div| Ok([div.first("br", Save::all())?]))
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        save_hits.clear();
+        selection.next(
+            0,
+            &elem("br"),
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 1,
+                self_closing: true,
+            },
+            &mut store,
+            &mut save_hits,
+        );
+        assert_eq!(save_hits.len(), 1, "void child First must save once");
+        assert!(
+            selection
+                .cursors
+                .iter()
+                .any(|c| c.position.selection == QuerySectionId(1) && c.unwind_depth() == Some(1)),
+            "void First should await synthetic close at match depth"
+        );
+        selection.back(
+            0,
+            "br",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 1,
+                self_closing: true,
+            },
+            &mut store,
+        );
+        assert!(
+            selection
+                .cursors
+                .iter()
+                .all(|c| c.unwind_depth() != Some(1)),
+            "synthetic void close must clear br unwind (root may still await parent close)"
+        );
+        assert_eq!(
+            store.elements.iter().filter(|e| e.name == "br").count(),
+            1,
+            "void First must not rematch after synthetic close"
+        );
+    }
+
+    #[test]
+    fn self_closing_parent_with_then_no_child_results() {
+        let query = Query::first("br", Save::all())
+            .unwrap()
+            .then(|br| Ok([br.all("span", Save::all())?]))
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(
+            0,
+            &elem("br"),
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+                self_closing: true,
+            },
+            &mut store,
+            &mut save_hits,
+        );
+        assert_eq!(save_hits.len(), 1, "void parent must be saved once");
+        assert!(
+            selection
+                .cursors
+                .iter()
+                .all(|c| c.position.selection != QuerySectionId(1)),
+            "self-closing parent must not spawn child continuations"
+        );
+
+        selection.back(
+            0,
+            "br",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+                self_closing: true,
+            },
+            &mut store,
+        );
+        assert!(
+            selection.early_exit(),
+            "first void parent must early-exit after synthetic close"
+        );
+        assert_eq!(store.elements.len(), 1);
+    }
+
+    #[test]
+    fn parser_early_stop_before_filler_content() {
+        let filler = "<div>filler</div>".repeat(100);
+        let article_html = format!("<article><p>hit</p></article>{filler}");
+        let article_len = article_html.len();
+
+        let query = Query::first("article", Save::all())
+            .unwrap()
+            .then(|a| Ok([a.all("p", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let reader = &mut Reader::new(&article_html);
+        let manager = QueryMultiplexer::new(&queries);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        assert!(
+            reader.get_position() < article_len,
+            "early exit must stop before filler divs"
+        );
+        let store = parser.matches();
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].inner_html, Some("<p>hit</p>"));
+        let ps: Vec<_> = articles[0].get(&store, "p").unwrap().collect();
+        assert_eq!(ps.len(), 1);
+
+        let flat_html = format!("<article>content</article>{filler}");
+        let flat_len = flat_html.len();
+        let flat_query = Query::first("article", Save::all()).unwrap().build();
+        let flat_queries = [flat_query];
+        let reader2 = &mut Reader::new(&flat_html);
+        let manager2 = QueryMultiplexer::new(&flat_queries);
+        let mut parser2 = XHtmlParser::new(manager2);
+        while parser2.next(reader2) {}
+        assert!(reader2.get_position() < flat_len);
+
+        let br_html = format!("<br>{filler}");
+        let br_len = br_html.len();
+        let br_query = Query::first("br", Save::all()).unwrap().build();
+        let br_queries = [br_query];
+        let reader3 = &mut Reader::new(&br_html);
+        let manager3 = QueryMultiplexer::new(&br_queries);
+        let mut parser3 = XHtmlParser::new(manager3);
+        while parser3.next(reader3) {}
+        assert!(reader3.get_position() < br_len);
     }
 }

@@ -93,13 +93,10 @@ where
     ) -> bool {
         let mut remove_indices = vec![];
         for (index, session) in self.runners.iter_mut().enumerate() {
-            let early_exit_previous = session.early_exit();
-            let back = session.back(index, xhtml_element, position, store);
-
-            // Remove a first-match runner only when it had already completed
-            // before close handling; `back()` can move a child section into
-            // the exit section while parent content still needs to be saved.
-            if back && early_exit_previous {
+            let significant_close = session.back(index, xhtml_element, position, store);
+            // Drop the runner once close handling completes a terminal `.first()`
+            // query (including void synthetic closes via `complete_after_close`).
+            if significant_close && session.early_exit() {
                 remove_indices.push(index);
             }
         }

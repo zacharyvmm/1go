@@ -9,6 +9,15 @@ use crate::store::ElementId;
 /// depth-scoped cursor pruning.
 pub const SENTINEL_SCOPE: super::DepthSize = super::DepthSize::MAX;
 
+/// Sentinel for moving cursors with no pending close callback. Real element
+/// depths never reach [`DepthSize::MAX`], same invariant as [`SENTINEL_SCOPE`].
+const NO_UNWIND: super::DepthSize = super::DepthSize::MAX;
+
+#[inline]
+const fn optional_unwind_depth(raw: super::DepthSize) -> Option<super::DepthSize> {
+    if raw == NO_UNWIND { None } else { Some(raw) }
+}
+
 /// The operational mode of a [`ScopedCursor`].
 ///
 /// Moving cursors represent query progress. Anchored cursors stay at a
@@ -19,8 +28,8 @@ pub enum CursorMode {
         /// The Dᵢ value used to evaluate the current transition.
         match_base_depth: super::DepthSize,
         /// The matched element whose close should update this cursor.
-        /// None when no close callback is pending.
-        unwind_depth: Option<super::DepthSize>,
+        /// [`NO_UNWIND`] when no close callback is pending.
+        unwind_depth: super::DepthSize,
         /// Prevents a completed cursor from matching again until close handling
         /// either reactivates it or steps it back.
         end: bool,
@@ -61,7 +70,7 @@ impl ScopedCursor {
             position,
             mode: CursorMode::Moving {
                 match_base_depth,
-                unwind_depth: None,
+                unwind_depth: NO_UNWIND,
                 end: false,
             },
         }
@@ -80,7 +89,7 @@ impl ScopedCursor {
             position,
             mode: CursorMode::Moving {
                 match_base_depth,
-                unwind_depth: None,
+                unwind_depth: NO_UNWIND,
                 end: false,
             },
         }
@@ -93,7 +102,7 @@ impl ScopedCursor {
             position,
             mode: CursorMode::Moving {
                 match_base_depth: 0,
-                unwind_depth: None,
+                unwind_depth: NO_UNWIND,
                 end: false,
             },
         }
@@ -136,7 +145,7 @@ impl ScopedCursor {
     /// Depth whose close should reactivate this cursor, if any.
     pub fn unwind_depth(&self) -> Option<super::DepthSize> {
         match &self.mode {
-            CursorMode::Moving { unwind_depth, .. } => *unwind_depth,
+            CursorMode::Moving { unwind_depth, .. } => optional_unwind_depth(*unwind_depth),
             CursorMode::Anchored { .. } => None,
         }
     }
@@ -156,7 +165,7 @@ impl ScopedCursor {
             position: next_position,
             mode: CursorMode::Moving {
                 match_base_depth: at_depth,
-                unwind_depth: None,
+                unwind_depth: NO_UNWIND,
                 end: false,
             },
         }
@@ -172,20 +181,29 @@ impl ScopedCursor {
     }
 
     /// Record which element close should notify this cursor, without blocking.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_unwind_depth(&mut self, depth: super::DepthSize) {
+        debug_assert!(
+            depth != NO_UNWIND,
+            "element depth must not use the NO_UNWIND sentinel"
+        );
         if let CursorMode::Moving { unwind_depth, .. } = &mut self.mode {
-            *unwind_depth = Some(depth);
+            *unwind_depth = depth;
         }
     }
 
     /// Pause matching until the element at `depth` closes.
     pub fn block_until_close(&mut self, depth: super::DepthSize) {
+        debug_assert!(
+            depth != NO_UNWIND,
+            "element depth must not use the NO_UNWIND sentinel"
+        );
         if let CursorMode::Moving {
             end, unwind_depth, ..
         } = &mut self.mode
         {
             *end = true;
-            *unwind_depth = Some(depth);
+            *unwind_depth = depth;
         }
     }
 
@@ -196,7 +214,19 @@ impl ScopedCursor {
         } = &mut self.mode
         {
             *end = false;
-            *unwind_depth = None;
+            *unwind_depth = NO_UNWIND;
+        }
+    }
+
+    /// Keep the cursor complete after its awaited close; clear pending unwind
+    /// without reactivating matching.
+    pub fn complete_after_close(&mut self) {
+        if let CursorMode::Moving {
+            end, unwind_depth, ..
+        } = &mut self.mode
+        {
+            *end = true;
+            *unwind_depth = NO_UNWIND;
         }
     }
 
@@ -507,11 +537,11 @@ mod tests {
         match &cursor.mode {
             CursorMode::Moving {
                 match_base_depth,
-                unwind_depth,
                 end,
+                ..
             } => {
                 assert_eq!(*match_base_depth, 2);
-                assert_eq!(*unwind_depth, None);
+                assert_eq!(cursor.unwind_depth(), None);
                 assert!(!end);
             }
             _ => panic!("expected Moving"),
@@ -519,12 +549,38 @@ mod tests {
     }
 
     #[test]
+    fn test_complete_after_close() {
+        let mut cursor = ScopedCursor::new_moving_with_last(
+            5,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            2,
+        );
+        cursor.block_until_close(4);
+        assert!(cursor.end());
+        assert_eq!(cursor.unwind_depth(), Some(4));
+
+        cursor.complete_after_close();
+        assert!(cursor.end());
+        assert_eq!(cursor.unwind_depth(), None);
+        assert_eq!(cursor.match_base_depth(), 2);
+    }
+
+    #[test]
     fn scoped_cursor_size_is_stable() {
-        // Document size for PR metrics; adjust if layout changes intentionally.
-        // Before (65d2e8d): Moving { last_match_depth: u16, end: bool } — 4 bytes
-        // After (HEAD): Moving { match_base_depth: u16, unwind_depth: Option<u16>, end: bool } — 8 bytes
-        let size = std::mem::size_of::<ScopedCursor>();
-        eprintln!("ScopedCursor size: {size}");
-        assert!(size > 0);
+        // Moving { match_base_depth: u16, unwind_depth: u16, end: bool } uses
+        // NO_UNWIND sentinel instead of Option<u16> niche encoding.
+        let cursor_size = std::mem::size_of::<ScopedCursor>();
+        let mode_size = std::mem::size_of::<CursorMode>();
+        let position_size = std::mem::size_of::<Position>();
+        assert!(
+            cursor_size <= 32,
+            "ScopedCursor={cursor_size} CursorMode={mode_size} Position={position_size} exceeds 32-byte budget"
+        );
+        assert!(mode_size > 0);
+        assert!(position_size > 0);
     }
 }

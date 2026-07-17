@@ -204,7 +204,12 @@ where
                 let is_self_closing = tag.is_void();
                 self.position.self_closing = is_self_closing;
                 if is_self_closing {
-                    self.position.element_depth = self.open_elements.depth().saturating_add(1);
+                    let depth = self.open_elements.depth().saturating_add(1);
+                    debug_assert!(
+                        depth < crate::engine::DepthSize::MAX,
+                        "void element depth must stay below DepthSize::MAX (NO_UNWIND)"
+                    );
+                    self.position.element_depth = depth;
                 } else {
                     self.open_elements.push_classified(self.element.name, tag);
                     self.position.element_depth = self.open_elements.depth();
@@ -226,7 +231,14 @@ where
                     &mut self.store,
                     &mut self.temp_state.save_hits,
                 );
-                if !is_self_closing {
+                if is_self_closing {
+                    early_exit = self.selectors.back(
+                        self.element.name,
+                        &self.position,
+                        reader,
+                        &mut self.store,
+                    ) || early_exit;
+                } else {
                     for save_hit in &self.temp_state.save_hits {
                         self.open_elements.attach_saved(
                             save_hit.element_id,

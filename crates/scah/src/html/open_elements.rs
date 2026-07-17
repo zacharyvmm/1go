@@ -36,6 +36,10 @@ impl<'html> OpenElementStack<'html> {
     }
 
     pub fn push_classified(&mut self, name: &'html str, tag: TagFlags) {
+        debug_assert!(
+            self.entries.len() < DepthSize::MAX as usize,
+            "open-element depth must stay below DepthSize::MAX (sentinel/NO_UNWIND)"
+        );
         self.entries.push(OpenElement {
             name,
             tag,

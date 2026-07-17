@@ -391,18 +391,29 @@ mod tests {
             )
         }
 
+        let div_p = Query::all("div p", Save::none()).unwrap().build();
+        let (_, max_at_8) =
+            parse_with_cursor_stats(&nested_div_p(8), std::slice::from_ref(&div_p)).unwrap();
+        let (_, max_at_512) =
+            parse_with_cursor_stats(&nested_div_p(512), std::slice::from_ref(&div_p)).unwrap();
+        assert_eq!(
+            max_at_8, max_at_512,
+            "div p peak cursors must not grow with nesting depth"
+        );
+        assert!(
+            max_at_512 <= 3,
+            "div p peak cursors {max_at_512} exceeds budget"
+        );
+
+        let div_gt_div_p = Query::all("div > div p", Save::none()).unwrap().build();
         for depth in [8_u16, 512] {
             let html = nested_div_p(depth);
-            let div_p = Query::all("div p", Save::none()).unwrap().build();
-            let (_, max_div_p) = parse_with_cursor_stats(&html, &[div_p]).unwrap();
-            eprintln!("peak cursors div p depth={depth}: {max_div_p}");
-
-            let div_gt_div_p = Query::all("div > div p", Save::none()).unwrap().build();
-            let (_, max_child) = parse_with_cursor_stats(&html, &[div_gt_div_p]).unwrap();
-            eprintln!("peak cursors div > div p depth={depth}: {max_child}");
-
-            assert!(max_div_p >= 1);
-            assert!(max_child >= 1);
+            let (_, max_child) =
+                parse_with_cursor_stats(&html, std::slice::from_ref(&div_gt_div_p)).unwrap();
+            assert!(
+                max_child <= depth as usize + 3,
+                "div > div p peak cursors {max_child} at depth {depth} exceeds budget"
+            );
         }
     }
 }
