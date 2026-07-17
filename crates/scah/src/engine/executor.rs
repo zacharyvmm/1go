@@ -2212,6 +2212,93 @@ mod tests {
     }
 
     #[test]
+    fn void_intermediate_prefix_reactivates_after_synthetic_close() {
+        let query = Query::all("div br span", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("br"),
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 1,
+                self_closing: true,
+            },
+            &mut store,
+            &mut save_hits,
+        );
+        assert!(
+            selection.cursors.iter().any(|c| c.is_blocked() && c.unwind_depth() == Some(1)),
+            "intermediate br prefix must block until synthetic close"
+        );
+        assert!(
+            selection.cursors.iter().all(|c| !c.is_complete()),
+            "void cannot satisfy span suffix; prefix must not stay Complete"
+        );
+        selection.back(
+            0,
+            "br",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 1,
+                self_closing: true,
+            },
+            &mut store,
+        );
+        assert!(
+            selection.cursors.iter().any(|c| c.is_active()),
+            "blocked void prefix must reactivate after synthetic close"
+        );
+        assert_eq!(
+            store.elements.len(),
+            0,
+            "self-closing br cannot host span descendants"
+        );
+    }
+
+    #[test]
+    fn first_compound_void_then_early_exit_at_synthetic_close() {
+        let filler = "<span>filler</span>".repeat(100);
+        let html = format!(
+            "<div><br>{filler}</div><div>tail</div>"
+        );
+        let html_len = html.len();
+
+        let query = Query::first("div br", Save::all())
+            .unwrap()
+            .then(|br| Ok([br.all("span", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let reader = &mut Reader::new(&html);
+        let manager = QueryMultiplexer::new(&queries);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        assert!(
+            reader.get_position() < html_len,
+            "compound void First+.then() must stop at br synthetic close, not </div> or tail"
+        );
+        let store = parser.matches();
+        let brs: Vec<_> = store.get("div br").unwrap().collect();
+        assert_eq!(brs.len(), 1);
+        let span_count = brs[0]
+            .get(&store, "span")
+            .map(|it| it.count())
+            .unwrap_or(0);
+        assert_eq!(
+            span_count,
+            0,
+            "void br cannot contain span descendants; sibling filler must not attach"
+        );
+    }
+
+    #[test]
     fn first_compound_then_early_exit_after_selected_close() {
         let filler = "<div>filler</div>".repeat(100);
         let html = format!(
