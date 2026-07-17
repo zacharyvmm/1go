@@ -4,7 +4,7 @@ use super::multiplexer::{DocumentPosition, SaveHit};
 use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRejectReason};
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
+use crate::{Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
 use smallvec::SmallVec;
 
 /// NFA execution engine for streaming StAX events.
@@ -98,6 +98,36 @@ where
         }
     }
 
+    fn continuation_match_base(
+        &self,
+        next_state: TransitionId,
+        matched_depth: super::DepthSize,
+        from_match_base: super::DepthSize,
+    ) -> super::DepthSize {
+        if self.query.get_transition(next_state).guard == Combinator::Child {
+            matched_depth
+        } else {
+            from_match_base
+        }
+    }
+
+    fn push_moving_continuation(
+        &mut self,
+        matched_depth: super::DepthSize,
+        from_match_base: super::DepthSize,
+        saved_parent: ElementId,
+        position: Position,
+    ) {
+        let match_base =
+            self.continuation_match_base(position.state, matched_depth, from_match_base);
+        self.cursors.push(ScopedCursor::new_moving_with_match_base(
+            matched_depth,
+            match_base,
+            saved_parent,
+            position,
+        ));
+    }
+
     pub fn next(
         &mut self,
         runner_index: usize,
@@ -128,7 +158,7 @@ where
             if !matched {
                 #[cfg(any(debug_assertions, test))]
                 {
-                    let last_depth = self.cursors[i].effective_last_depth();
+                    let last_depth = self.cursors[i].match_base_depth();
                     crate::scah_trace!(
                         store,
                         TraceEvent::TransitionRejected {
@@ -248,23 +278,20 @@ where
                     }
 
                     if terminal_all {
-                        // A terminal `All` cursor stays reusable instead of
-                        // spawning a continuation that could only be pruned.
+                        self.cursors[i].set_unwind_depth(depth);
                         continue;
                     }
-
-                    self.cursors[i].set_last_match_depth(depth);
 
                     // Descendant matches are delegated to the anchored fork;
                     // section-end cursors pause until close handling unwinds them.
                     if is_descendant || is_section_end {
-                        self.cursors[i].set_end(true);
+                        self.cursors[i].block_until_close(depth);
                     }
 
                     spawned_positions = self.cursors[i].next_positions(self.query);
+                    let from_match_base = self.cursors[i].match_base_depth();
                     for pos in &spawned_positions {
-                        self.cursors
-                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
+                        self.push_moving_continuation(depth, from_match_base, saved_parent, *pos);
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
@@ -340,8 +367,12 @@ where
                     }
 
                     for pos in &spawned_positions {
-                        self.cursors
-                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
+                        self.push_moving_continuation(
+                            depth,
+                            self.cursors[i].match_base_depth(),
+                            saved_parent,
+                            *pos,
+                        );
                     }
                 }
             }
@@ -379,7 +410,7 @@ where
             let cur = &self.cursors[i];
 
             if cur.scope_depth == SENTINEL_SCOPE {
-                if cur.effective_last_depth() == close_depth {
+                if cur.unwind_depth() == Some(close_depth) {
                     if cur.end() {
                         let section_kind = self
                             .query
@@ -398,12 +429,11 @@ where
                                 );
                             }
                         } else {
-                            self.cursors[i].set_end(false);
-                            self.cursors[i].set_last_match_depth(0);
+                            self.cursors[i].reactivate_after_close();
                         }
                     } else {
                         self.cursors[i].position.back(self.query);
-                        self.cursors[i].set_last_match_depth(0);
+                        self.cursors[i].reactivate_after_close();
                     }
                     significant_close = true;
                 }
@@ -423,8 +453,7 @@ where
                         state: pruned.position.state,
                     }
                 );
-            } else if cur.is_moving() && cur.effective_last_depth() == close_depth {
-                let sd = self.cursors[i].scope_depth;
+            } else if cur.is_moving() && cur.unwind_depth() == Some(close_depth) {
                 if cur.end() {
                     let section_kind = self
                         .query
@@ -432,10 +461,11 @@ where
                     if matches!(section_kind, SelectionKind::First) {
                         self.cursors[i].position.back(self.query);
                     } else {
-                        self.cursors[i].set_end(false);
+                        self.cursors[i].reactivate_after_close();
                     }
+                } else {
+                    self.cursors[i].reactivate_after_close();
                 }
-                self.cursors[i].set_last_match_depth(sd);
                 significant_close = true;
             }
         }
@@ -1393,7 +1423,7 @@ mod tests {
         );
         for cursor in &p_cursors {
             assert_eq!(
-                cursor.effective_last_depth(),
+                cursor.match_base_depth(),
                 main_depth,
                 "p cursor match base must remain main depth ({main_depth}), not rebased to matched div depth"
             );
@@ -1662,7 +1692,7 @@ mod tests {
             .filter(|c| c.is_moving() && c.position.state == p_state)
             .collect();
         assert!(
-            live_p.iter().all(|c| c.end() || c.effective_last_depth() <= 3),
+            live_p.iter().all(|c| c.end() || c.match_base_depth() <= 3),
             "CURSOR INVARIANT: live p cursors must have sane depth after self-closing element"
         );
 

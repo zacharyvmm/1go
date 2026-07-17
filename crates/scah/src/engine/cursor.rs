@@ -16,8 +16,11 @@ pub const SENTINEL_SCOPE: super::DepthSize = super::DepthSize::MAX;
 #[derive(PartialEq, Clone, Debug)]
 pub enum CursorMode {
     Moving {
-        /// Depth of the last match this cursor must unwind on close.
-        last_match_depth: super::DepthSize,
+        /// The Dᵢ value used to evaluate the current transition.
+        match_base_depth: super::DepthSize,
+        /// The matched element whose close should update this cursor.
+        /// None when no close callback is pending.
+        unwind_depth: Option<super::DepthSize>,
         /// Prevents a completed cursor from matching again until close handling
         /// either reactivates it or steps it back.
         end: bool,
@@ -43,12 +46,22 @@ impl ScopedCursor {
         parent: ElementId,
         position: Position,
     ) -> Self {
+        Self::new_moving_with_match_base(scope_depth, scope_depth, parent, position)
+    }
+
+    pub fn new_moving_with_match_base(
+        scope_depth: super::DepthSize,
+        match_base_depth: super::DepthSize,
+        parent: ElementId,
+        position: Position,
+    ) -> Self {
         Self {
             scope_depth,
             parent,
             position,
             mode: CursorMode::Moving {
-                last_match_depth: scope_depth,
+                match_base_depth,
+                unwind_depth: None,
                 end: false,
             },
         }
@@ -59,14 +72,15 @@ impl ScopedCursor {
         scope_depth: super::DepthSize,
         parent: ElementId,
         position: Position,
-        last_match_depth: super::DepthSize,
+        match_base_depth: super::DepthSize,
     ) -> Self {
         Self {
             scope_depth,
             parent,
             position,
             mode: CursorMode::Moving {
-                last_match_depth,
+                match_base_depth,
+                unwind_depth: None,
                 end: false,
             },
         }
@@ -78,7 +92,8 @@ impl ScopedCursor {
             parent,
             position,
             mode: CursorMode::Moving {
-                last_match_depth: 0,
+                match_base_depth: 0,
+                unwind_depth: None,
                 end: false,
             },
         }
@@ -109,13 +124,27 @@ impl ScopedCursor {
     }
 
     /// Depth used by combinators when deciding whether this cursor may match.
-    pub fn effective_last_depth(&self) -> super::DepthSize {
+    pub fn match_base_depth(&self) -> super::DepthSize {
         match &self.mode {
             CursorMode::Moving {
-                last_match_depth, ..
-            } => *last_match_depth,
+                match_base_depth, ..
+            } => *match_base_depth,
             CursorMode::Anchored { .. } => self.scope_depth,
         }
+    }
+
+    /// Depth whose close should reactivate this cursor, if any.
+    pub fn unwind_depth(&self) -> Option<super::DepthSize> {
+        match &self.mode {
+            CursorMode::Moving { unwind_depth, .. } => *unwind_depth,
+            CursorMode::Anchored { .. } => None,
+        }
+    }
+
+    /// Depth used by combinators when deciding whether this cursor may match.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn effective_last_depth(&self) -> super::DepthSize {
+        self.match_base_depth()
     }
 
     pub fn end(&self) -> bool {
@@ -127,7 +156,7 @@ impl ScopedCursor {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn last_match_depth(&self) -> super::DepthSize {
-        self.effective_last_depth()
+        self.match_base_depth()
     }
 
     #[cfg(test)]
@@ -137,7 +166,8 @@ impl ScopedCursor {
             parent: self.parent,
             position: next_position,
             mode: CursorMode::Moving {
-                last_match_depth: at_depth,
+                match_base_depth: at_depth,
+                unwind_depth: None,
                 end: false,
             },
         }
@@ -150,6 +180,45 @@ impl ScopedCursor {
             position: self.position,
             mode: CursorMode::Anchored { end: false },
         }
+    }
+
+    /// Record which element close should notify this cursor, without blocking.
+    pub fn set_unwind_depth(&mut self, depth: super::DepthSize) {
+        if let CursorMode::Moving { unwind_depth, .. } = &mut self.mode {
+            *unwind_depth = Some(depth);
+        }
+    }
+
+    /// Pause matching until the element at `depth` closes.
+    pub fn block_until_close(&mut self, depth: super::DepthSize) {
+        if let CursorMode::Moving {
+            end,
+            unwind_depth,
+            ..
+        } = &mut self.mode
+        {
+            *end = true;
+            *unwind_depth = Some(depth);
+        }
+    }
+
+    /// Resume matching after the blocked element closes.
+    pub fn reactivate_after_close(&mut self) {
+        if let CursorMode::Moving {
+            end,
+            unwind_depth,
+            ..
+        } = &mut self.mode
+        {
+            *end = false;
+            *unwind_depth = None;
+        }
+    }
+
+    /// Mark this cursor complete (e.g. after a `First` terminal match).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn mark_complete(&mut self) {
+        self.set_end(true);
     }
 }
 
@@ -164,7 +233,7 @@ impl<'query> ScopedCursor {
             return false;
         }
         let fsm = tree.get_transition(self.position.state);
-        fsm.next(element, depth, self.effective_last_depth())
+        fsm.next(element, depth, self.match_base_depth())
     }
 
     pub fn get_position(&self) -> &Position {
@@ -185,16 +254,9 @@ impl<'query> ScopedCursor {
             CursorMode::Anchored { end: e } => *e = end,
         }
     }
+}
 
-    pub fn set_last_match_depth(&mut self, depth: super::DepthSize) {
-        if let CursorMode::Moving {
-            last_match_depth, ..
-        } = &mut self.mode
-        {
-            *last_match_depth = depth;
-        }
-    }
-
+impl<'query> ScopedCursor {
     /// Continuations to spawn after matching at the current position.
     pub fn next_positions<Q: QuerySpec<'query> + ?Sized>(
         &self,
@@ -316,7 +378,7 @@ mod tests {
                 state: TransitionId(2),
             }
         );
-        assert_eq!(spawned.last_match_depth(), 5);
+        assert_eq!(spawned.match_base_depth(), 5);
         assert!(!spawned.end());
     }
 
@@ -388,13 +450,14 @@ mod tests {
     }
 
     #[test]
-    fn test_root_cursor_effective_last_depth() {
+    fn test_root_cursor_match_base_depth() {
         let root = root_cursor();
-        assert_eq!(root.effective_last_depth(), 0);
+        assert_eq!(root.match_base_depth(), 0);
+        assert_eq!(root.unwind_depth(), None);
     }
 
     #[test]
-    fn test_moving_cursor_effective_last_depth() {
+    fn test_moving_cursor_match_base_depth() {
         let cursor = ScopedCursor::new_moving_with_last(
             3,
             NULL_PARENT,
@@ -404,11 +467,12 @@ mod tests {
             },
             7,
         );
-        assert_eq!(cursor.effective_last_depth(), 7);
+        assert_eq!(cursor.match_base_depth(), 7);
+        assert_eq!(cursor.unwind_depth(), None);
     }
 
     #[test]
-    fn test_anchored_cursor_effective_last_depth() {
+    fn test_anchored_cursor_match_base_depth() {
         let cursor = ScopedCursor::new_anchored(
             3,
             NULL_PARENT,
@@ -417,7 +481,30 @@ mod tests {
                 state: TransitionId(0),
             },
         );
-        assert_eq!(cursor.effective_last_depth(), 3);
+        assert_eq!(cursor.match_base_depth(), 3);
+        assert_eq!(cursor.unwind_depth(), None);
+    }
+
+    #[test]
+    fn test_block_until_close_and_reactivate() {
+        let mut cursor = ScopedCursor::new_moving_with_last(
+            5,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            2,
+        );
+        cursor.block_until_close(4);
+        assert!(cursor.end());
+        assert_eq!(cursor.unwind_depth(), Some(4));
+        assert_eq!(cursor.match_base_depth(), 2);
+
+        cursor.reactivate_after_close();
+        assert!(!cursor.end());
+        assert_eq!(cursor.unwind_depth(), None);
+        assert_eq!(cursor.match_base_depth(), 2);
     }
 
     #[test]
@@ -435,10 +522,12 @@ mod tests {
         assert_eq!(cursor.scope_depth, 5);
         match &cursor.mode {
             CursorMode::Moving {
-                last_match_depth,
+                match_base_depth,
+                unwind_depth,
                 end,
             } => {
-                assert_eq!(*last_match_depth, 2);
+                assert_eq!(*match_base_depth, 2);
+                assert_eq!(*unwind_depth, None);
                 assert!(!end);
             }
             _ => panic!("expected Moving"),
