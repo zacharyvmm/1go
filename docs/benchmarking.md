@@ -57,21 +57,28 @@ just bench-compare HEAD~1    # Compare against a specific revision
 3. Creates a temporary detached Git worktree for the baseline revision.
 4. Creates a second temporary detached worktree for the current revision,
    applies tracked dirty changes, and copies untracked files into it —
-   producing an **immutable snapshot** of the current tree.
-5. Computes a deterministic source fingerprint (SHA-256 of a sorted manifest
-   of every file in the snapshot) and records it in metadata.
-6. Compiles the benchmark binary for both baseline and current snapshot in
+   producing an **isolated source snapshot** of the current tree.
+5. Fingerprints both snapshots (baseline and current) before any Cargo
+   invocation. The fingerprint depends only on relative source paths,
+   file types, modes, file contents, and symlink targets — it does not
+   depend on clone or temporary-directory location. `.git` administration
+   metadata is excluded.
+6. Hashes both `Cargo.lock` files before any Cargo invocation.
+7. Compiles the benchmark binary for both baseline and current snapshot in
    **separate** `CARGO_TARGET_DIR` directories.
-7. Runs the baseline benchmarks and saves Criterion baseline data.
-8. Copies only Criterion's measurement data to the current target directory.
-9. Runs the current benchmarks against the saved baseline — from the
-   snapshot, not the live repository.
-10. Copies the final Criterion report (with percentage-change estimates) to
-    `target/bench-compare/latest/`.
-11. Writes metadata (`metadata.txt`) recording both revisions, toolchain info,
-    the source fingerprint, separate lockfile hashes, and whether the working
-    tree was dirty.
-12. Cleans up the temporary worktrees and directories, including proper
+8. Runs the baseline benchmarks and saves Criterion baseline data.
+9. Copies only Criterion's measurement data to the current target directory.
+10. Runs the current benchmarks against the saved baseline — from the
+    snapshot, not the live repository.
+11. Re-fingerprints both snapshots and re-hashes both lockfiles **after**
+    all Cargo commands complete.
+12. Verifies that all before/after values are identical. If any snapshot
+    or lockfile changed during compilation or measurement, publication is
+    aborted with a diagnostic identifying the affected resource.
+13. Stages the Criterion report, metadata, and source manifest. Validates
+    that all required artifacts are present.
+14. Atomically publishes the report to `target/bench-compare/latest/`.
+15. Cleans up the temporary worktrees and directories, including proper
     rollback or removal of stale backup directories.
 
 **Key properties**:
@@ -86,12 +93,37 @@ just bench-compare HEAD~1    # Compare against a specific revision
 - Build artifacts for baseline and current are fully isolated (separate
   `CARGO_TARGET_DIR` paths).
 - Only Criterion measurement data is shared between the two runs.
-- The report records separate base and current `Cargo.lock` SHA-256 hashes.
+- The report records separate base and current source fingerprints and
+  `Cargo.lock` SHA-256 hashes, all verified unchanged after benchmarking.
+- Integrity verification fields (`source_snapshots_verified_unchanged`,
+  `lockfiles_verified_unchanged`) are recorded in metadata.
 - Harness changes under `benches/regression` remain rejected unless
   explicitly overridden with `ALLOW_BENCH_HARNESS_DIFF=1`.
 - `target/bench-compare/latest` contains local dirty-state metadata
-  including `source-manifest.txt`, `tracked-diff.patch`, and
-  `untracked-files.txt`.
+  including `current-source-manifest.bin`, `current-source-manifest.sha256`,
+  `tracked-diff.patch`, and `untracked-files.txt`.
+- The previous successful report remains available after an integrity
+  verification failure. No new report is published on failure.
+- The source fingerprint uses a NUL-delimited binary manifest format that
+  is unambiguous for filenames containing tabs, newlines, or other
+  special characters. The fingerprint is the SHA-256 of this binary manifest.
+
+### Fingerprint details
+
+The source fingerprint is produced by `scripts/source-fingerprint.py` (stdlib only):
+
+- Each entry records: `entry-type`, `mode`, `content-hash`, `relative-path`,
+  NUL-delimited.
+- Entry types: `file` or `symlink`.
+- Modes: `100644` (non-executable), `100755` (executable), `120000` (symlink).
+- For regular files, the content hash is SHA-256 of file contents.
+- For symlinks, the content hash is SHA-256 of the symlink target string
+  (the link is not followed).
+- `.git` (whether a directory, regular file, or symlink) is excluded.
+- Unreadable or unsupported entry types (FIFOs, sockets, devices) cause a
+  fatal error — entries are never silently skipped.
+- The manifest is sorted by relative path for determinism.
+- Identical source trees at different paths produce identical fingerprints.
 
 ### First-merge limitation
 

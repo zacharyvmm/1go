@@ -256,51 +256,41 @@ create_current_snapshot() {
 
 # ── Compute source fingerprint ──────────────────────────────────────────────
 
-compute_source_fingerprint() {
-    # Generate a sorted manifest of every file in the current snapshot
-    # (excluding .git) and hash the manifest. Uses Python for portability
-    # across Linux and macOS. Python is already required by the test suite.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_FINGERPRINT_PY="$SCRIPT_DIR/source-fingerprint.py"
 
-    local manifest="$TEMP_ROOT/source-manifest.txt"
-    local manifest_hash_file="$TEMP_ROOT/source-manifest.sha256"
+run_source_fingerprint() {
+    # Run the fingerprint helper. Args: --root <dir> --manifest <path>.
+    # Prints SHA-256 to stdout. Exits nonzero on failure.
+    local root_dir="$1"
+    local manifest_path="$2"
+    local label="${3:-}"
 
     if ! command -v python3 >/dev/null 2>&1; then
         echo "error: python3 is required to compute the source fingerprint" >&2
         exit 1
     fi
 
-    python3 -c "
-import os, sys, hashlib
+    local fp
+    if ! fp="$(
+        python3 "$SOURCE_FINGERPRINT_PY" \
+            --root "$root_dir" \
+            --manifest "$manifest_path"
+    )"; then
+        echo "error: source fingerprint failed${label:+ for $label}" >&2
+        exit 1
+    fi
 
-root = sys.argv[1]
-manifest_path = sys.argv[2]
+    printf '%s' "$fp"
+}
 
-entries = []
-for dirpath, dirnames, filenames in os.walk(root):
-    if '.git' in dirnames:
-        dirnames.remove('.git')
-    for fn in filenames:
-        full = os.path.join(dirpath, fn)
-        rel = os.path.relpath(full, root)
-        try:
-            st = os.lstat(full)
-            mode = oct(st.st_mode)[-3:]
-            with open(full, 'rb') as f:
-                h = hashlib.sha256(f.read()).hexdigest()
-            entries.append((rel, mode, h))
-        except OSError:
-            # Skip unreadable files.
-            pass
-
-entries.sort(key=lambda x: x[0])
-
-with open(manifest_path, 'w') as mf:
-    for rel, mode, h in entries:
-        mf.write(f'{mode}\t{h}\t{rel}\n')
-" "$CURRENT_WORKTREE" "$manifest"
-
-    CURRENT_SOURCE_FINGERPRINT="$(sha256_hash "$manifest")"
-    echo "  source fingerprint: $CURRENT_SOURCE_FINGERPRINT"
+compute_lockfile_hash() {
+    local lockfile="$1"
+    if [ -f "$lockfile" ]; then
+        sha256_hash "$lockfile"
+    else
+        printf 'missing'
+    fi
 }
 
 # ── Cargo helper ────────────────────────────────────────────────────────────
@@ -398,19 +388,6 @@ build_metadata() {
 
     cp -a "$CURRENT_TARGET/criterion/." "$REPORT_STAGING/"
 
-    # Lockfile hashes (compute before and after snapshot is valid).
-    if [ -f "$BASE_WORKTREE/Cargo.lock" ]; then
-        BASE_LOCKFILE_SHA256="$(sha256_hash "$BASE_WORKTREE/Cargo.lock")"
-    else
-        BASE_LOCKFILE_SHA256="missing"
-    fi
-
-    if [ -f "$CURRENT_WORKTREE/Cargo.lock" ]; then
-        CURRENT_LOCKFILE_SHA256="$(sha256_hash "$CURRENT_WORKTREE/Cargo.lock")"
-    else
-        CURRENT_LOCKFILE_SHA256="missing"
-    fi
-
     RUSTC_VERSION="$(rustc --version 2>/dev/null || echo "unknown")"
     CARGO_VERSION="$(cargo --version 2>/dev/null || echo "unknown")"
     HOST_TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' || echo "unknown")"
@@ -419,9 +396,14 @@ build_metadata() {
 base_ref=$BASE_REF
 base_sha=$BASE_SHA
 head_sha=$HEAD_SHA
-current_source_fingerprint=$CURRENT_SOURCE_FINGERPRINT
-base_lockfile_sha256=$BASE_LOCKFILE_SHA256
-current_lockfile_sha256=$CURRENT_LOCKFILE_SHA256
+base_source_fingerprint=$BASE_SOURCE_FINGERPRINT_BEFORE
+current_source_fingerprint=$CURRENT_SOURCE_FINGERPRINT_BEFORE
+base_lockfile_sha256=$BASE_LOCKFILE_SHA256_BEFORE
+current_lockfile_sha256=$CURRENT_LOCKFILE_SHA256_BEFORE
+source_snapshots_verified_unchanged=true
+base_source_snapshot_verified=true
+current_source_snapshot_verified=true
+lockfiles_verified_unchanged=true
 head_dirty_files=$HEAD_DIRTY_FILES
 head_dirty=$HEAD_DIRTY
 working_tree_snapshot=true
@@ -449,13 +431,14 @@ EOF
         cp "$UNTRACKED_LIST" "$REPORT_STAGING/untracked-files.txt"
     fi
 
-    if [ -f "$TEMP_ROOT/source-manifest.txt" ]; then
-        cp "$TEMP_ROOT/source-manifest.txt" "$REPORT_STAGING/source-manifest.txt"
+    # Retain the current source manifest and its hash.
+    if [ -f "$CURRENT_MANIFEST" ]; then
+        cp "$CURRENT_MANIFEST" "$REPORT_STAGING/current-source-manifest.bin"
     fi
 
-    if [ -f "$TEMP_ROOT/source-manifest.sha256" ]; then
-        cp "$TEMP_ROOT/source-manifest.sha256" \
-            "$REPORT_STAGING/source-manifest.sha256"
+    if [ -f "$CURRENT_MANIFEST_HASH_FILE" ]; then
+        cp "$CURRENT_MANIFEST_HASH_FILE" \
+            "$REPORT_STAGING/current-source-manifest.sha256"
     fi
 
     if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
@@ -486,7 +469,7 @@ validate_staged_report() {
         exit 1
     fi
 
-    if [ -z "${CURRENT_SOURCE_FINGERPRINT:-}" ]; then
+    if [ -z "${CURRENT_SOURCE_FINGERPRINT_BEFORE:-}" ]; then
         echo "error: source fingerprint was not computed" >&2
         exit 1
     fi
@@ -518,7 +501,6 @@ publish_report() {
 
         exit 1
     fi
-
 }
 
 # ── Cleanup ─────────────────────────────────────────────────────────────────
@@ -643,13 +625,46 @@ main() {
         exit 1
     fi
 
-    # ── Build immutable worktrees ────────────────────────────────────────
+    # ── Build worktrees ─────────────────────────────────────────────────
 
     create_base_worktree
     create_current_snapshot
 
-    # Compute source fingerprint (before compilation, after snapshot is ready).
-    compute_source_fingerprint
+    # ── Manifest paths ──────────────────────────────────────────────────
+
+    BASE_MANIFEST="$TEMP_ROOT/base-source-manifest.bin"
+    CURRENT_MANIFEST="$TEMP_ROOT/current-source-manifest.bin"
+    CURRENT_MANIFEST_HASH_FILE="$TEMP_ROOT/current-source-manifest.sha256"
+
+    # ── Fingerprint and hash BEFORE any Cargo invocation ─────────────────
+
+    echo
+    echo "Fingerprinting snapshots before Cargo..."
+
+    BASE_SOURCE_FINGERPRINT_BEFORE="$(
+        run_source_fingerprint \
+            "$BASE_WORKTREE" "$BASE_MANIFEST" "baseline"
+    )"
+    echo "  baseline fingerprint: $BASE_SOURCE_FINGERPRINT_BEFORE"
+
+    CURRENT_SOURCE_FINGERPRINT_BEFORE="$(
+        run_source_fingerprint \
+            "$CURRENT_WORKTREE" "$CURRENT_MANIFEST" "current"
+    )"
+    echo "  current fingerprint: $CURRENT_SOURCE_FINGERPRINT_BEFORE"
+
+    # Write manifest hash file.
+    printf '%s\n' "$CURRENT_SOURCE_FINGERPRINT_BEFORE" \
+        > "$CURRENT_MANIFEST_HASH_FILE"
+
+    BASE_LOCKFILE_SHA256_BEFORE="$(
+        compute_lockfile_hash "$BASE_WORKTREE/Cargo.lock"
+    )"
+    CURRENT_LOCKFILE_SHA256_BEFORE="$(
+        compute_lockfile_hash "$CURRENT_WORKTREE/Cargo.lock"
+    )"
+    echo "  baseline lockfile: $BASE_LOCKFILE_SHA256_BEFORE"
+    echo "  current lockfile:  $CURRENT_LOCKFILE_SHA256_BEFORE"
 
     # ── Environment ──────────────────────────────────────────────────────
 
@@ -666,6 +681,59 @@ main() {
     measure_base
     measure_current
 
+    # ── Fingerprint and hash AFTER all Cargo commands ────────────────────
+
+    echo
+    echo "Verifying snapshot integrity after Cargo..."
+
+    BASE_SOURCE_FINGERPRINT_AFTER="$(
+        run_source_fingerprint \
+            "$BASE_WORKTREE" "$BASE_MANIFEST" "baseline (after)"
+    )"
+
+    CURRENT_SOURCE_FINGERPRINT_AFTER="$(
+        run_source_fingerprint \
+            "$CURRENT_WORKTREE" "$CURRENT_MANIFEST" "current (after)"
+    )"
+
+    BASE_LOCKFILE_SHA256_AFTER="$(
+        compute_lockfile_hash "$BASE_WORKTREE/Cargo.lock"
+    )"
+    CURRENT_LOCKFILE_SHA256_AFTER="$(
+        compute_lockfile_hash "$CURRENT_WORKTREE/Cargo.lock"
+    )"
+
+    # ── Integrity checks ─────────────────────────────────────────────────
+
+    local integrity_ok=1
+
+    if [ "$BASE_SOURCE_FINGERPRINT_BEFORE" != "$BASE_SOURCE_FINGERPRINT_AFTER" ]; then
+        echo "error: baseline source snapshot changed during benchmarking" >&2
+        integrity_ok=0
+    fi
+
+    if [ "$CURRENT_SOURCE_FINGERPRINT_BEFORE" != "$CURRENT_SOURCE_FINGERPRINT_AFTER" ]; then
+        echo "error: current source snapshot changed during benchmarking" >&2
+        integrity_ok=0
+    fi
+
+    if [ "$BASE_LOCKFILE_SHA256_BEFORE" != "$BASE_LOCKFILE_SHA256_AFTER" ]; then
+        echo "error: baseline Cargo.lock changed during benchmarking" >&2
+        integrity_ok=0
+    fi
+
+    if [ "$CURRENT_LOCKFILE_SHA256_BEFORE" != "$CURRENT_LOCKFILE_SHA256_AFTER" ]; then
+        echo "error: current Cargo.lock changed during benchmarking" >&2
+        integrity_ok=0
+    fi
+
+    if [ "$integrity_ok" = 0 ]; then
+        echo "error: snapshot integrity verification failed; no report published" >&2
+        exit 1
+    fi
+
+    echo "  snapshots unchanged — integrity verified"
+
     # ── Build and publish report ─────────────────────────────────────────
 
     build_metadata
@@ -678,7 +746,7 @@ main() {
     echo "  $REPORT_DIR/report/index.html"
     echo "Metadata:"
     echo "  $REPORT_DIR/metadata.txt"
-    echo "Source fingerprint: $CURRENT_SOURCE_FINGERPRINT"
+    echo "Source fingerprint: $CURRENT_SOURCE_FINGERPRINT_BEFORE"
 }
 
 main "$@"

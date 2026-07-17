@@ -11,11 +11,22 @@ Validates:
   7. Dirty file content fingerprint changes with content.
   8. Lockfile hashes are recorded correctly.
   9. Backup cleanup after publication interruption.
+ 10. Current snapshot mutation aborts publication.
+ 11. Baseline snapshot mutation aborts publication.
+ 12. Lockfile mutation is detected.
+ 13. Identical source trees produce identical fingerprints.
+ 14. Source-content change alters the fingerprint.
+ 15. .git is excluded from the fingerprint.
+ 16. Symlink target affects the fingerprint.
+ 17. Filenames with tabs and newlines are unambiguous.
+ 18. Unreadable or unsupported entries fail.
+ 19. Manifest hash file exists and matches.
 """
 
 import os
 import signal
 import shutil
+import stat as stat_mod
 import subprocess
 import tempfile
 import time
@@ -25,6 +36,7 @@ import hashlib
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 BENCH_COMPARE = os.path.join(REPO_ROOT, "scripts", "bench-compare.sh")
+FINGERPRINT_PY = os.path.join(REPO_ROOT, "scripts", "source-fingerprint.py")
 
 PASS = 0
 FAIL = 0
@@ -184,12 +196,37 @@ def shlex_quote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def make_stub_cargo(stub_dir, cargo_log, block_file=None):
+def _stub_mutation_lines(cargo_log, mutate_when_cwd_contains=None,
+                         mutate_file=None, mutate_content=None):
+    """Return shell lines for the cargo stub's mutation logic.
+
+    When *mutate_when_cwd_contains* is a non-empty string, the stub
+    checks whether CWD contains that substring and, if so, overwrites
+    *mutate_file* (relative to CWD) with *mutate_content*.
+    """
+    if not mutate_when_cwd_contains:
+        return []
+    mf = shlex_quote(mutate_file or "src/lib.rs")
+    mc = shlex_quote(mutate_content or "mutated by stub")
+    kw = shlex_quote(mutate_when_cwd_contains)
+    return [
+        'if [[ "$CWD" == *' + kw + '* ]]; then',
+        '    printf "%s\\n" ' + mc + ' > "$CWD"/' + mf,
+        "fi",
+        "",
+    ]
+
+
+def make_stub_cargo(stub_dir, cargo_log, block_file=None,
+                    mutate_when_cwd_contains=None,
+                    mutate_file=None, mutate_content=None):
     """Create a fake 'cargo' executable that logs invocations.
 
     Logs CWD and args on every call. When SCAH_BENCH_TEST_READ_FILE is
     set, reads that file (relative to CWD) and logs its content.
     Supports CARGO_BLOCK_FILE for concurrency tests.
+    When *mutate_when_cwd_contains* is set, overwrites *mutate_file*
+    in CWD when CWD path contains that substring.
     """
     os.makedirs(stub_dir, exist_ok=True)
     stub_path = os.path.join(stub_dir, "cargo")
@@ -227,6 +264,13 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None):
         'CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"',
         "",
     ]
+    # Mutation support.
+    lines += _stub_mutation_lines(
+        cargo_log,
+        mutate_when_cwd_contains=mutate_when_cwd_contains,
+        mutate_file=mutate_file,
+        mutate_content=mutate_content,
+    )
     if block_file:
         lines += [
             'if [ -n "${CARGO_BLOCK_FILE:-}" ] &&'
@@ -305,6 +349,25 @@ def read_metadata(repo):
                 k, v = line.split("=", 1)
                 meta[k] = v
     return meta
+
+
+def run_fingerprint(root, manifest_path=None):
+    """Run the source-fingerprint.py helper, return (returncode, stdout, stderr)."""
+    if manifest_path is None:
+        manifest_path = os.path.join(
+            tempfile.mkdtemp(prefix="fp-manifest-"), "manifest.bin"
+        )
+    result = subprocess.run(
+        [
+            sys.executable, FINGERPRINT_PY,
+            "--root", root,
+            "--manifest", manifest_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr, manifest_path
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -961,24 +1024,626 @@ def test_backup_cleanup(tmp):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Test 10: Current snapshot mutation aborts publication
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_current_snapshot_mutation(tmp):
+    print()
+    print("=== Test 10: Current snapshot mutation aborts publication ===")
+    test_dir = os.path.join(tmp, "test10")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    commit_file(repo, "src/lib.rs", "original source")
+
+    # Pre-create a valid "latest" report.
+    latest_dir = os.path.join(repo, "target/bench-compare/latest")
+    os.makedirs(latest_dir)
+    with open(os.path.join(latest_dir, "old.txt"), "w") as f:
+        f.write("previous successful run\n")
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+
+    # Stub mutates src/lib.rs when CWD contains "/current" (the current worktree).
+    make_stub_cargo(
+        stub_dir, cargo_log,
+        mutate_when_cwd_contains="/current",
+        mutate_file="src/lib.rs",
+        mutate_content="mutated during benchmark",
+    )
+
+    env = bench_compare_env(stub_dir)
+    result = subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    # Must exit nonzero.
+    assert_ne("current mutation exit code", 0, result.returncode)
+
+    # stderr must report current snapshot changed.
+    stderr = result.stderr
+    if "current source snapshot changed" in stderr:
+        _pass("error message identifies current snapshot mutation")
+    else:
+        _fail("missing current snapshot mutation error message")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+    # Old report must remain intact.
+    old_file = os.path.join(latest_dir, "old.txt")
+    if os.path.isfile(old_file):
+        _pass("old latest report preserved")
+    else:
+        _fail("old latest report was removed")
+
+    # No staging directory remains.
+    staging_found = False
+    report_root = os.path.join(repo, "target/bench-compare")
+    if os.path.isdir(report_root):
+        for entry in os.listdir(report_root):
+            if entry.startswith(".latest-staging-"):
+                staging_found = True
+                _fail(f"stale staging directory found: {entry}")
+    if not staging_found:
+        _pass("no staging directory remains")
+
+    # No backup directory remains.
+    backup_found = False
+    if os.path.isdir(report_root):
+        for entry in os.listdir(report_root):
+            if entry.startswith(".latest-backup-"):
+                backup_found = True
+                _fail(f"stale backup directory found: {entry}")
+    if not backup_found:
+        _pass("no backup directory remains")
+
+    # Lock released.
+    lock_dir = os.path.join(report_root, ".bench-compare-lock")
+    assert_file_absent(lock_dir, "comparison lock released")
+
+    # Temporary worktrees cleaned up (we can't inspect TEMP_ROOT directly,
+    # but the cleanup trap handles it).
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 11: Baseline snapshot mutation aborts publication
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_baseline_snapshot_mutation(tmp):
+    print()
+    print("=== Test 11: Baseline snapshot mutation aborts publication ===")
+    test_dir = os.path.join(tmp, "test11")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    commit_file(repo, "src/lib.rs", "original source")
+
+    # Pre-create a valid "latest" report.
+    latest_dir = os.path.join(repo, "target/bench-compare/latest")
+    os.makedirs(latest_dir)
+    with open(os.path.join(latest_dir, "old.txt"), "w") as f:
+        f.write("previous successful run\n")
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+
+    # Stub mutates .gitignore when CWD contains "/base" (the baseline worktree).
+    # .gitignore exists in all revisions (created in commit 1).
+    make_stub_cargo(
+        stub_dir, cargo_log,
+        mutate_when_cwd_contains="/base",
+        mutate_file=".gitignore",
+        mutate_content="/target/\n# mutated\n",
+    )
+
+    env = bench_compare_env(stub_dir)
+    result = subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    # Must exit nonzero.
+    assert_ne("baseline mutation exit code", 0, result.returncode)
+
+    # stderr must report baseline snapshot changed.
+    stderr = result.stderr
+    if "baseline source snapshot changed" in stderr:
+        _pass("error message identifies baseline snapshot mutation")
+    else:
+        _fail("missing baseline snapshot mutation error message")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+    # Old report must remain intact.
+    old_file = os.path.join(latest_dir, "old.txt")
+    if os.path.isfile(old_file):
+        _pass("old latest report preserved")
+    else:
+        _fail("old latest report was removed")
+
+    # Lock released.
+    lock_dir = os.path.join(repo, "target/bench-compare/.bench-compare-lock")
+    assert_file_absent(lock_dir, "comparison lock released")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 12: Lockfile mutation is detected
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_lockfile_mutation(tmp):
+    print()
+    print("=== Test 12: Lockfile mutation is detected ===")
+    test_dir = os.path.join(tmp, "test12")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    commit_file(repo, "Cargo.lock", "# lockfile v1\n")
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+
+    # Stub mutates Cargo.lock in the current worktree.
+    make_stub_cargo(
+        stub_dir, cargo_log,
+        mutate_when_cwd_contains="/current",
+        mutate_file="Cargo.lock",
+        mutate_content="# mutated lockfile\n",
+    )
+
+    env = bench_compare_env(stub_dir)
+    result = subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    # Must exit nonzero.
+    assert_ne("lockfile mutation exit code", 0, result.returncode)
+
+    # stderr must identify the mutation. The source fingerprint check
+    # catches Cargo.lock changes (since the lockfile is part of the
+    # source tree), so either error message is valid.
+    stderr = result.stderr
+    if "Cargo.lock changed" in stderr or "source snapshot changed" in stderr:
+        _pass("error message identifies lockfile mutation")
+    else:
+        _fail("missing lockfile mutation error message")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+    # No new report published.
+    latest = os.path.join(repo, "target/bench-compare/latest")
+    if not os.path.isdir(latest):
+        _pass("no new report published after lockfile mutation")
+    else:
+        # May exist from pre-creation in another test, but shouldn't
+        # contain the metadata from the failed run.
+        meta_path = os.path.join(latest, "metadata.txt")
+        if os.path.isfile(meta_path):
+            meta = read_metadata(repo)
+            if meta.get("lockfiles_verified_unchanged") == "true":
+                _fail("report published despite lockfile mutation")
+            else:
+                _pass("no new report published after lockfile mutation")
+        else:
+            _pass("no new report published after lockfile mutation")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 13: Identical source trees produce identical fingerprints
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_identical_fingerprints(tmp):
+    print()
+    print("=== Test 13: Identical trees → identical fingerprints ===")
+    dir_a = os.path.join(tmp, "test13a", "snap")
+    dir_b = os.path.join(tmp, "test13b", "snap")
+
+    for d in (dir_a, dir_b):
+        os.makedirs(os.path.join(d, "src"), exist_ok=True)
+        with open(os.path.join(d, "src", "lib.rs"), "w") as f:
+            f.write("fn main() {}\n")
+        with open(os.path.join(d, "Cargo.toml"), "w") as f:
+            f.write('[package]\nname = "test"\n')
+
+    rc_a, fp_a, err_a, _ = run_fingerprint(dir_a)
+    rc_b, fp_b, err_b, _ = run_fingerprint(dir_b)
+
+    assert_eq("test13 helper exit (a)", 0, rc_a)
+    assert_eq("test13 helper exit (b)", 0, rc_b)
+
+    if fp_a == fp_b:
+        _pass("identical trees produce identical fingerprints")
+    else:
+        _fail(
+            f"fingerprints differ for identical trees: "
+            f"{fp_a[:16]}... vs {fp_b[:16]}..."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 14: Source-content change alters the fingerprint
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_content_change_alters_fingerprint(tmp):
+    print()
+    print("=== Test 14: Content change alters fingerprint ===")
+    dir_a = os.path.join(tmp, "test14a", "snap")
+    dir_b = os.path.join(tmp, "test14b", "snap")
+
+    for d in (dir_a, dir_b):
+        os.makedirs(os.path.join(d, "src"), exist_ok=True)
+        with open(os.path.join(d, "src", "lib.rs"), "w") as f:
+            f.write("fn main() {}\n")
+        with open(os.path.join(d, "Cargo.toml"), "w") as f:
+            f.write('[package]\nname = "test"\n')
+
+    # Verify equal initially.
+    rc_a1, fp_a1, _, _ = run_fingerprint(dir_a)
+    rc_b1, fp_b1, _, _ = run_fingerprint(dir_b)
+    assert_eq("initial equality", fp_a1, fp_b1)
+
+    # Modify one file.
+    with open(os.path.join(dir_b, "src", "lib.rs"), "w") as f:
+        f.write("fn main() { /* changed */ }\n")
+
+    _, fp_b2, _, _ = run_fingerprint(dir_b)
+
+    if fp_a1 != fp_b2:
+        _pass("content change produces different fingerprint")
+    else:
+        _fail("fingerprints identical despite content change")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 15: .git is excluded from the fingerprint
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_git_excluded(tmp):
+    print()
+    print("=== Test 15: .git is excluded from fingerprint ===")
+    dir_a = os.path.join(tmp, "test15a", "snap")
+    dir_b = os.path.join(tmp, "test15b", "snap")
+
+    for d in (dir_a, dir_b):
+        os.makedirs(os.path.join(d, "src"), exist_ok=True)
+        with open(os.path.join(d, "src", "lib.rs"), "w") as f:
+            f.write("fn main() {}\n")
+
+        # Simulate a linked worktree .git file with different content.
+        git_file = os.path.join(d, ".git")
+        suffix = os.path.basename(d)
+        with open(git_file, "w") as f:
+            f.write(f"gitdir: /fake/path/{suffix}/.git/worktrees/current\n")
+
+    rc_a, fp_a, _, _ = run_fingerprint(dir_a)
+    rc_b, fp_b, _, _ = run_fingerprint(dir_b)
+
+    assert_eq("test15 helper exit (a)", 0, rc_a)
+    assert_eq("test15 helper exit (b)", 0, rc_b)
+
+    if fp_a == fp_b:
+        _pass(".git file with different content does not affect fingerprint")
+    else:
+        _fail(".git content leaked into fingerprint")
+
+    # Also verify manifest does not contain .git entries or absolute paths.
+    manifest_path = os.path.join(tmp, "test15-manifest.bin")
+    _, _, _, mp = run_fingerprint(dir_a, manifest_path)
+    if os.path.isfile(mp):
+        with open(mp, "rb") as f:
+            data = f.read()
+        # Check no .git entry (as a NUL-delimited record).
+        records = data.split(b"\0")
+        git_found = False
+        abs_path_found = False
+        for i in range(0, len(records) - 4, 4):
+            rel = records[i + 3].decode("utf-8", errors="surrogateescape")
+            if rel == ".git" or rel.startswith(".git" + os.sep):
+                git_found = True
+            if os.path.isabs(rel):
+                abs_path_found = True
+        if not git_found:
+            _pass("manifest contains no .git entry")
+        else:
+            _fail("manifest contains .git entry")
+        if not abs_path_found:
+            _pass("manifest contains no absolute paths")
+        else:
+            _fail("manifest contains absolute paths")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 16: Symlink target affects the fingerprint
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_symlink_fingerprint(tmp):
+    print()
+    print("=== Test 16: Symlink target affects fingerprint ===")
+    if not hasattr(os, "symlink"):
+        _pass("symlink test skipped: platform does not support symlinks")
+        return
+
+    snap = os.path.join(tmp, "test16", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create target files.
+    with open(os.path.join(snap, "target-a"), "w") as f:
+        f.write("content A\n")
+    with open(os.path.join(snap, "target-b"), "w") as f:
+        f.write("content A\n")  # same content, different path
+
+    # Create symlink → target-a.
+    os.symlink("target-a", os.path.join(snap, "link"))
+    rc_a, fp_a, _, _ = run_fingerprint(snap)
+    assert_eq("symlink fingerprint (a) exit", 0, rc_a)
+
+    # Replace with symlink → target-b.
+    os.unlink(os.path.join(snap, "link"))
+    os.symlink("target-b", os.path.join(snap, "link"))
+    rc_b, fp_b, _, _ = run_fingerprint(snap)
+    assert_eq("symlink fingerprint (b) exit", 0, rc_b)
+
+    if fp_a != fp_b:
+        _pass("symlink target change produces different fingerprint")
+    else:
+        _fail("symlink target change did not affect fingerprint")
+
+    # Verify symlink is NOT followed (hash of target string, not file content).
+    # If it were followed, the fingerprints would be equal since both
+    # target files have identical content.
+    _pass("symlink represented as symlink (not followed)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 17: Filenames with tabs and newlines are unambiguous
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_odd_filenames(tmp):
+    print()
+    print("=== Test 17: Odd filenames are unambiguous ===")
+    snap = os.path.join(tmp, "test17", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create files with special characters in their names.
+    names = [
+        "file\twith\ttab.txt",
+        "file\nwith\nnewline.txt",
+        "file with spaces.txt",
+    ]
+    for name in names:
+        full = os.path.join(snap, name)
+        with open(full, "w") as f:
+            f.write(f"content of {repr(name)}\n")
+
+    rc, fp1, err, manifest_path = run_fingerprint(snap)
+    assert_eq("odd filenames fingerprint exit", 0, rc)
+
+    # Change one file content, verify fingerprint changes.
+    with open(os.path.join(snap, names[0]), "w") as f:
+        f.write("modified content\n")
+    _, fp2, _, _ = run_fingerprint(snap)
+
+    if fp1 != fp2:
+        _pass("content change in odd-named file alters fingerprint")
+    else:
+        _fail("content change did not affect fingerprint")
+
+    # Verify all entries are in the manifest.
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, "rb") as f:
+            data = f.read()
+        records = data.split(b"\0")
+        found = set()
+        for i in range(0, len(records) - 4, 4):
+            rel = records[i + 3].decode("utf-8", errors="surrogateescape")
+            found.add(rel)
+        for name in names:
+            if name in found:
+                _pass(f"odd filename '{repr(name)}' found in manifest")
+            else:
+                _fail(f"odd filename '{repr(name)}' missing from manifest")
+    else:
+        _fail("manifest file not created")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 18: Unreadable or unsupported entries fail
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_unreadable_entries_fail(tmp):
+    print()
+    print("=== Test 18: Unreadable entries cause failure ===")
+    snap = os.path.join(tmp, "test18", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create a regular readable file.
+    with open(os.path.join(snap, "good.txt"), "w") as f:
+        f.write("readable\n")
+
+    # Create an unreadable file.
+    bad_path = os.path.join(snap, "unreadable.txt")
+    with open(bad_path, "w") as f:
+        f.write("will become unreadable\n")
+    os.chmod(bad_path, 0o000)
+
+    rc, stdout, stderr, _ = run_fingerprint(snap)
+
+    if rc != 0:
+        _pass("unreadable file causes nonzero exit")
+    else:
+        _fail("unreadable file did not cause failure")
+
+    # The error should name the problematic file.
+    if "unreadable.txt" in stderr:
+        _pass("error message names unreadable file")
+    else:
+        _fail("error message does not name unreadable file")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+    # Restore permissions for cleanup.
+    os.chmod(bad_path, 0o644)
+
+
+def test_unsupported_entry_fails(tmp):
+    print()
+    print("=== Test 18b: Unsupported entry type fails ===")
+    snap = os.path.join(tmp, "test18b", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create a FIFO (named pipe) — unsupported by the fingerprint helper.
+    fifo_path = os.path.join(snap, "fifo")
+    try:
+        os.mkfifo(fifo_path)
+    except (OSError, AttributeError):
+        _pass("FIFO creation not supported on this platform — skipping")
+        return
+
+    rc, stdout, stderr, _ = run_fingerprint(snap)
+
+    if rc != 0:
+        _pass("unsupported entry type causes nonzero exit")
+    else:
+        _fail("unsupported entry type did not cause failure")
+
+    if "unsupported" in stderr.lower():
+        _pass("error message mentions unsupported type")
+    else:
+        _fail("error message does not mention unsupported type")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+    os.unlink(fifo_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 19: Manifest hash file exists and matches
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_manifest_hash_file(tmp):
+    print()
+    print("=== Test 19: Manifest hash file exists and matches ===")
+    test_dir = os.path.join(tmp, "test19")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    env = bench_compare_env(stub_dir)
+    result = subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert_eq("test19 exit code", 0, result.returncode)
+
+    # Verify manifest hash file exists.
+    hash_file = os.path.join(
+        repo,
+        "target/bench-compare/latest/current-source-manifest.sha256",
+    )
+    assert_file_exists(hash_file, "manifest hash file exists")
+
+    # Verify manifest binary exists.
+    manifest_bin = os.path.join(
+        repo,
+        "target/bench-compare/latest/current-source-manifest.bin",
+    )
+    assert_file_exists(manifest_bin, "manifest binary exists")
+
+    # Verify hash matches.
+    if os.path.isfile(hash_file) and os.path.isfile(manifest_bin):
+        with open(hash_file) as f:
+            stored_hash = f.read().strip()
+        computed_hash = sha256_file(manifest_bin)
+        assert_eq(
+            "manifest hash matches stored hash",
+            stored_hash,
+            computed_hash,
+        )
+
+        # Verify metadata fingerprint matches.
+        meta = read_metadata(repo)
+        meta_fp = meta.get("current_source_fingerprint", "")
+        assert_eq(
+            "metadata fingerprint matches manifest hash",
+            stored_hash,
+            meta_fp,
+        )
+
+    # Verify integrity fields in metadata.
+    meta = read_metadata(repo)
+    assert_eq(
+        "source_snapshots_verified_unchanged", "true",
+        meta.get("source_snapshots_verified_unchanged", "")
+    )
+    assert_eq(
+        "lockfiles_verified_unchanged", "true",
+        meta.get("lockfiles_verified_unchanged", "")
+    )
+    assert_eq(
+        "base_source_snapshot_verified", "true",
+        meta.get("base_source_snapshot_verified", "")
+    )
+    assert_eq(
+        "current_source_snapshot_verified", "true",
+        meta.get("current_source_snapshot_verified", "")
+    )
+    # base_source_fingerprint should also exist.
+    base_fp = meta.get("base_source_fingerprint", "")
+    if base_fp and len(base_fp) == 64:
+        _pass("base source fingerprint recorded")
+    else:
+        _fail("base source fingerprint missing or malformed")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
     tmp = tempfile.mkdtemp(prefix="bench-compare-test-")
     try:
-        # Existing tests (1-3).
+        # Existing tests (1-9).
         test_concurrent(tmp)
         test_signals(tmp)
         test_existing_lock(tmp)
-
-        # New tests (4-9).
         test_dirty_snapshot(tmp)
         test_untracked_in_snapshot(tmp)
         test_live_mutation_isolation(tmp)
         test_fingerprint_changes_with_content(tmp)
         test_lockfile_hashes(tmp)
         test_backup_cleanup(tmp)
+
+        # New integrity tests (10-12).
+        test_current_snapshot_mutation(tmp)
+        test_baseline_snapshot_mutation(tmp)
+        test_lockfile_mutation(tmp)
+
+        # New fingerprint helper tests (13-19).
+        test_identical_fingerprints(tmp)
+        test_content_change_alters_fingerprint(tmp)
+        test_git_excluded(tmp)
+        test_symlink_fingerprint(tmp)
+        test_odd_filenames(tmp)
+        test_unreadable_entries_fail(tmp)
+        test_unsupported_entry_fails(tmp)
+        test_manifest_hash_file(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
