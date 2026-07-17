@@ -13,6 +13,7 @@ BENCH_HARNESS_PATH="benches/regression"
 # ── Resolve repository root ─────────────────────────────────────────────────
 
 ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "error: not inside a Git repository" >&2
@@ -56,6 +57,12 @@ capture_source_state() {
     local max_attempts=3
     local attempt=1
 
+    # Reject special files Git may omit from ls-files (FIFO, socket, device).
+    if ! python3 "$SCRIPT_DIR/scan-special-files.py" --root "$ROOT"; then
+        echo "error: unsupported special files in working tree" >&2
+        exit 1
+    fi
+
     while [ "$attempt" -le "$max_attempts" ]; do
         # Working-tree status for dirty-file count and diagnostics.
         INITIAL_WORKTREE_STATUS="$(
@@ -73,10 +80,13 @@ capture_source_state() {
 
         # Test hook: block after untracked list so tests can mutate files.
         if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST:-}" ]; then
-            touch "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.started"
+            printf '%s\n' "$attempt" \
+                > "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.started"
+            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.released"
             while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.released" ]; do
                 sleep 0.05
             done
+            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.released"
         fi
 
         # Stage untracked entries into a temporary capture directory.
@@ -99,10 +109,13 @@ capture_source_state() {
 
         # Test hook: block after capture so tests can mutate files post-capture.
         if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE:-}" ]; then
-            touch "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.started"
+            printf '%s\n' "$attempt" \
+                > "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.started"
+            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.released"
             while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.released" ]; do
                 sleep 0.05
             done
+            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.released"
         fi
 
         # ── Independent verification ──────────────────────────────────────
@@ -372,7 +385,6 @@ create_current_snapshot() {
 
 # ── Compute source fingerprint ──────────────────────────────────────────────
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_FINGERPRINT_PY="$SCRIPT_DIR/source-fingerprint.py"
 run_source_fingerprint() {
     # Run the fingerprint helper. Args: --root <dir> --manifest <path>.
@@ -531,15 +543,20 @@ measure_current() {
 
     # ── Baseline integrity: record manifest BEFORE current run ────────────
 
-    BASELINE_MANIFEST_BEFORE="$TEMP_ROOT/criterion-baseline-manifest-before.txt"
-    BASELINE_MANIFEST_SHA256_BEFORE="$TEMP_ROOT/criterion-baseline-manifest-before.sha256"
+    BASELINE_MANIFEST_BEFORE="$TEMP_ROOT/criterion-baseline-manifest-before.bin"
+    BASELINE_MANIFEST_AFTER="$TEMP_ROOT/criterion-baseline-manifest-after.bin"
+    BASELINE_MANIFEST_SHA256_BEFORE=""
+    BASELINE_MANIFEST_SHA256_AFTER=""
+    BASELINE_INTEGRITY_OK=false
 
     if [ -s "$CRITERION_BASELINE_INVENTORY" ]; then
-        find "$CURRENT_TARGET/criterion" -type f \
-            -path "*/$BASELINE_NAME/*" \
-            ! -name "*.tmp" \
-            -exec sha256sum {} \; | sort > "$BASELINE_MANIFEST_BEFORE"
-        sha256_hash "$BASELINE_MANIFEST_BEFORE" > "$BASELINE_MANIFEST_SHA256_BEFORE"
+        BASELINE_MANIFEST_SHA256_BEFORE="$(
+            python3 "$SCRIPT_DIR/criterion-baseline-manifest.py" \
+                --criterion-root "$CURRENT_TARGET/criterion" \
+                --inventory "$CRITERION_BASELINE_INVENTORY" \
+                --manifest "$BASELINE_MANIFEST_BEFORE" \
+                --baseline "$BASELINE_NAME"
+        )"
     fi
 
     # Ensure no stale output exists before measuring.
@@ -575,22 +592,23 @@ measure_current() {
 
     # ── Baseline integrity: verify manifest AFTER current run ──────────────
 
-    BASELINE_MANIFEST_AFTER="$TEMP_ROOT/criterion-baseline-manifest-after.txt"
-    BASELINE_INTEGRITY_OK=0
-
     if [ -s "$CRITERION_BASELINE_INVENTORY" ]; then
-        find "$CURRENT_TARGET/criterion" -type f \
-            -path "*/$BASELINE_NAME/*" \
-            ! -name "*.tmp" \
-            -exec sha256sum {} \; | sort > "$BASELINE_MANIFEST_AFTER"
+        BASELINE_MANIFEST_SHA256_AFTER="$(
+            python3 "$SCRIPT_DIR/criterion-baseline-manifest.py" \
+                --criterion-root "$CURRENT_TARGET/criterion" \
+                --inventory "$CRITERION_BASELINE_INVENTORY" \
+                --manifest "$BASELINE_MANIFEST_AFTER" \
+                --baseline "$BASELINE_NAME"
+        )"
 
-        if cmp -s "$BASELINE_MANIFEST_BEFORE" "$BASELINE_MANIFEST_AFTER"; then
-            BASELINE_INTEGRITY_OK=1
-            echo "  baseline measurements unchanged — integrity verified"
-        else
+        if [ "$BASELINE_MANIFEST_SHA256_BEFORE" != "$BASELINE_MANIFEST_SHA256_AFTER" ] \
+            || ! cmp -s "$BASELINE_MANIFEST_BEFORE" "$BASELINE_MANIFEST_AFTER"; then
             echo "error: copied baseline measurements were modified during current run" >&2
             exit 1
         fi
+
+        BASELINE_INTEGRITY_OK=true
+        echo "  baseline measurements unchanged — integrity verified"
     fi
 }
 
@@ -632,8 +650,10 @@ cargo=$CARGO_VERSION
 host=$HOST_TRIPLE
 benchmark_harness_diff_present=$HARNESS_DIFF_PRESENT
 benchmark_harness_diff_allowed=$ALLOW_BENCH_HARNESS_DIFF
-criterion_baseline_measurements_unchanged=${BASELINE_INTEGRITY_OK:-0}
-criterion_baseline_manifest_sha256=$(cat "$BASELINE_MANIFEST_SHA256_BEFORE" 2>/dev/null || echo "")
+criterion_baseline_manifest_sha256_before=${BASELINE_MANIFEST_SHA256_BEFORE:-}
+criterion_baseline_manifest_sha256_after=${BASELINE_MANIFEST_SHA256_AFTER:-}
+criterion_baseline_measurement_manifests_match=${BASELINE_INTEGRITY_OK:-false}
+criterion_baseline_measurements_unchanged=${BASELINE_INTEGRITY_OK:-false}
 date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
 
@@ -663,6 +683,19 @@ EOF
     if [ -f "$CURRENT_MANIFEST_HASH_FILE" ]; then
         cp "$CURRENT_MANIFEST_HASH_FILE" \
             "$REPORT_STAGING/current-source-manifest.sha256"
+    fi
+
+    # Retain Criterion baseline inventory and verified measurement manifest.
+    if [ -f "$CRITERION_BASELINE_INVENTORY" ]; then
+        cp "$CRITERION_BASELINE_INVENTORY" \
+            "$REPORT_STAGING/criterion-baseline-inventory.jsonl"
+    fi
+
+    if [ -f "$BASELINE_MANIFEST_BEFORE" ]; then
+        cp "$BASELINE_MANIFEST_BEFORE" \
+            "$REPORT_STAGING/criterion-baseline-manifest.bin"
+        printf '%s\n' "$BASELINE_MANIFEST_SHA256_BEFORE" \
+            > "$REPORT_STAGING/criterion-baseline-manifest.sha256"
     fi
 
     if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
@@ -695,6 +728,43 @@ validate_staged_report() {
 
     if [ -z "${CURRENT_SOURCE_FINGERPRINT_BEFORE:-}" ]; then
         echo "error: source fingerprint was not computed" >&2
+        exit 1
+    fi
+
+    if [ ! -f "$REPORT_STAGING/criterion-baseline-inventory.jsonl" ]; then
+        echo "error: Criterion baseline inventory was not published" >&2
+        exit 1
+    fi
+
+    if [ ! -f "$REPORT_STAGING/criterion-baseline-manifest.bin" ]; then
+        echo "error: Criterion baseline manifest was not published" >&2
+        exit 1
+    fi
+
+    if [ ! -f "$REPORT_STAGING/criterion-baseline-manifest.sha256" ]; then
+        echo "error: Criterion baseline manifest hash was not published" >&2
+        exit 1
+    fi
+
+    local published_manifest_hash
+    published_manifest_hash="$(tr -d '[:space:]' < "$REPORT_STAGING/criterion-baseline-manifest.sha256")"
+    local actual_manifest_hash
+    actual_manifest_hash="$(sha256_hash "$REPORT_STAGING/criterion-baseline-manifest.bin")"
+
+    if [ "$published_manifest_hash" != "$actual_manifest_hash" ]; then
+        echo "error: Criterion baseline manifest hash does not match published manifest" >&2
+        exit 1
+    fi
+
+    if ! grep -q '^criterion_baseline_measurements_unchanged=true$' \
+        "$REPORT_STAGING/metadata.txt"; then
+        echo "error: Criterion baseline integrity metadata missing or false" >&2
+        exit 1
+    fi
+
+    if ! grep -q '^criterion_baseline_measurement_manifests_match=true$' \
+        "$REPORT_STAGING/metadata.txt"; then
+        echo "error: Criterion baseline manifest match metadata missing or false" >&2
         exit 1
     fi
 }

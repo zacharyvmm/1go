@@ -8,6 +8,9 @@ Criterion 0.8.1 stores saved baselines under::
 This helper locates only those measurement directories and copies them,
 excluding ``report/``, ``new/``, ``change/``, and unrelated saved baselines.
 
+Symlinks and special filesystem entries in baseline data are rejected.
+Only regular files and directories are copied.
+
 Interface::
 
     python3 scripts/copy-criterion-baseline.py \\
@@ -25,10 +28,13 @@ This inventory is the authoritative list of expected benchmark IDs for
 downstream validation.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import shutil
+import stat
 import sys
 from typing import List
 
@@ -41,6 +47,73 @@ def _is_measurement_dir(path: str) -> bool:
     """True when *path* looks like a Criterion saved-baseline measurement dir."""
     estimates = os.path.join(path, "estimates.json")
     return os.path.isfile(estimates)
+
+
+def _reject_special_tree(root: str) -> None:
+    """Reject symlinks and special files anywhere under *root*."""
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        try:
+            st_dir = os.lstat(dirpath)
+        except OSError as exc:
+            raise BaselineCopyError(f"cannot lstat {dirpath}: {exc}") from exc
+
+        if stat.S_ISLNK(st_dir.st_mode):
+            raise BaselineCopyError(f"symlink in baseline source tree: {dirpath}")
+
+        # Detect directory entries that are symlinks via scandir when available.
+        try:
+            with os.scandir(dirpath) as iterator:
+                for entry in iterator:
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise BaselineCopyError(
+                            f"cannot lstat {entry.path}: {exc}"
+                        ) from exc
+                    if stat.S_ISLNK(st.st_mode):
+                        raise BaselineCopyError(
+                            f"symlink in baseline source tree: {entry.path}"
+                        )
+                    if stat.S_ISFIFO(st.st_mode):
+                        raise BaselineCopyError(
+                            f"FIFO in baseline source tree: {entry.path}"
+                        )
+                    if stat.S_ISSOCK(st.st_mode):
+                        raise BaselineCopyError(
+                            f"socket in baseline source tree: {entry.path}"
+                        )
+                    if stat.S_ISBLK(st.st_mode) or stat.S_ISCHR(st.st_mode):
+                        raise BaselineCopyError(
+                            f"device node in baseline source tree: {entry.path}"
+                        )
+                    if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                        raise BaselineCopyError(
+                            f"unsupported entry in baseline source tree: {entry.path}"
+                        )
+        except BaselineCopyError:
+            raise
+        except OSError as exc:
+            raise BaselineCopyError(f"cannot scan {dirpath}: {exc}") from exc
+
+        # Keep os.walk from following unexpectedly; clear is unnecessary when
+        # followlinks=False, but skip symlink dirnames defensively.
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not os.path.islink(os.path.join(dirpath, name))
+        ]
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path):
+                raise BaselineCopyError(f"symlink in baseline source tree: {path}")
+
+
+def _copy_regular_tree(source: str, destination: str) -> None:
+    """Copy a baseline directory tree containing only regular files/dirs."""
+    _reject_special_tree(source)
+    # symlinks=False copies file contents; ignore is unused because we already
+    # rejected specials. dirs_exist_ok is False so collisions remain errors.
+    shutil.copytree(source, destination, symlinks=False)
 
 
 def copy_baseline(
@@ -63,7 +136,7 @@ def copy_baseline(
 
     os.makedirs(destination, exist_ok=True)
 
-    for dirpath, dirnames, _filenames in os.walk(source):
+    for dirpath, dirnames, _filenames in os.walk(source, followlinks=False):
         rel_dir = os.path.relpath(dirpath, source)
         if (
             rel_dir == "report"
@@ -74,6 +147,9 @@ def copy_baseline(
             or rel_dir.startswith("change/")
         ):
             continue
+
+        if os.path.islink(dirpath):
+            raise BaselineCopyError(f"symlink in baseline source tree: {dirpath}")
 
         if os.path.basename(dirpath) != baseline_name:
             continue
@@ -88,14 +164,17 @@ def copy_baseline(
         try:
             if os.path.commonpath([dst_abs, destination]) != destination:
                 raise BaselineCopyError(f"destination escapes target: {rel}")
-        except ValueError:
-            raise BaselineCopyError(f"destination escapes target: {rel}")
+        except ValueError as exc:
+            raise BaselineCopyError(f"destination escapes target: {rel}") from exc
 
         if os.path.exists(dst):
             raise BaselineCopyError(f"destination already exists: {rel}")
 
+        if os.path.islink(dirpath):
+            raise BaselineCopyError(f"source baseline directory is a symlink: {rel}")
+
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copytree(dirpath, dst, symlinks=True)
+        _copy_regular_tree(dirpath, dst)
 
         benchmark_path = os.path.dirname(rel)
         entries.append({"benchmark_path": benchmark_path, "baseline_path": rel})

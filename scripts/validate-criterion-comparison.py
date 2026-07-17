@@ -20,11 +20,13 @@ Exit status:
   1 — one or more expected benchmarks are incomplete or missing
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import sys
-from typing import List
+from typing import List, Set
 
 
 REQUIRED_FILES = [
@@ -34,16 +36,100 @@ REQUIRED_FILES = [
 ]
 
 
+class ComparisonValidationError(RuntimeError):
+    """Raised when inventory records are malformed."""
+
+
+def _normalize_relative(path: str, field: str) -> str:
+    if not isinstance(path, str) or not path:
+        raise ComparisonValidationError(f"inventory {field} must be a non-empty string")
+    if os.path.isabs(path):
+        raise ComparisonValidationError(f"inventory {field} must be relative: {path!r}")
+
+    normalized = os.path.normpath(path)
+    if normalized in ("", "."):
+        raise ComparisonValidationError(
+            f"inventory {field} is empty after normalization"
+        )
+    if normalized.startswith("..") or f"{os.sep}.." in f"{os.sep}{normalized}{os.sep}":
+        raise ComparisonValidationError(
+            f"inventory {field} escapes with '..': {path!r}"
+        )
+    return normalized
+
+
 def _load_inventory(path: str) -> List[dict]:
-    """Load the baseline inventory JSONL file."""
+    """Load and validate the baseline inventory JSONL file."""
     entries: List[dict] = []
+    seen_benchmarks: Set[str] = set()
+
     with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
+        for line_no, raw in enumerate(fh, start=1):
+            line = raw.strip()
             if not line:
                 continue
-            entries.append(json.loads(line))
+
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ComparisonValidationError(
+                    f"inventory line {line_no}: malformed JSON: {exc}"
+                ) from exc
+
+            if not isinstance(entry, dict):
+                raise ComparisonValidationError(
+                    f"inventory line {line_no}: expected a JSON object"
+                )
+
+            if "benchmark_path" not in entry:
+                raise ComparisonValidationError(
+                    f"inventory line {line_no}: missing benchmark_path"
+                )
+
+            benchmark_path = _normalize_relative(
+                entry["benchmark_path"], "benchmark_path"
+            )
+
+            if "baseline_path" in entry:
+                baseline_path = _normalize_relative(
+                    entry["baseline_path"], "baseline_path"
+                )
+                if os.path.dirname(baseline_path) != benchmark_path:
+                    raise ComparisonValidationError(
+                        f"inventory line {line_no}: dirname(baseline_path) "
+                        f"!= benchmark_path"
+                    )
+            else:
+                baseline_path = None
+
+            if benchmark_path in seen_benchmarks:
+                raise ComparisonValidationError(
+                    f"inventory line {line_no}: duplicate benchmark_path "
+                    f"{benchmark_path!r}"
+                )
+            seen_benchmarks.add(benchmark_path)
+
+            records = {"benchmark_path": benchmark_path}
+            if baseline_path is not None:
+                records["baseline_path"] = baseline_path
+            entries.append(records)
+
     return entries
+
+
+def _ensure_under_root(root: str, candidate: str, label: str) -> str:
+    abs_root = os.path.abspath(root)
+    abs_candidate = os.path.abspath(candidate)
+    try:
+        if os.path.commonpath([abs_root, abs_candidate]) != abs_root:
+            raise ComparisonValidationError(
+                f"{label} escapes criterion root: {candidate}"
+            )
+    except ValueError as exc:
+        raise ComparisonValidationError(
+            f"{label} escapes criterion root: {candidate}"
+        ) from exc
+    return abs_candidate
 
 
 def validate(criterion_root: str, inventory_path: str) -> int:
@@ -57,21 +143,36 @@ def validate(criterion_root: str, inventory_path: str) -> int:
         print("error: criterion root does not exist", file=sys.stderr)
         return 1
 
-    entries = _load_inventory(inventory_path)
+    try:
+        entries = _load_inventory(inventory_path)
+    except ComparisonValidationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"error: cannot read inventory: {exc}", file=sys.stderr)
+        return 1
 
     if not entries:
-        print("error: baseline inventory is empty — no benchmarks were copied", file=sys.stderr)
+        print(
+            "error: baseline inventory is empty — no benchmarks were copied",
+            file=sys.stderr,
+        )
         return 1
 
     errors: List[str] = []
 
     for entry in entries:
         benchmark_path = entry["benchmark_path"]
-        bench_dir = os.path.join(criterion_root, benchmark_path)
+        bench_dir = _ensure_under_root(
+            criterion_root,
+            os.path.join(criterion_root, benchmark_path),
+            "benchmark_path",
+        )
 
         missing: List[str] = []
         for rel_file, description in REQUIRED_FILES:
             full_path = os.path.join(bench_dir, rel_file)
+            _ensure_under_root(criterion_root, full_path, rel_file)
             if not os.path.isfile(full_path):
                 missing.append(f"{rel_file} ({description})")
 

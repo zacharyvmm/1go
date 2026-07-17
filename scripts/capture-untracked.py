@@ -19,7 +19,7 @@ import json
 import os
 import stat
 import sys
-from typing import List
+from typing import List, Tuple
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -29,52 +29,16 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 # ── File helpers ─────────────────────────────────────────────────────────────
 
 
-def _hash_regular_file(src_abs: str) -> str:
-    """Hash a regular file and return its SHA-256 hex digest."""
-    flags = os.O_RDONLY
-    if _O_NOFOLLOW:
-        flags |= _O_NOFOLLOW
-
-    try:
-        fd = os.open(src_abs, flags)
-    except OSError as exc:
-        raise OSError(f"cannot open (possible symlink): {exc}") from exc
-
-    try:
-        st_before = os.fstat(fd)
-        if not stat.S_ISREG(st_before.st_mode):
-            raise ValueError(f"expected regular file, got mode {st_before.st_mode:o}")
-
-        hasher = hashlib.sha256()
-        with os.fdopen(fd, "rb") as src_fh:
-            while True:
-                chunk = src_fh.read(1 << 20)
-                if not chunk:
-                    break
-                hasher.update(chunk)
-
-        # Re-stat via path (fd closed by fdopen).
-        st_after = os.stat(src_abs)
-        if st_before.st_dev != st_after.st_dev:
-            raise OSError("file device changed during read")
-        if st_before.st_ino != st_after.st_ino:
-            raise OSError("file inode changed during read")
-        if st_before.st_size != st_after.st_size:
-            raise OSError("file size changed during read")
-
-        return hasher.hexdigest()
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
+def _normalized_file_mode(st_mode: int) -> str:
+    """Return Git-style mode from permission bits on an opened file."""
+    return "100755" if (st_mode & 0o111) else "100644"
 
 
-def _copy_regular_file(src_abs: str, dst_abs: str) -> str:
-    """Copy a regular file securely and return its SHA-256 hex digest.
+def _hash_regular_file(src_abs: str) -> Tuple[str, str]:
+    """Hash a regular file and return ``(digest, normalized_mode)``.
 
-    Normalizes the destination mode to 0o755 (executable) or 0o644.
+    Mode is derived from the opened descriptor's ``fstat``, not a separate
+    outer ``lstat``, so the manifest matches the observed content handle.
     """
     flags = os.O_RDONLY
     if _O_NOFOLLOW:
@@ -90,6 +54,64 @@ def _copy_regular_file(src_abs: str, dst_abs: str) -> str:
         if not stat.S_ISREG(st_before.st_mode):
             raise ValueError(f"expected regular file, got mode {st_before.st_mode:o}")
 
+        normalized_mode = _normalized_file_mode(st_before.st_mode)
+
+        hasher = hashlib.sha256()
+        with os.fdopen(fd, "rb") as src_fh:
+            while True:
+                chunk = src_fh.read(1 << 20)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+
+        # Re-stat via path (fd closed by fdopen).
+        st_after = os.lstat(src_abs)
+        if not stat.S_ISREG(st_after.st_mode):
+            raise OSError("file type changed during read")
+        if st_before.st_dev != st_after.st_dev:
+            raise OSError("file device changed during read")
+        if st_before.st_ino != st_after.st_ino:
+            raise OSError("file inode changed during read")
+        if st_before.st_size != st_after.st_size:
+            raise OSError("file size changed during read")
+        if getattr(st_before, "st_mtime_ns", None) is not None and getattr(
+            st_after, "st_mtime_ns", None
+        ) is not None:
+            if st_before.st_mtime_ns != st_after.st_mtime_ns:
+                raise OSError("file mtime changed during read")
+        if _normalized_file_mode(st_after.st_mode) != normalized_mode:
+            raise OSError("file executable mode changed during read")
+
+        return hasher.hexdigest(), normalized_mode
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def _copy_regular_file(src_abs: str, dst_abs: str) -> Tuple[str, str]:
+    """Copy a regular file securely and return ``(digest, normalized_mode)``.
+
+    Manifest mode and staged chmod both come from the opened descriptor.
+    """
+    flags = os.O_RDONLY
+    if _O_NOFOLLOW:
+        flags |= _O_NOFOLLOW
+
+    try:
+        fd = os.open(src_abs, flags)
+    except OSError as exc:
+        raise OSError(f"cannot open (possible symlink): {exc}") from exc
+
+    try:
+        st_before = os.fstat(fd)
+        if not stat.S_ISREG(st_before.st_mode):
+            raise ValueError(f"expected regular file, got mode {st_before.st_mode:o}")
+
+        normalized_mode = _normalized_file_mode(st_before.st_mode)
+
         hasher = hashlib.sha256()
         with os.fdopen(fd, "rb") as src_fh, open(dst_abs, "wb") as dst_fh:
             while True:
@@ -100,32 +122,31 @@ def _copy_regular_file(src_abs: str, dst_abs: str) -> str:
                 dst_fh.write(chunk)
 
         # Re-stat via path (fd closed by fdopen).
-        st_after = os.stat(src_abs)
+        st_after = os.lstat(src_abs)
+        if not stat.S_ISREG(st_after.st_mode):
+            raise OSError("file type changed during read")
         if st_before.st_dev != st_after.st_dev:
             raise OSError("file device changed during read")
         if st_before.st_ino != st_after.st_ino:
             raise OSError("file inode changed during read")
         if st_before.st_size != st_after.st_size:
             raise OSError("file size changed during read")
+        if getattr(st_before, "st_mtime_ns", None) is not None and getattr(
+            st_after, "st_mtime_ns", None
+        ) is not None:
+            if st_before.st_mtime_ns != st_after.st_mtime_ns:
+                raise OSError("file mtime changed during read")
+        if _normalized_file_mode(st_after.st_mode) != normalized_mode:
+            raise OSError("file executable mode changed during read")
 
-        # Normalize mode: preserve only executable bit.
-        src_mode = st_before.st_mode & 0o777
-        normalized = 0o755 if (src_mode & 0o111) else 0o644
-        os.chmod(dst_abs, normalized)
-
-        return hasher.hexdigest()
+        os.chmod(dst_abs, 0o755 if normalized_mode == "100755" else 0o644)
+        return hasher.hexdigest(), normalized_mode
     except BaseException:
         try:
             os.close(fd)
         except OSError:
             pass
         raise
-
-
-def _hash_symlink_target(src_abs: str) -> str:
-    """Read a symlink's target and return its SHA-256 hex digest."""
-    target = os.readlink(src_abs)
-    return hashlib.sha256(os.fsencode(target)).hexdigest()
 
 
 # ── Entry classification ────────────────────────────────────────────────────
@@ -148,24 +169,40 @@ def _classify_entry(root: str, rel_path: str, capture_dir: str | None) -> dict:
     if stat.S_ISREG(mode):
         if capture_dir is not None:
             dst_abs = os.path.join(capture_dir, rel_path)
-            os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
-            digest = _copy_regular_file(src_abs, dst_abs)
+            os.makedirs(os.path.dirname(dst_abs) or ".", exist_ok=True)
+            digest, normalized_mode = _copy_regular_file(src_abs, dst_abs)
         else:
-            digest = _hash_regular_file(src_abs)
+            digest, normalized_mode = _hash_regular_file(src_abs)
 
         return {
             "path": rel_path,
             "type": "file",
-            "mode": "100755" if (mode & 0o111) else "100644",
+            "mode": normalized_mode,
             "hash": digest,
         }
 
     if stat.S_ISLNK(mode):
-        target_hash = _hash_symlink_target(src_abs)
+        # One exact target observation for both hashing and staging.
+        st_before = st
+        target = os.readlink(src_abs)
+        try:
+            st_after = os.lstat(src_abs)
+        except OSError as exc:
+            raise OSError(f"symlink disappeared during readlink: {exc}") from exc
+
+        if (
+            not stat.S_ISLNK(st_after.st_mode)
+            or st_before.st_dev != st_after.st_dev
+            or st_before.st_ino != st_after.st_ino
+        ):
+            raise OSError(f"symlink replaced during capture: {rel_path}")
+
+        target_bytes = os.fsencode(target)
+        target_hash = hashlib.sha256(target_bytes).hexdigest()
+
         if capture_dir is not None:
             dst_abs = os.path.join(capture_dir, rel_path)
-            os.makedirs(os.path.dirname(dst_abs), exist_ok=True)
-            target = os.readlink(src_abs)
+            os.makedirs(os.path.dirname(dst_abs) or ".", exist_ok=True)
             os.symlink(target, dst_abs)
 
         return {
@@ -252,8 +289,12 @@ def main() -> None:
     if args.command == "capture":
         capture_dir = os.path.abspath(args.destination)
 
-    for rel_path in paths:
-        records.append(_classify_entry(root, rel_path, capture_dir))
+    try:
+        for rel_path in paths:
+            records.append(_classify_entry(root, rel_path, capture_dir))
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     _write_manifest(args.manifest, records)
 

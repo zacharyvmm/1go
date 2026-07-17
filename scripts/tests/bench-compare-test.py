@@ -21,14 +21,19 @@ Validates:
  17. Filenames with tabs and newlines are unambiguous.
  18. Unreadable or unsupported entries fail.
  19. Manifest hash file exists and matches.
+ 20+. Full-workflow safety: FIFO/socket rejection, capture races,
+     symlink policy, Criterion failure paths, linked-worktree locking,
+     and baseline integrity via portable manifest controls.
 """
 
 import os
 import signal
 import shutil
+import socket
 import stat as stat_mod
 import subprocess
 import tempfile
+import threading
 import time
 import sys
 import hashlib
@@ -111,6 +116,23 @@ def assert_not_contains(path, substring, label):
         _pass(label)
     else:
         _fail(f"{label}: '{substring}' unexpectedly found in {path}")
+
+
+def git_common_dir(repo: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--git-common-dir"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if not os.path.isabs(value):
+        value = os.path.join(repo, value)
+    return os.path.realpath(value)
+
+
+def comparison_lock_path(repo: str) -> str:
+    return os.path.join(git_common_dir(repo), "scah-bench-compare.lock")
 
 
 def sha256_file(path):
@@ -331,15 +353,11 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
         ]
     lines += [
         'BENCH_DIR="$CARGO_TARGET_DIR/criterion"',
-        # Always create report/index.html.
-        'mkdir -p "$BENCH_DIR/report"',
-        (
-            "printf '<html>stub report</html>\\n'"
-            ' > "$BENCH_DIR/report/index.html"'
-        ),
+        "",
         # For --save-baseline runs (baseline measurement), create saved-baseline dirs.
         'if echo "$*" | grep -q -- "--save-baseline"; then',
         '    BASELINE_NAME=$(echo "$*" | sed -n "s/.*--save-baseline \\([^ ]*\\).*/\\1/p")',
+        '    [ -n "$BASELINE_NAME" ] || BASELINE_NAME="main"',
         '    BENCH_PATHS="',
         '        synthetic_links/prebuilt/all/save_none',
         '        synthetic_links/prebuilt/all/save_inner_html',
@@ -358,18 +376,61 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
         '        printf "{\\"confidence_interval\\":{\\"lower_bound\\":1.0,\\"upper_bound\\":1.0,\\"point_estimate\\":1.0}}\\n" > "$BASELINE_DIR/estimates.json"',
         '    done',
         'fi',
+        "",
         # For current runs (--baseline without --save-baseline), create nested new/ and change/.
         'if echo "$*" | grep -q -- "--baseline" && ! echo "$*" | grep -q -- "--save-baseline"; then',
-        '    # Find saved-baseline dirs to derive benchmark paths.',
-        '    find "$BENCH_DIR" -type f -name "estimates.json" | while read -r est; do',
-        '        BASELINE_DIR="$(dirname "$est")"',
-        '        BENCH_PATH="$(dirname "$BASELINE_DIR")"',
-        '        # Create nested new/ and change/ under the benchmark path.',
-        '        mkdir -p "$BENCH_PATH/new" "$BENCH_PATH/change"',
-        '        printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/new/estimates.json"',
-        '        printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/new/sample.json"',
-        '        printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/change/estimates.json"',
-        '    done',
+        '    BASELINE_NAME=$(echo "$*" | sed -n "s/.*--baseline \\([^ ]*\\).*/\\1/p")',
+        '    [ -n "$BASELINE_NAME" ] || BASELINE_NAME="main"',
+        "",
+        '    # Baseline integrity mutations (before comparison output).',
+        '    if [ "${SCAH_STUB_MUTATE_BASELINE_FILE:-}" = "1" ]; then',
+        '        est="$(find "$BENCH_DIR" -type f -path "*/${BASELINE_NAME}/estimates.json" | head -1)"',
+        '        if [ -n "$est" ]; then printf "\\nmutated\\n" >> "$est"; fi',
+        '    fi',
+        '    if [ "${SCAH_STUB_DELETE_BASELINE_FILE:-}" = "1" ]; then',
+        '        est="$(find "$BENCH_DIR" -type f -path "*/${BASELINE_NAME}/estimates.json" | head -1)"',
+        '        if [ -n "$est" ]; then rm -f "$est"; fi',
+        '    fi',
+        '    if [ "${SCAH_STUB_ADD_BASELINE_FILE:-}" = "1" ]; then',
+        '        est="$(find "$BENCH_DIR" -type f -path "*/${BASELINE_NAME}/estimates.json" | head -1)"',
+        '        if [ -n "$est" ]; then printf "extra\\n" > "$(dirname "$est")/extra-baseline.txt"; fi',
+        '    fi',
+        '    if [ "${SCAH_STUB_INSERT_BASELINE_SYMLINK:-}" = "1" ]; then',
+        '        est="$(find "$BENCH_DIR" -type f -path "*/${BASELINE_NAME}/estimates.json" | head -1)"',
+        '        if [ -n "$est" ]; then ln -sf "estimates.json" "$(dirname "$est")/baseline-link"; fi',
+        '    fi',
+        "",
+        '    if [ "${SCAH_STUB_SKIP_CURRENT_OUTPUT:-}" = "1" ]; then',
+        '        :',
+        '    elif [ "${SCAH_STUB_REPORT_ONLY:-}" = "1" ]; then',
+        '        mkdir -p "$BENCH_DIR/report"',
+        (
+            "        printf '<html>stub report</html>\\n'"
+            ' > "$BENCH_DIR/report/index.html"'
+        ),
+        '    else',
+        '        find "$BENCH_DIR" -type f -path "*/${BASELINE_NAME}/estimates.json" | while read -r est; do',
+        '            BASELINE_DIR="$(dirname "$est")"',
+        '            BENCH_PATH="$(dirname "$BASELINE_DIR")"',
+        '            rel="${BENCH_PATH#"$BENCH_DIR"/}"',
+        '            if [ -n "${SCAH_STUB_SKIP_BENCHMARK_PATH:-}" ] && [ "$rel" = "${SCAH_STUB_SKIP_BENCHMARK_PATH}" ]; then',
+        '                continue',
+        '            fi',
+        '            mkdir -p "$BENCH_PATH/new" "$BENCH_PATH/change"',
+        '            printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/new/estimates.json"',
+        '            if [ "${SCAH_STUB_SKIP_CURRENT_SAMPLE:-}" != "1" ]; then',
+        '                printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/new/sample.json"',
+        '            fi',
+        '            if [ "${SCAH_STUB_SKIP_CHANGE_ESTIMATES:-}" != "1" ]; then',
+        '                printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/change/estimates.json"',
+        '            fi',
+        '        done',
+        '        mkdir -p "$BENCH_DIR/report"',
+        (
+            "        printf '<html>stub report</html>\\n'"
+            ' > "$BENCH_DIR/report/index.html"'
+        ),
+        '    fi',
     ] + comparison_mutate_lines + [
         'fi',
         "",
@@ -416,6 +477,144 @@ def wait_for_block(block_file, timeout=10.0):
             return True
         time.sleep(0.05)
     return False
+
+
+def setup_prior_report(repo, marker_name="report-marker.txt", content="previous"):
+    """Create a pre-existing successful report under target/bench-compare/latest."""
+    latest_dir = os.path.join(repo, "target/bench-compare/latest")
+    report_dir = os.path.join(latest_dir, "report")
+    os.makedirs(report_dir, exist_ok=True)
+    with open(os.path.join(report_dir, "index.html"), "w") as f:
+        f.write("<html>prior report</html>\n")
+    with open(os.path.join(latest_dir, marker_name), "w") as f:
+        f.write(content)
+
+
+def assert_prior_report_preserved(repo, marker_name="report-marker.txt"):
+    marker = os.path.join(repo, "target/bench-compare/latest", marker_name)
+    assert_file_exists(marker, "previous report marker preserved")
+    report_html = os.path.join(
+        repo, "target/bench-compare/latest/report/index.html"
+    )
+    assert_file_exists(report_html, "previous report index preserved")
+
+
+def assert_no_staging_or_backup(repo):
+    report_root = os.path.join(repo, "target/bench-compare")
+    if not os.path.isdir(report_root):
+        _pass("no staging or backup directories")
+        return
+    for entry in os.listdir(report_root):
+        if entry.startswith(".latest-staging-"):
+            _fail(f"stale staging directory found: {entry}")
+            return
+        if entry.startswith(".latest-backup-"):
+            _fail(f"stale backup directory found: {entry}")
+            return
+    _pass("no staging or backup directories")
+
+
+def assert_lock_absent(repo, label):
+    assert_file_absent(comparison_lock_path(repo), label)
+
+
+def assert_cargo_not_run(cargo_log, label):
+    if not os.path.exists(cargo_log) or os.path.getsize(cargo_log) == 0:
+        _pass(label)
+        return
+    with open(cargo_log) as f:
+        log_content = f.read()
+    args_lines = [
+        line for line in log_content.splitlines() if line.startswith("ARGS=")
+    ]
+    if not args_lines:
+        _pass(label)
+    else:
+        _fail(f"{label}: unexpected Cargo invocation logged")
+
+
+def assert_cargo_ran(cargo_log, label):
+    if not os.path.isfile(cargo_log):
+        _fail(f"{label}: cargo log missing")
+        return
+    with open(cargo_log) as f:
+        log_content = f.read()
+    args_lines = [
+        line for line in log_content.splitlines() if line.startswith("ARGS=")
+    ]
+    if any("--bench" in line for line in args_lines):
+        _pass(label)
+    else:
+        _fail(f"{label}: Cargo bench was not invoked")
+        print(log_content, file=sys.stderr)
+
+
+def run_bench_compare(repo, stub_dir, extra_env=None, timeout=60):
+    env = bench_compare_env(stub_dir, extra_env=extra_env)
+    return subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def run_capture_hook_bg(repo, stub_dir, block_file, hook_env_key, extra_env=None):
+    """Start bench-compare blocked at a capture hook."""
+    env = bench_compare_env(stub_dir, extra_env=extra_env)
+    env[hook_env_key] = block_file
+    stdout_path = block_file + ".stdout"
+    stderr_path = block_file + ".stderr"
+    f_out = open(stdout_path, "w")
+    f_err = open(stderr_path, "w")
+    proc = subprocess.Popen(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        stdout=f_out,
+        stderr=f_err,
+        preexec_fn=os.setsid,
+    )
+    return proc, f_out, f_err, stdout_path, stderr_path
+
+
+def release_capture_hook(block_file):
+    with open(block_file + ".released", "w") as f:
+        f.write("\n")
+
+
+def wait_for_capture_hook_start(block_file, timeout=30.0):
+    return wait_for_block(block_file, timeout=timeout)
+
+
+def capture_hook_releaser(block_file, stop_event, mutate_fn=None, repeat_mutate=False):
+    """Release each capture-hook iteration; optionally mutate once or always."""
+    started = block_file + ".started"
+    released = block_file + ".released"
+    last_started_marker = None
+    mutated = False
+    while not stop_event.is_set():
+        if os.path.exists(started):
+            with open(started, "rb") as fh:
+                marker = fh.read()
+            marker_changed = marker != last_started_marker
+            hook_waiting = not os.path.exists(released)
+            if marker_changed or hook_waiting:
+                if marker_changed:
+                    last_started_marker = marker
+                    if mutate_fn is not None and (repeat_mutate or not mutated):
+                        mutate_fn()
+                        mutated = True
+                if not os.path.exists(released):
+                    release_capture_hook(block_file)
+        time.sleep(0.01)
+
+
+def continuous_capture_mutator(block_file, mutate_fn, stop_event):
+    """Mutate on every capture-hook iteration until stop_event is set."""
+    capture_hook_releaser(block_file, stop_event, mutate_fn, repeat_mutate=True)
 
 
 def read_metadata(repo):
@@ -539,9 +738,7 @@ def test_concurrent(tmp):
         "first wrote metadata",
     )
     assert_file_absent(
-        os.path.join(
-            repo, ".git/scah-bench-compare.lock"
-        ),
+        comparison_lock_path(repo),
         "lock released after success",
     )
 
@@ -605,9 +802,7 @@ def test_signal_releases_lock(tmp, sig, label):
     f_err.close()
     time.sleep(0.2)
 
-    lock = os.path.join(
-        repo, ".git/scah-bench-compare.lock"
-    )
+    lock = comparison_lock_path(repo)
     if os.path.exists(lock):
         _fail(
             f"lock not released on {label}: "
@@ -638,9 +833,7 @@ def test_existing_lock(tmp):
     make_stub_cargo(stub_dir, cargo_log)
 
     # Create a pre-existing lock.
-    lock_dir = os.path.join(
-        repo, ".git/scah-bench-compare.lock"
-    )
+    lock_dir = comparison_lock_path(repo)
     os.makedirs(lock_dir)
     with open(os.path.join(lock_dir, "pid"), "w") as f:
         f.write("999999\n")
@@ -1100,7 +1293,7 @@ def test_backup_cleanup(tmp):
         _pass("no stale staging directory")
 
     # Verify: comparison lock is removed.
-    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
+    lock_dir = comparison_lock_path(repo)
     if not os.path.exists(lock_dir):
         _pass("comparison lock released")
     else:
@@ -1187,7 +1380,7 @@ def test_current_snapshot_mutation(tmp):
         _pass("no backup directory remains")
 
     # Lock released.
-    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
+    lock_dir = comparison_lock_path(repo)
     assert_file_absent(lock_dir, "comparison lock released")
 
     # Temporary worktrees cleaned up (we can't inspect TEMP_ROOT directly,
@@ -1254,7 +1447,7 @@ def test_baseline_snapshot_mutation(tmp):
         _fail("old latest report was removed")
 
     # Lock released.
-    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
+    lock_dir = comparison_lock_path(repo)
     assert_file_absent(lock_dir, "comparison lock released")
 
 
@@ -1904,7 +2097,7 @@ def test_cargo_dir_symlink_mutation(tmp):
         _pass("no backup directory remains")
 
     # Lock released.
-    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
+    lock_dir = comparison_lock_path(repo)
     assert_file_absent(lock_dir, "comparison lock released")
 
 
@@ -2121,19 +2314,13 @@ def test_escaping_symlink_harness(tmp):
     symlink_path = os.path.join(harness_dir, "escape")
     os.symlink(escape_target, symlink_path)
 
+    setup_prior_report(repo)
+
     stub_dir = os.path.join(test_dir, "stub")
     cargo_log = os.path.join(test_dir, "cargo.log")
     make_stub_cargo(stub_dir, cargo_log)
 
-    env = bench_compare_env(stub_dir)
-    result = subprocess.run(
-        [BENCH_COMPARE],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = run_bench_compare(repo, stub_dir, timeout=60)
 
     assert_ne("escaping symlink exit nonzero", 0, result.returncode)
     assert_text_contains(
@@ -2141,22 +2328,16 @@ def test_escaping_symlink_harness(tmp):
         "escaping symlink",
         "error identifies escaping symlink",
     )
+    assert_text_contains(
+        result.stderr,
+        "escape",
+        "error names escaping symlink path",
+    )
 
-    # Cargo must not have been invoked.
-    if os.path.exists(cargo_log):
-        with open(cargo_log) as f:
-            log_content = f.read()
-        if "bench --" in log_content:
-            _fail("Cargo was invoked despite escaping symlink")
-        else:
-            _pass("Cargo was not invoked (escaping symlink rejected early)")
-    else:
-        _pass("Cargo was not invoked (no cargo log)")
-
-    # Previous report must remain intact (shouldn't exist yet, but check
-    # the workflow does not publish a broken one).
-    lock_dir = os.path.join(repo, "target", "bench-compare", ".lock")
-    assert_file_absent(lock_dir, "lock released after escaping symlink")
+    assert_cargo_not_run(cargo_log, "Cargo was not invoked (escaping symlink)")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock released after escaping symlink")
+    assert_no_staging_or_backup(repo)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2191,6 +2372,8 @@ def test_linked_worktree_lock(tmp):
     f_out_a = open(stdout_a, "w")
     f_err_a = open(stderr_a, "w")
 
+    lock_path = comparison_lock_path(repo)
+
     # Start comparison from worktree A (the main repo).
     p_a = run_bench_compare_bg(repo, stub_dir, block, f_out_a, f_err_a,
                                extra_env=None)
@@ -2199,6 +2382,12 @@ def test_linked_worktree_lock(tmp):
         _fail("worktree A lock block did not fire")
         return
     _pass("worktree A acquired lock")
+
+    owner_pid = ""
+    pid_file = os.path.join(lock_path, "pid")
+    if os.path.isfile(pid_file):
+        with open(pid_file) as f:
+            owner_pid = f.read().strip()
 
     # Start comparison from worktree B while A holds the lock.
     env_b = bench_compare_env(stub_dir)
@@ -2211,9 +2400,6 @@ def test_linked_worktree_lock(tmp):
         start_new_session=True,
     )
 
-    time.sleep(3)
-
-    # B must have exited nonzero.
     p_b.wait(timeout=30)
     assert_ne("worktree B rejected", 0, p_b.returncode)
 
@@ -2221,9 +2407,26 @@ def test_linked_worktree_lock(tmp):
         stderr_b_text = f.read()
     assert_text_contains(
         stderr_b_text,
-        "lock",
-        "worktree B error mentions lock",
+        lock_path,
+        "worktree B error mentions common lock path",
     )
+    assert_text_contains(
+        stderr_b_text,
+        repo,
+        "worktree B error mentions owner worktree path",
+    )
+    if owner_pid:
+        assert_text_contains(
+            stderr_b_text,
+            owner_pid,
+            "worktree B error mentions lock owner PID",
+        )
+    else:
+        assert_text_contains(
+            stderr_b_text,
+            "lock owner PID",
+            "worktree B error mentions lock owner PID line",
+        )
 
     # Release A.
     with open(block + ".released", "w") as f:
@@ -2234,9 +2437,12 @@ def test_linked_worktree_lock(tmp):
     f_err_a.close()
     assert_eq("worktree A succeeded", 0, p_a.returncode)
 
-    # Verify A cleanup.
-    lock_dir = os.path.join(repo, "target", "bench-compare", ".lock")
-    assert_file_absent(lock_dir, "lock released after completion")
+    assert_lock_absent(repo, "lock released after completion")
+
+    cargo_log_b = os.path.join(test_dir, "cargo-b.log")
+    make_stub_cargo(stub_dir, cargo_log_b)
+    result_b = run_bench_compare(worktree_b, stub_dir, timeout=60)
+    assert_eq("worktree B succeeds after lock cleared", 0, result_b.returncode)
 
     # Clean up linked worktree.
     subprocess.run(
@@ -2256,27 +2462,16 @@ def test_baseline_mutation_detected(tmp):
     repo = os.path.join(test_dir, "repo")
     create_test_repo(repo)
 
+    setup_prior_report(repo)
+
     stub_dir = os.path.join(test_dir, "stub")
     cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
 
-    # Create a stub that mutates a copied baseline file during the current run.
-    mutate_shell = (
-        'find "$BENCH_DIR" -path "*/main/estimates.json"'
-        ' -exec sh -c \'echo "mutated" >> "$1"\' _ {} \\;'
-    )
-    make_stub_cargo(
-        stub_dir, cargo_log,
-        mutate_when_cwd_contains="current",
-        mutate_shell=mutate_shell,
-    )
-
-    env = bench_compare_env(stub_dir)
-    result = subprocess.run(
-        [BENCH_COMPARE],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env={"SCAH_STUB_MUTATE_BASELINE_FILE": "1"},
         timeout=60,
     )
 
@@ -2286,13 +2481,845 @@ def test_baseline_mutation_detected(tmp):
         "baseline measurements were modified",
         "error identifies baseline mutation",
     )
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "comparison lock released")
 
-    # Previous report must remain intact.
-    report_dir = os.path.join(repo, "target", "bench-compare", "latest")
-    if os.path.isdir(report_dir):
-        # The error occurs before publication, so no new report should have
-        # been published (the previous one might or might not exist).
-        _pass("workflow failed before publishing mutated report")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 29: Untracked FIFO rejected before Cargo
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_untracked_fifo_rejected_before_cargo(tmp):
+    print()
+    print("=== Test 29: Untracked FIFO rejected before Cargo ===")
+    try:
+        os.mkfifo(os.path.join(tmp, "probe.fifo"))
+        os.unlink(os.path.join(tmp, "probe.fifo"))
+    except (OSError, AttributeError):
+        _pass("FIFO creation not supported on this platform — skipping")
+        return
+
+    test_dir = os.path.join(tmp, "test29")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    # Git omits pure FIFO paths from ls-files; scan-special-files catches them.
+    rel_fifo = "blocked.fifo"
+    repo_fifo = os.path.join(repo, rel_fifo)
+    os.mkfifo(repo_fifo)
+
+    setup_prior_report(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(repo, stub_dir, timeout=30)
+
+    assert_ne("FIFO rejection exit nonzero", 0, result.returncode)
+    assert_text_contains(result.stderr, rel_fifo, "stderr names FIFO path")
+    assert_text_contains(result.stderr, "FIFO", "stderr mentions FIFO")
+    assert_text_contains(
+        result.stderr,
+        "unsupported entry type",
+        "stderr mentions unsupported entry type",
+    )
+    assert_cargo_not_run(cargo_log, "Cargo not invoked for FIFO")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock absent after FIFO rejection")
+    assert_no_staging_or_backup(repo)
+
+    os.unlink(repo_fifo)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 30: Untracked socket rejected before Cargo
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_untracked_socket_rejected_before_cargo(tmp):
+    print()
+    print("=== Test 30: Untracked socket rejected before Cargo ===")
+    test_dir = os.path.join(tmp, "test30")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    rel_sock = "blocked.sock"
+    sock_path = os.path.join(repo, rel_sock)
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(sock_path)
+        sock.close()
+    except (OSError, AttributeError):
+        _pass("AF_UNIX socket creation not supported — skipping")
+        return
+
+    setup_prior_report(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(repo, stub_dir, timeout=30)
+
+    assert_ne("socket rejection exit nonzero", 0, result.returncode)
+    assert_text_contains(result.stderr, rel_sock, "stderr names socket path")
+    assert_text_contains(result.stderr, "socket", "stderr mentions socket")
+    assert_text_contains(
+        result.stderr,
+        "unsupported entry type",
+        "stderr mentions unsupported entry type",
+    )
+    assert_cargo_not_run(cargo_log, "Cargo not invoked for socket")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock absent after socket rejection")
+    assert_no_staging_or_backup(repo)
+
+    os.unlink(sock_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Capture race tests (31–37)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _capture_race_repo(tmp, test_id, untracked_path="generated.rs", content="v1"):
+    test_dir = os.path.join(tmp, f"test{test_id}")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, untracked_path, content)
+    return test_dir, repo
+
+
+def test_capture_race_content_mutation_after_list(tmp):
+    print()
+    print("=== Test 31: Capture race — content mutation after list ===")
+    test_dir, repo = _capture_race_repo(tmp, 31)
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    gen_path = os.path.join(repo, "generated.rs")
+
+    def mutate():
+        with open(gen_path, "w") as f:
+            f.write("v2-after-list\n")
+
+    stop_event = threading.Event()
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(block, stop_event, mutate, False),
+        daemon=True,
+    )
+    releaser.start()
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as f:
+        stderr = f.read()
+
+    assert_eq("content mutation retry succeeds", 0, proc.returncode)
+    if "working tree changed during snapshot capture" in stderr:
+        _pass("stderr mentions capture retry")
+    else:
+        _pass("capture succeeded after one-time content mutation")
+    assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
+    assert_lock_absent(repo, "lock released after success")
+
+
+def test_capture_race_mode_mutation_after_list(tmp):
+    print()
+    print("=== Test 32: Capture race — mode mutation after list ===")
+    test_dir, repo = _capture_race_repo(tmp, 32)
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    gen_path = os.path.join(repo, "generated.rs")
+
+    def mutate():
+        os.chmod(gen_path, 0o755)
+
+    stop_event = threading.Event()
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(block, stop_event, mutate, False),
+        daemon=True,
+    )
+    releaser.start()
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as f:
+        stderr = f.read()
+
+    if proc.returncode == 0:
+        _pass("mode mutation retry succeeded")
+    else:
+        assert_text_contains(
+            stderr,
+            "working tree changed during snapshot capture",
+            "mode mutation caused capture failure",
+        )
+    assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
+    assert_lock_absent(repo, "lock released")
+
+
+def test_capture_race_file_to_symlink_after_capture(tmp):
+    print()
+    print("=== Test 33: Capture race — file to symlink after capture ===")
+    test_dir, repo = _capture_race_repo(tmp, 33)
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    gen_path = os.path.join(repo, "generated.rs")
+
+    def mutate():
+        os.remove(gen_path)
+        os.symlink("other.rs", gen_path)
+
+    stop_event = threading.Event()
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(block, stop_event, mutate, False),
+        daemon=True,
+    )
+    releaser.start()
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as f:
+        stderr = f.read()
+
+    if proc.returncode == 0:
+        _pass("file-to-symlink mutation retry succeeded")
+    else:
+        assert_text_contains(
+            stderr,
+            "working tree changed during snapshot capture",
+            "file-to-symlink caused capture failure",
+        )
+    assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
+    assert_lock_absent(repo, "lock released")
+
+
+def test_capture_race_symlink_target_mutation(tmp):
+    print()
+    print("=== Test 34: Capture race — symlink target mutation ===")
+    if not hasattr(os, "symlink"):
+        _pass("symlink target mutation skipped: no symlink support")
+        return
+
+    test_dir = os.path.join(tmp, "test34")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "target-a.txt", "a")
+    write_file(repo, "target-b.txt", "b")
+    os.symlink("target-a.txt", os.path.join(repo, "linked.rs"))
+
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    link_path = os.path.join(repo, "linked.rs")
+
+    def mutate():
+        os.remove(link_path)
+        os.symlink("target-b.txt", link_path)
+
+    stop_event = threading.Event()
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(block, stop_event, mutate, False),
+        daemon=True,
+    )
+    releaser.start()
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as f:
+        stderr = f.read()
+
+    if proc.returncode == 0:
+        _pass("symlink target mutation retry succeeded")
+    else:
+        assert_text_contains(
+            stderr,
+            "working tree changed during snapshot capture",
+            "symlink target mutation caused capture failure",
+        )
+    assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
+    assert_lock_absent(repo, "lock released")
+
+
+def test_capture_race_added_file_after_list(tmp):
+    print()
+    print("=== Test 35: Capture race — added untracked file after list ===")
+    test_dir, repo = _capture_race_repo(tmp, 35)
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    def mutate():
+        write_file(repo, "extra.rs", "added during capture window\n")
+
+    stop_event = threading.Event()
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(block, stop_event, mutate, False),
+        daemon=True,
+    )
+    releaser.start()
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as f:
+        stderr = f.read()
+
+    if proc.returncode == 0:
+        _pass("added file mutation retry succeeded")
+    else:
+        assert_text_contains(
+            stderr,
+            "working tree changed during snapshot capture",
+            "added file caused capture failure",
+        )
+    assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
+    assert_lock_absent(repo, "lock released")
+
+
+def test_capture_race_deleted_file_before_inspect(tmp):
+    print()
+    print("=== Test 36: Capture race — deleted untracked file before inspect ===")
+    test_dir, repo = _capture_race_repo(tmp, 36)
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    gen_path = os.path.join(repo, "generated.rs")
+
+    def mutate():
+        os.remove(gen_path)
+
+    stop_event = threading.Event()
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(block, stop_event, mutate, False),
+        daemon=True,
+    )
+    releaser.start()
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as f:
+        stderr = f.read()
+
+    if proc.returncode == 0:
+        _pass("deleted file mutation retry succeeded")
+        assert_cargo_ran(cargo_log, "Cargo ran after stable capture")
+    else:
+        if "working tree changed during snapshot capture" in stderr:
+            _pass("deleted file caused capture retry failure")
+        elif "failed to inspect live untracked entries" in stderr:
+            _pass("deleted file caused inspect failure")
+        else:
+            _fail("deleted file failure missing expected error")
+            print(f"stderr: {stderr}", file=sys.stderr)
+        assert_cargo_not_run(cargo_log, "Cargo not invoked after deleted file")
+    assert_lock_absent(repo, "lock released")
+
+
+def test_capture_race_continuous_mutation_fails(tmp):
+    print()
+    print("=== Test 37: Capture race — continuous mutation exhausts retries ===")
+    test_dir, repo = _capture_race_repo(tmp, 37)
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    gen_path = os.path.join(repo, "generated.rs")
+    counter = {"n": 0}
+
+    def mutate():
+        counter["n"] += 1
+        with open(gen_path, "w") as f:
+            f.write(f"continuous-{counter['n']}\n")
+
+    stop_event = threading.Event()
+    mutator = threading.Thread(
+        target=continuous_capture_mutator,
+        args=(block, mutate, stop_event),
+        daemon=True,
+    )
+    mutator.start()
+    time.sleep(0.05)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    mutator.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as f:
+        stderr = f.read()
+
+    assert_ne("continuous mutation exit nonzero", 0, proc.returncode)
+    if "working tree changed during snapshot capture" in stderr:
+        _pass("continuous mutation error mentions state change")
+    elif "failed to inspect live untracked entries" in stderr:
+        _pass("continuous mutation failed during inspect")
+    else:
+        _fail("continuous mutation missing expected error")
+        print(f"stderr: {stderr}", file=sys.stderr)
+    if "attempts: 3" in stderr:
+        _pass("continuous mutation error mentions attempt count")
+    elif "attempt 3/3" in stderr:
+        _pass("continuous mutation error mentions attempt count")
+    else:
+        _fail("continuous mutation error missing attempt count")
+        print(f"stderr: {stderr}", file=sys.stderr)
+    assert_cargo_not_run(cargo_log, "Cargo not invoked under continuous mutation")
+    assert_lock_absent(repo, "lock absent after continuous mutation failure")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Symlink policy workflow tests (38–45)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _symlink_rejection_workflow(tmp, test_id, setup_symlink_fn, err_fragment):
+    test_dir = os.path.join(tmp, f"test{test_id}")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    setup_symlink_fn(repo, test_dir)
+    setup_prior_report(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env={"ALLOW_BENCH_HARNESS_DIFF": "1"},
+        timeout=60,
+    )
+
+    assert_ne(f"symlink rejection test {test_id} exit nonzero", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        err_fragment,
+        f"symlink rejection test {test_id} error fragment",
+    )
+    assert_cargo_not_run(cargo_log, f"Cargo not invoked (test {test_id})")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, f"lock released (test {test_id})")
+    assert_no_staging_or_backup(repo)
+
+
+def test_symlink_relative_escape_harness(tmp):
+    print()
+    print("=== Test 38: Relative escaping symlink in harness ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo, _test_dir):
+        harness = os.path.join(repo, "benches", "regression")
+        os.symlink("../../../outside.txt", os.path.join(harness, "escape-rel"))
+
+    _symlink_rejection_workflow(tmp, 38, setup, "escaping symlink")
+
+
+def test_symlink_chained_escape(tmp):
+    print()
+    print("=== Test 39: Chained internal symlink ending outside snapshot ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo, test_dir):
+        outside = os.path.join(test_dir, "outside-chained")
+        os.makedirs(outside, exist_ok=True)
+        with open(os.path.join(outside, "secret.txt"), "w") as f:
+            f.write("outside\n")
+        link_b = os.path.join(repo, "link-b")
+        link_a = os.path.join(repo, "link-a")
+        os.symlink(os.path.join(outside, "secret.txt"), link_b)
+        os.symlink("link-b", link_a)
+
+    _symlink_rejection_workflow(tmp, 39, setup, "escaping symlink")
+
+
+def test_symlink_broken_escape(tmp):
+    print()
+    print("=== Test 40: Broken symlink whose normalized target escapes ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo, _test_dir):
+        os.symlink("../../etc/passwd", os.path.join(repo, "broken-escape"))
+
+    _symlink_rejection_workflow(tmp, 40, setup, "escaping symlink")
+
+
+def test_symlink_loop(tmp):
+    print()
+    print("=== Test 41: Symlink loop rejected ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo, _test_dir):
+        os.symlink("loop-b", os.path.join(repo, "loop-a"))
+        os.symlink("loop-a", os.path.join(repo, "loop-b"))
+
+    _symlink_rejection_workflow(tmp, 41, setup, "symlink loop detected")
+
+
+def test_symlink_chain_too_long(tmp):
+    print()
+    print("=== Test 42: Excessively long symlink chain rejected ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo, _test_dir):
+        depth = 45
+        for i in range(depth):
+            target = f"chain-{i + 1}" if i + 1 < depth else "core_regression.rs"
+            os.symlink(
+                target,
+                os.path.join(repo, "benches", "regression", f"chain-{i}"),
+            )
+
+    _symlink_rejection_workflow(tmp, 42, setup, "symlink chain too long")
+
+
+def _symlink_allowed_workflow(tmp, test_id, setup_symlink_fn):
+    test_dir = os.path.join(tmp, f"test{test_id}")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    setup_symlink_fn(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(repo, stub_dir, timeout=60)
+    assert_eq(f"allowed symlink test {test_id} succeeds", 0, result.returncode)
+    assert_cargo_ran(cargo_log, f"Cargo invoked (test {test_id})")
+    assert_lock_absent(repo, f"lock released (test {test_id})")
+
+
+def test_symlink_internal_file_allowed(tmp):
+    print()
+    print("=== Test 43: Internal regular-file symlink allowed ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo):
+        os.symlink(
+            "core_regression.rs",
+            os.path.join(repo, "benches", "regression", "bench-link.rs"),
+        )
+
+    _symlink_allowed_workflow(tmp, 43, setup)
+
+
+def test_symlink_internal_dir_allowed(tmp):
+    print()
+    print("=== Test 44: Internal directory symlink allowed ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo):
+        os.symlink(
+            "regression",
+            os.path.join(repo, "benches", "bench-dir-link"),
+        )
+
+    _symlink_allowed_workflow(tmp, 44, setup)
+
+
+def test_symlink_safe_broken_internal_allowed(tmp):
+    print()
+    print("=== Test 45: Safe broken internal symlink allowed ===")
+    if not hasattr(os, "symlink"):
+        _pass("skipped: no symlink support")
+        return
+
+    def setup(repo):
+        os.symlink(
+            "missing-internal.txt",
+            os.path.join(repo, "broken-internal"),
+        )
+
+    _symlink_allowed_workflow(tmp, 45, setup)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Criterion failure-path tests (46–54)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _criterion_failure_test(tmp, test_id, stub_env, err_fragment):
+    test_dir = os.path.join(tmp, f"test{test_id}")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    setup_prior_report(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env=stub_env,
+        timeout=60,
+    )
+
+    assert_ne(f"criterion failure test {test_id} exit nonzero", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        err_fragment,
+        f"criterion failure test {test_id} error",
+    )
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, f"lock released (test {test_id})")
+
+
+def test_criterion_skip_current_output(tmp):
+    print()
+    print("=== Test 46: Criterion zero-work current output ===")
+    _criterion_failure_test(
+        tmp,
+        46,
+        {"SCAH_STUB_SKIP_CURRENT_OUTPUT": "1"},
+        "did not produce a fresh report",
+    )
+
+
+def test_criterion_report_only(tmp):
+    print()
+    print("=== Test 47: Criterion report-only output incomplete ===")
+    _criterion_failure_test(
+        tmp,
+        47,
+        {"SCAH_STUB_REPORT_ONLY": "1"},
+        "Criterion comparison output is incomplete",
+    )
+
+
+def test_criterion_partial_inventory(tmp):
+    print()
+    print("=== Test 48: Criterion partial inventory ===")
+    _criterion_failure_test(
+        tmp,
+        48,
+        {"SCAH_STUB_SKIP_BENCHMARK_PATH": "multi_query/prebuilt"},
+        "Criterion comparison output is incomplete",
+    )
+
+
+def test_criterion_missing_sample(tmp):
+    print()
+    print("=== Test 49: Criterion missing sample ===")
+    _criterion_failure_test(
+        tmp,
+        49,
+        {"SCAH_STUB_SKIP_CURRENT_SAMPLE": "1"},
+        "Criterion comparison output is incomplete",
+    )
+
+
+def test_criterion_missing_change(tmp):
+    print()
+    print("=== Test 50: Criterion missing change estimates ===")
+    _criterion_failure_test(
+        tmp,
+        50,
+        {"SCAH_STUB_SKIP_CHANGE_ESTIMATES": "1"},
+        "Criterion comparison output is incomplete",
+    )
+
+
+def test_criterion_baseline_file_deleted(tmp):
+    print()
+    print("=== Test 51: Criterion baseline file deletion ===")
+    _criterion_failure_test(
+        tmp,
+        51,
+        {"SCAH_STUB_DELETE_BASELINE_FILE": "1"},
+        "Criterion comparison output is incomplete",
+    )
+
+
+def test_criterion_baseline_file_added(tmp):
+    print()
+    print("=== Test 52: Criterion baseline file addition ===")
+    _criterion_failure_test(
+        tmp,
+        52,
+        {"SCAH_STUB_ADD_BASELINE_FILE": "1"},
+        "baseline measurements were modified",
+    )
+
+
+def test_criterion_baseline_symlink_inserted(tmp):
+    print()
+    print("=== Test 53: Criterion baseline symlink insertion ===")
+    _criterion_failure_test(
+        tmp,
+        53,
+        {"SCAH_STUB_INSERT_BASELINE_SYMLINK": "1"},
+        "unsupported symlink in baseline data",
+    )
+
+
+def test_criterion_success_publishes_baseline_artifacts(tmp):
+    print()
+    print("=== Test 54: Valid Criterion output publishes baseline artifacts ===")
+    test_dir = os.path.join(tmp, "test54")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(repo, stub_dir, timeout=60)
+    assert_eq("valid criterion success exit code", 0, result.returncode)
+
+    latest = os.path.join(repo, "target/bench-compare/latest")
+    assert_file_exists(
+        os.path.join(latest, "criterion-baseline-inventory.jsonl"),
+        "baseline inventory published",
+    )
+    assert_file_exists(
+        os.path.join(latest, "criterion-baseline-manifest.bin"),
+        "baseline manifest published",
+    )
+    assert_file_exists(
+        os.path.join(latest, "criterion-baseline-manifest.sha256"),
+        "baseline manifest sha256 published",
+    )
+
+    meta = read_metadata(repo)
+    before = meta.get("criterion_baseline_manifest_sha256_before", "")
+    after = meta.get("criterion_baseline_manifest_sha256_after", "")
+    assert_eq(
+        "baseline manifest before/after hashes match",
+        before,
+        after,
+    )
+    assert_eq(
+        "criterion_baseline_measurement_manifests_match",
+        "true",
+        meta.get("criterion_baseline_measurement_manifests_match", ""),
+    )
+    assert_eq(
+        "criterion_baseline_measurements_unchanged",
+        "true",
+        meta.get("criterion_baseline_measurements_unchanged", ""),
+    )
+
+    manifest_bin = os.path.join(latest, "criterion-baseline-manifest.bin")
+    hash_file = os.path.join(latest, "criterion-baseline-manifest.sha256")
+    if os.path.isfile(hash_file) and os.path.isfile(manifest_bin):
+        with open(hash_file) as f:
+            stored = f.read().strip()
+        assert_eq(
+            "published manifest hash matches file",
+            stored,
+            sha256_file(manifest_bin),
+        )
+
+    assert_lock_absent(repo, "lock released after success")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2333,10 +3360,36 @@ def main():
         test_entry_disappears_during_traversal(tmp)
         test_directory_symlink_manifest_records(tmp)
 
-        # Full-workflow safety tests (26-28).
+        # Full-workflow safety tests (26-54).
         test_escaping_symlink_harness(tmp)
         test_linked_worktree_lock(tmp)
         test_baseline_mutation_detected(tmp)
+        test_untracked_fifo_rejected_before_cargo(tmp)
+        test_untracked_socket_rejected_before_cargo(tmp)
+        test_capture_race_content_mutation_after_list(tmp)
+        test_capture_race_mode_mutation_after_list(tmp)
+        test_capture_race_file_to_symlink_after_capture(tmp)
+        test_capture_race_symlink_target_mutation(tmp)
+        test_capture_race_added_file_after_list(tmp)
+        test_capture_race_deleted_file_before_inspect(tmp)
+        test_capture_race_continuous_mutation_fails(tmp)
+        test_symlink_relative_escape_harness(tmp)
+        test_symlink_chained_escape(tmp)
+        test_symlink_broken_escape(tmp)
+        test_symlink_loop(tmp)
+        test_symlink_chain_too_long(tmp)
+        test_symlink_internal_file_allowed(tmp)
+        test_symlink_internal_dir_allowed(tmp)
+        test_symlink_safe_broken_internal_allowed(tmp)
+        test_criterion_skip_current_output(tmp)
+        test_criterion_report_only(tmp)
+        test_criterion_partial_inventory(tmp)
+        test_criterion_missing_sample(tmp)
+        test_criterion_missing_change(tmp)
+        test_criterion_baseline_file_deleted(tmp)
+        test_criterion_baseline_file_added(tmp)
+        test_criterion_baseline_symlink_inserted(tmp)
+        test_criterion_success_publishes_baseline_artifacts(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
