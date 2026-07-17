@@ -676,13 +676,6 @@ where
             if cur.scope_depth == SENTINEL_SCOPE {
                 if cur.unwind_depth() == Some(close_depth) {
                     if cur.is_blocked() {
-                        let position = self.cursors[i].position;
-                        if !self.query.is_save_point(&position) {
-                            let section = self.query.get_selection(position.selection);
-                            if position.state.index() > section.range.start.index() {
-                                self.cursors[i].position.back(self.query);
-                            }
-                        }
                         self.cursors[i].reactivate_after_close();
                     } else if cur.is_complete() {
                         self.cursors[i].complete_after_close();
@@ -704,13 +697,6 @@ where
                 }
             } else if cur.is_moving() && cur.unwind_depth() == Some(close_depth) {
                 if cur.is_blocked() {
-                    let position = self.cursors[i].position;
-                    if !self.query.is_save_point(&position) {
-                        let section = self.query.get_selection(position.selection);
-                        if position.state.index() > section.range.start.index() {
-                            self.cursors[i].position.back(self.query);
-                        }
-                    }
                     self.cursors[i].reactivate_after_close();
                 } else if cur.is_complete() {
                     self.cursors[i].complete_after_close();
@@ -2167,7 +2153,7 @@ mod tests {
         assert_eq!(store.get("div br").unwrap().count(), 2);
 
         // Drive manually: void First under `.then()` completes on synthetic close
-        // (position.back may walk to the parent section; unwind must clear).
+        // (unwind must clear without rolling back cursor position).
         let query = Query::first("div", Save::none())
             .unwrap()
             .then(|div| Ok([div.first("br", Save::all())?]))
@@ -2739,9 +2725,10 @@ mod tests {
             .position(|c| {
                 c.is_moving()
                     && c.is_blocked()
+                    && c.unwind_depth() == Some(1)
                     && !query.is_save_point(&c.position)
             })
-            .expect("blocked moving cursor at div transition (not save point)");
+            .expect("blocked moving cursor awaiting div close (not save point)");
         let before_position = selection.cursors[blocked_idx].position;
         assert!(selection.cursors[blocked_idx].is_blocked());
 
