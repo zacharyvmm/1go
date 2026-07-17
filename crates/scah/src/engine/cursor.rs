@@ -180,18 +180,6 @@ impl ScopedCursor {
         }
     }
 
-    /// Record which element close should notify this cursor, without blocking.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn set_unwind_depth(&mut self, depth: super::DepthSize) {
-        debug_assert!(
-            depth != NO_UNWIND,
-            "element depth must not use the NO_UNWIND sentinel"
-        );
-        if let CursorMode::Moving { unwind_depth, .. } = &mut self.mode {
-            *unwind_depth = depth;
-        }
-    }
-
     /// Pause matching until the element at `depth` closes.
     pub fn block_until_close(&mut self, depth: super::DepthSize) {
         debug_assert!(
