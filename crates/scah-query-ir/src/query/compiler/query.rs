@@ -76,6 +76,28 @@ pub trait QuerySpec<'query> {
         self.get_transition(state).guard == Combinator::Descendant
     }
 
+    fn needs_descendant_anchor(&self, position: Position) -> bool {
+        if !self.is_descendant(position.state) {
+            return false;
+        }
+
+        if self.is_save_point(&position) {
+            let kind = self.get_section_selection_kind(position.selection);
+            // Nested All-section matches are distinct output parents when
+            // child query sections exist.
+            return matches!(kind, SelectionKind::All)
+                && position.next_child(self).is_some();
+        }
+
+        let next = position
+            .next_transition(self)
+            .expect("non-save-point must have a next transition");
+
+        // A descendant continuation covers suffixes produced by nested
+        // rematches of the current selector. Exact relative operators do not.
+        !self.is_descendant(next)
+    }
+
     fn is_save_point(&self, position: &Position) -> bool {
         debug_assert!(
             self.get_selection(position.selection)

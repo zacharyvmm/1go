@@ -1,11 +1,19 @@
 use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
+use crate::debug::ScopedCursorReason;
 #[cfg(any(debug_assertions, test))]
-use crate::debug::{CursorTraceKind, ScopedCursorReason, TraceEvent, TransitionRejectReason};
+use crate::debug::{
+    CursorSuppressionReason, CursorTraceKind, TraceEvent, TransitionRejectReason,
+};
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
+use crate::{Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement};
 use smallvec::SmallVec;
+
+enum SpawnOutcome {
+    Inserted,
+    Dominated,
+}
 
 /// NFA execution engine for streaming StAX events.
 ///
@@ -98,6 +106,100 @@ where
         }
     }
 
+    fn existing_dominates(
+        existing: &ScopedCursor,
+        candidate: &ScopedCursor,
+        query: &Q,
+    ) -> bool {
+        if existing.end() {
+            return false;
+        }
+        if existing.parent != candidate.parent || existing.position != candidate.position {
+            return false;
+        }
+
+        let existing_base = existing.match_base_depth();
+        let candidate_base = candidate.match_base_depth();
+
+        match &query.get_transition(candidate.position.state).guard {
+            Combinator::Descendant => {
+                if existing_base <= candidate_base {
+                    true
+                } else {
+                    debug_assert!(
+                        false,
+                        "shallower descendant candidate while deeper exists"
+                    );
+                    false
+                }
+            }
+            Combinator::Child => existing_base == candidate_base,
+            Combinator::NextSibling | Combinator::SubsequentSibling | Combinator::Namespace => {
+                existing_base == candidate_base
+            }
+        }
+    }
+
+    fn try_push_cursor(
+        &mut self,
+        candidate: ScopedCursor,
+        runner_index: usize,
+        store: &mut Store<'html, 'query>,
+        create_reason: Option<ScopedCursorReason>,
+    ) -> SpawnOutcome {
+        for existing in self.cursors.iter().rev() {
+            if Self::existing_dominates(existing, &candidate, self.query) {
+                #[cfg(any(debug_assertions, test))]
+                {
+                    let reason = match &self.query.get_transition(candidate.position.state).guard {
+                        Combinator::Descendant => {
+                            if existing.match_base_depth() == candidate.match_base_depth() {
+                                CursorSuppressionReason::ExactDuplicate
+                            } else {
+                                CursorSuppressionReason::DescendantDominated
+                            }
+                        }
+                        _ => CursorSuppressionReason::ExactDuplicate,
+                    };
+                    crate::scah_trace!(
+                        store,
+                        TraceEvent::CursorSuppressed {
+                            runner_index,
+                            parent: candidate.parent,
+                            selection: candidate.position.selection,
+                            state: candidate.position.state,
+                            candidate_base_depth: candidate.match_base_depth(),
+                            dominating_base_depth: existing.match_base_depth(),
+                            reason,
+                        }
+                    );
+                }
+                return SpawnOutcome::Dominated;
+            }
+        }
+
+        if let Some(reason) = create_reason {
+            #[cfg(any(debug_assertions, test))]
+            {
+                crate::scah_trace!(
+                    store,
+                    TraceEvent::ScopedCursorCreated {
+                        runner_index,
+                        depth: candidate.scope_depth,
+                        scope_depth: candidate.scope_depth,
+                        parent: candidate.parent,
+                        selection: candidate.position.selection,
+                        state: candidate.position.state,
+                        reason,
+                    }
+                );
+            }
+        }
+
+        self.cursors.push(candidate);
+        SpawnOutcome::Inserted
+    }
+
     pub fn next(
         &mut self,
         runner_index: usize,
@@ -178,35 +280,9 @@ where
                     // `save_element` advances the parent for children; restore it
                     // afterward so this cursor can still match later siblings.
                     let original_parent = self.cursors[i].parent;
-
-                    if is_descendant && !terminal_all {
-                        let do_fork = if is_section_end {
-                            let is_all = matches!(section_kind, SelectionKind::All);
-                            let last_save_point = self.query.is_last_save_point(&position);
-                            !last_save_point || is_all
-                        } else {
-                            true
-                        };
-                        if do_fork {
-                            let anchor = self.cursors[i].anchor_clone(depth);
-                            #[cfg(any(debug_assertions, test))]
-                            {
-                                crate::scah_trace!(
-                                    store,
-                                    TraceEvent::ScopedCursorCreated {
-                                        runner_index,
-                                        depth,
-                                        scope_depth: anchor.scope_depth,
-                                        parent: anchor.parent,
-                                        selection: anchor.position.selection,
-                                        state: anchor.position.state,
-                                        reason: ScopedCursorReason::DescendantFork,
-                                    }
-                                );
-                            }
-                            self.cursors.push(anchor);
-                        }
-                    }
+                    let needs_anchor = self.query.needs_descendant_anchor(position);
+                    let anchor_candidate =
+                        needs_anchor.then(|| self.cursors[i].anchor_clone(depth));
 
                     let saved_parent = if is_save_point {
                         let save_parent = self.cursors[i].parent;
@@ -252,16 +328,24 @@ where
                         continue;
                     }
 
-                    // Descendant matches are delegated to the anchored fork;
-                    // section-end cursors pause until close handling unwinds them.
                     if is_descendant || is_section_end {
                         self.cursors[i].block_until_close(depth);
                     }
 
+                    if let Some(anchor) = anchor_candidate {
+                        let _ = self.try_push_cursor(
+                            anchor,
+                            runner_index,
+                            store,
+                            Some(ScopedCursorReason::DescendantFork),
+                        );
+                    }
+
                     spawned_positions = self.cursors[i].next_positions(self.query);
                     for pos in &spawned_positions {
-                        self.cursors
-                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
+                        let continuation =
+                            ScopedCursor::new_moving(depth, saved_parent, *pos);
+                        let _ = self.try_push_cursor(continuation, runner_index, store, None);
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
@@ -337,8 +421,9 @@ where
                     }
 
                     for pos in &spawned_positions {
-                        self.cursors
-                            .push(ScopedCursor::new_moving(depth, saved_parent, *pos));
+                        let continuation =
+                            ScopedCursor::new_moving(depth, saved_parent, *pos);
+                        let _ = self.try_push_cursor(continuation, runner_index, store, None);
                     }
                 }
             }
@@ -531,7 +616,7 @@ mod tests {
         assert!(store.get("div a").is_none());
 
         assert_eq!(selection.cursors[0].position.state, TransitionId(0));
-        assert_eq!(selection.cursors.len(), 3);
+        assert_eq!(selection.cursors.len(), 2);
         let spawned = selection
             .cursors
             .iter()
@@ -738,13 +823,9 @@ mod tests {
 
         let anchored_count = selection.cursors.iter().filter(|c| c.is_anchored()).count();
         assert_eq!(
-            anchored_count, 1,
-            "Expected 1 anchored fork after div match"
+            anchored_count, 0,
+            "No anchored fork when next transition is also descendant (div a)"
         );
-
-        let anchored = selection.cursors.iter().find(|c| c.is_anchored()).unwrap();
-        assert_eq!(anchored.scope_depth, 0);
-        assert_eq!(anchored.position.state, TransitionId(0));
     }
 
     #[test]
