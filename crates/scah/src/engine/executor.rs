@@ -437,7 +437,18 @@ where
             if root.position.selection != exit_section || !root.end() {
                 return false;
             }
-            return self.cursors[1..].iter().all(|c| c.end());
+            if !self.cursors[1..].iter().all(|c| c.end()) {
+                return false;
+            }
+            // With `.then()` child sections, keep early-exit false until the
+            // matched root element closes. Otherwise the runner is removed on
+            // the last child close and parent `inner_html`/`text_content` never
+            // finalize. Terminal `first()` without children still exits while
+            // unwind is pending so the match close can drop the runner.
+            if root.unwind_depth().is_some() && self.query.queries().len() > 1 {
+                return false;
+            }
+            return true;
         }
         false
     }
