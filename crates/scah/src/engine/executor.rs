@@ -16,6 +16,33 @@ enum SpawnOutcome {
     Dominated,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SelectedResult {
+    selected_depth: super::DepthSize,
+    selected_parent: ElementId,
+    selected_section: QuerySectionId,
+}
+
+/// Tracks `.first()` selected-element completion for early exit.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+enum FirstMatchState {
+    #[default]
+    Searching,
+    /// Terminal First save-point matched; awaiting selected element close.
+    Matched(SelectedResult),
+    /// Selected element closed and `.then()` child scopes are complete.
+    Complete(SelectedResult),
+}
+
+impl FirstMatchState {
+    fn selected(&self) -> Option<SelectedResult> {
+        match self {
+            Self::Matched(s) | Self::Complete(s) => Some(*s),
+            Self::Searching => None,
+        }
+    }
+}
+
 /// NFA execution engine for streaming StAX events.
 ///
 /// Cursor 0 is the sentinel root. It is never depth-pruned; query progress is
@@ -24,6 +51,7 @@ enum SpawnOutcome {
 pub struct QueryExecutor<'a, Q> {
     pub(crate) query: &'a Q,
     pub(crate) cursors: Vec<ScopedCursor>,
+    first_match: FirstMatchState,
 }
 
 impl<'a, 'html, 'query: 'html, Q> QueryExecutor<'a, Q>
@@ -41,6 +69,69 @@ where
         Self {
             query,
             cursors: vec![root],
+            first_match: FirstMatchState::Searching,
+        }
+    }
+
+    fn note_first_terminal_match(
+        &mut self,
+        depth: super::DepthSize,
+        selected_parent: ElementId,
+        selected_section: QuerySectionId,
+    ) {
+        if self.query.exit_at_section_end() != Some(selected_section) {
+            return;
+        }
+        self.first_match = FirstMatchState::Matched(SelectedResult {
+            selected_depth: depth,
+            selected_parent,
+            selected_section,
+        });
+    }
+
+    fn is_then_child_section(&self, section: QuerySectionId, first_section: QuerySectionId) -> bool {
+        let mut current = section;
+        loop {
+            let parent = self.query.get_selection(current).parent;
+            match parent {
+                None => return false,
+                Some(p) if p == first_section => return true,
+                Some(p) => current = p,
+            }
+        }
+    }
+
+    fn first_child_obligations_complete(&self) -> bool {
+        let Some(selected) = self.first_match.selected() else {
+            return false;
+        };
+        if self.query.queries().len() == 1 {
+            return true;
+        }
+        self.cursors.iter().all(|cursor| {
+            if cursor.scope_depth == SENTINEL_SCOPE {
+                return true;
+            }
+            if cursor.position.selection == selected.selected_section
+                && cursor.parent != selected.selected_parent
+            {
+                // Prefix cursors for compound First selectors (e.g. article
+                // in `article p`) are irrelevant once the terminal match is fixed.
+                return true;
+            }
+            if !self.is_then_child_section(cursor.position.selection, selected.selected_section) {
+                return true;
+            }
+            cursor.scope_depth >= selected.selected_depth && cursor.end()
+        })
+    }
+
+    fn try_complete_first_match(&mut self, close_depth: super::DepthSize) {
+        if let FirstMatchState::Matched(selected) = self.first_match
+            && close_depth == selected.selected_depth
+            && self.first_child_obligations_complete()
+        {
+            self.first_match = FirstMatchState::Complete(selected);
         }
     }
 
@@ -292,7 +383,7 @@ where
                     let anchor_candidate =
                         needs_anchor.then(|| self.cursors[i].anchor_clone(depth));
 
-                    let saved_parent = if is_save_point {
+                    let (saved_parent, saved_element) = if is_save_point {
                         #[cfg(any(debug_assertions, test))]
                         {
                             let save_parent = self.cursors[i].parent;
@@ -321,10 +412,11 @@ where
                         );
                         let sp = self.cursors[i].parent;
                         self.cursors[i].parent = original_parent;
+                        let saved = hit.element_id;
                         save_hits.push(hit);
-                        sp
+                        (sp, Some(saved))
                     } else {
-                        original_parent
+                        (original_parent, None)
                     };
 
                     // Set lifecycle before cursor admission so spawned anchors
@@ -332,6 +424,13 @@ where
                     if !terminal_all {
                         if terminal_first {
                             self.cursors[i].complete_until_close(depth);
+                            if let Some(element_id) = saved_element {
+                                self.note_first_terminal_match(
+                                    depth,
+                                    element_id,
+                                    position.selection,
+                                );
+                            }
                         } else if is_descendant || is_save_point {
                             self.cursors[i].block_until_close(depth);
                         }
@@ -397,10 +496,16 @@ where
                                 element.clone(),
                                 &mut base,
                             );
+                            let element_id = hit.element_id;
                             save_hits.push(hit);
-                        }
-                        if is_first && is_save_point {
-                            self.cursors[i].mark_complete();
+                            if is_first {
+                                self.cursors[i].mark_complete();
+                                self.note_first_terminal_match(
+                                    depth,
+                                    element_id,
+                                    position.selection,
+                                );
+                            }
                         }
                         continue;
                     }
@@ -436,15 +541,20 @@ where
                             element.clone(),
                             &mut base,
                         );
+                        let element_id = hit.element_id;
                         save_hits.push(hit);
+                        if is_first {
+                            self.cursors[i].mark_complete();
+                            self.note_first_terminal_match(
+                                depth,
+                                element_id,
+                                position.selection,
+                            );
+                        }
                         base.parent
                     } else {
                         self.cursors[i].parent
                     };
-
-                    if is_first && is_save_point {
-                        self.cursors[i].mark_complete();
-                    }
 
                     for pos in &spawned_positions {
                         let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
@@ -456,27 +566,19 @@ where
     }
 
     pub fn early_exit(&self) -> bool {
-        if let Some(exit_section) = self.query.exit_at_section_end() {
-            // `.first()` can exit only after the root match and any `.then()`
-            // branches have all completed.
-            let root = &self.cursors[0];
-            if root.position.selection != exit_section || !root.end() {
-                return false;
-            }
-            if !self.cursors[1..].iter().all(|c| c.end()) {
-                return false;
-            }
-            // With `.then()` child sections, keep early-exit false until the
-            // matched root element closes. Otherwise the runner is removed on
-            // the last child close and parent `inner_html`/`text_content` never
-            // finalize. Terminal `first()` without children still exits while
-            // unwind is pending so the match close can drop the runner.
-            if root.unwind_depth().is_some() && self.query.queries().len() > 1 {
-                return false;
-            }
-            return true;
+        if self.query.exit_at_section_end().is_none() {
+            return false;
         }
-        false
+        if !self.first_child_obligations_complete() {
+            return false;
+        }
+        match self.first_match {
+            FirstMatchState::Complete(_) => true,
+            // Terminal `first()` without `.then()` still exits while unwind is
+            // pending so the match close can drop the runner.
+            FirstMatchState::Matched(_) => self.query.queries().len() == 1,
+            FirstMatchState::Searching => false,
+        }
     }
 
     pub fn back(
@@ -571,6 +673,8 @@ where
         {
             root.parent = parent;
         }
+
+        self.try_complete_first_match(close_depth);
 
         significant_close
     }
@@ -2105,6 +2209,58 @@ mod tests {
             "first void parent must early-exit after synthetic close"
         );
         assert_eq!(store.elements.len(), 1);
+    }
+
+    #[test]
+    fn first_compound_then_early_exit_after_selected_close() {
+        let filler = "<div>filler</div>".repeat(100);
+        let html = format!(
+            "<article><p>hit<span>inner</span></p>tail</article>{filler}"
+        );
+        let html_len = html.len();
+
+        let query = Query::first("article p", Save::all())
+            .unwrap()
+            .then(|p| Ok([p.all("span", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let reader = &mut Reader::new(&html);
+        let manager = QueryMultiplexer::new(&queries);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        assert!(
+            reader.get_position() < html_len,
+            "compound First+.then() must stop before article filler and trailing filler divs"
+        );
+        let store = parser.matches();
+        let ps: Vec<_> = store.get("article p").unwrap().collect();
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].inner_html, Some("hit<span>inner</span>"));
+        let spans: Vec<_> = ps[0].get(&store, "span").unwrap().collect();
+        assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn first_compound_early_exit_after_selected_close_without_then() {
+        let filler = "<div>filler</div>".repeat(100);
+        let html = format!("<article><p>hit</p>tail</article>{filler}");
+        let html_len = html.len();
+
+        let query = Query::first("article p", Save::all()).unwrap().build();
+        let queries = [query];
+        let reader = &mut Reader::new(&html);
+        let manager = QueryMultiplexer::new(&queries);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        assert!(
+            reader.get_position() < html_len,
+            "compound First must stop after </p>, before article tail and filler divs"
+        );
+        let store = parser.matches();
+        let ps: Vec<_> = store.get("article p").unwrap().collect();
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].inner_html, Some("hit"));
     }
 
     #[test]
