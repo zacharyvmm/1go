@@ -272,11 +272,12 @@ where
 
             let is_descendant = self.query.is_descendant(position.state);
             let is_save_point = self.query.is_save_point(&position);
-            let is_section_end = is_save_point;
             let section_kind = self.query.get_section_selection_kind(position.selection);
             let is_first = matches!(section_kind, SelectionKind::First);
             let self_closing = document_position.self_closing;
-            let terminal_all = is_section_end
+            let terminal_first =
+                is_save_point && matches!(section_kind, SelectionKind::First);
+            let terminal_all = is_save_point
                 && matches!(section_kind, SelectionKind::All)
                 && position.next_child(self.query).is_none();
 
@@ -326,22 +327,25 @@ where
                         original_parent
                     };
 
+                    // Set lifecycle before cursor admission so spawned anchors
+                    // are not dominated by an still-active source cursor.
+                    if !terminal_all {
+                        if terminal_first {
+                            self.cursors[i].complete_until_close(depth);
+                        } else if is_descendant || is_save_point {
+                            self.cursors[i].block_until_close(depth);
+                        }
+                    }
+
                     if self_closing {
                         if terminal_all {
                             continue;
-                        }
-                        if is_descendant || is_section_end {
-                            self.cursors[i].block_until_close(depth);
                         }
                         continue;
                     }
 
                     if terminal_all {
                         continue;
-                    }
-
-                    if is_descendant || is_section_end {
-                        self.cursors[i].block_until_close(depth);
                     }
 
                     if let Some(anchor) = anchor_candidate {
@@ -395,7 +399,7 @@ where
                             );
                             save_hits.push(hit);
                         }
-                        if is_first && is_section_end {
+                        if is_first && is_save_point {
                             self.cursors[i].mark_complete();
                         }
                         continue;
@@ -438,7 +442,7 @@ where
                         self.cursors[i].parent
                     };
 
-                    if is_first && is_section_end {
+                    if is_first && is_save_point {
                         self.cursors[i].mark_complete();
                     }
 
@@ -494,33 +498,52 @@ where
 
             if cur.scope_depth == SENTINEL_SCOPE {
                 if cur.unwind_depth() == Some(close_depth) {
-                    if cur.end() {
-                        let section_kind = self
-                            .query
-                            .get_section_selection_kind(cur.position.selection);
-                        if matches!(section_kind, SelectionKind::First) {
-                            self.cursors[i].position.back(self.query);
-                            self.cursors[i].complete_after_close();
-                            #[cfg(any(debug_assertions, test))]
-                            if let Some(section) = self.query.exit_at_section_end() {
-                                crate::scah_trace!(
-                                    store,
-                                    TraceEvent::EarlyExit {
-                                        runner_index,
-                                        selector: self.query.get_selection(section).source,
-                                        section,
-                                    }
-                                );
+                    if cur.is_blocked() {
+                        let position = self.cursors[i].position;
+                        if !self.query.is_save_point(&position) {
+                            let section = self.query.get_selection(position.selection);
+                            if position.state.index() > section.range.start.index() {
+                                self.cursors[i].position.back(self.query);
                             }
-                        } else {
-                            self.cursors[i].reactivate_after_close();
+                        }
+                        self.cursors[i].reactivate_after_close();
+                    } else if cur.is_complete() {
+                        self.cursors[i].complete_after_close();
+                        #[cfg(any(debug_assertions, test))]
+                        if let Some(section) = self.query.exit_at_section_end() {
+                            crate::scah_trace!(
+                                store,
+                                TraceEvent::EarlyExit {
+                                    runner_index,
+                                    selector: self.query.get_selection(section).source,
+                                    section,
+                                }
+                            );
                         }
                     } else {
-                        self.cursors[i].position.back(self.query);
-                        self.cursors[i].reactivate_after_close();
+                        debug_assert!(
+                            false,
+                            "active cursor should not have pending unwind"
+                        );
                     }
                     significant_close = true;
                 }
+            } else if cur.is_moving() && cur.unwind_depth() == Some(close_depth) {
+                if cur.is_blocked() {
+                    let position = self.cursors[i].position;
+                    if !self.query.is_save_point(&position) {
+                        let section = self.query.get_selection(position.selection);
+                        if position.state.index() > section.range.start.index() {
+                            self.cursors[i].position.back(self.query);
+                        }
+                    }
+                    self.cursors[i].reactivate_after_close();
+                } else if cur.is_complete() {
+                    self.cursors[i].complete_after_close();
+                } else {
+                    debug_assert!(false, "active cursor should not have pending unwind");
+                }
+                significant_close = true;
             } else if cur.scope_depth >= close_depth {
                 let pruned = self.cursors.swap_remove(i);
                 last_pruned_parent = Some(pruned.parent);
@@ -537,21 +560,6 @@ where
                         state: pruned.position.state,
                     }
                 );
-            } else if cur.is_moving() && cur.unwind_depth() == Some(close_depth) {
-                if cur.end() {
-                    let section_kind = self
-                        .query
-                        .get_section_selection_kind(cur.position.selection);
-                    if matches!(section_kind, SelectionKind::First) {
-                        self.cursors[i].position.back(self.query);
-                        self.cursors[i].complete_after_close();
-                    } else {
-                        self.cursors[i].reactivate_after_close();
-                    }
-                } else {
-                    self.cursors[i].reactivate_after_close();
-                }
-                significant_close = true;
             }
         }
 
