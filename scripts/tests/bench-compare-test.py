@@ -115,6 +115,34 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def read_manifest(path):
+    """Parse NUL-delimited binary manifest into a list of dicts.
+
+    Each record has: type, mode, hash, path.
+    """
+    with open(path, "rb") as file:
+        fields = file.read().split(b"\0")
+
+    assert fields[-1] == b"", "manifest must end with NUL terminator"
+
+    records = []
+
+    for index in range(0, len(fields) - 1, 4):
+        records.append(
+            {
+                "type": fields[index].decode("utf-8"),
+                "mode": fields[index + 1].decode("ascii"),
+                "hash": fields[index + 2].decode("ascii"),
+                "path": fields[index + 3].decode(
+                    "utf-8",
+                    errors="surrogateescape",
+                ),
+            }
+        )
+
+    return records
+
+
 def create_test_repo(repo):
     """Create a minimal test repo with two commits.
 
@@ -198,15 +226,16 @@ def shlex_quote(s):
 
 def _stub_mutation_lines(cargo_log, mutate_when_cwd_contains=None,
                          mutate_file=None, mutate_content=None):
-    """Return shell lines for the cargo stub's mutation logic.
+    """Return shell lines for the cargo stub's file-mutation logic.
 
-    When *mutate_when_cwd_contains* is a non-empty string, the stub
-    checks whether CWD contains that substring and, if so, overwrites
-    *mutate_file* (relative to CWD) with *mutate_content*.
+    When *mutate_when_cwd_contains* is a non-empty string AND *mutate_file*
+    is explicitly set, the stub checks whether CWD contains that substring
+    and, if so, overwrites *mutate_file* (relative to CWD) with
+    *mutate_content*.
     """
-    if not mutate_when_cwd_contains:
+    if not mutate_when_cwd_contains or not mutate_file:
         return []
-    mf = shlex_quote(mutate_file or "src/lib.rs")
+    mf = shlex_quote(mutate_file)
     mc = shlex_quote(mutate_content or "mutated by stub")
     kw = shlex_quote(mutate_when_cwd_contains)
     return [
@@ -219,14 +248,16 @@ def _stub_mutation_lines(cargo_log, mutate_when_cwd_contains=None,
 
 def make_stub_cargo(stub_dir, cargo_log, block_file=None,
                     mutate_when_cwd_contains=None,
-                    mutate_file=None, mutate_content=None):
+                    mutate_file=None, mutate_content=None,
+                    mutate_shell=None):
     """Create a fake 'cargo' executable that logs invocations.
 
     Logs CWD and args on every call. When SCAH_BENCH_TEST_READ_FILE is
     set, reads that file (relative to CWD) and logs its content.
     Supports CARGO_BLOCK_FILE for concurrency tests.
-    When *mutate_when_cwd_contains* is set, overwrites *mutate_file*
-    in CWD when CWD path contains that substring.
+    When *mutate_when_cwd_contains* is set:
+      - *mutate_file* is overwritten with *mutate_content*.
+      - *mutate_shell* (if set) is injected as raw shell code.
     """
     os.makedirs(stub_dir, exist_ok=True)
     stub_path = os.path.join(stub_dir, "cargo")
@@ -271,6 +302,15 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
         mutate_file=mutate_file,
         mutate_content=mutate_content,
     )
+    # Shell-level mutation support (for directory symlink etc.).
+    if mutate_shell and mutate_when_cwd_contains:
+        kw = shlex_quote(mutate_when_cwd_contains)
+        lines += [
+            'if [[ "$CWD" == *' + kw + '* ]]; then',
+            mutate_shell,
+            "fi",
+            "",
+        ]
     if block_file:
         lines += [
             'if [ -n "${CARGO_BLOCK_FILE:-}" ] &&'
@@ -1613,6 +1653,420 @@ def test_manifest_hash_file(tmp):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Test 20: Directory symlink target changes the fingerprint
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_directory_symlink_fingerprint(tmp):
+    print()
+    print("=== Test 20: Directory symlink target changes fingerprint ===")
+    if not hasattr(os, "symlink"):
+        _pass("directory symlink test skipped: platform does not support symlinks")
+        return
+
+    snap = os.path.join(tmp, "test20", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create two directories with identical contents.
+    dir_a = os.path.join(snap, "dir-a")
+    dir_b = os.path.join(snap, "dir-b")
+    os.makedirs(dir_a)
+    os.makedirs(dir_b)
+    with open(os.path.join(dir_a, "value.txt"), "w") as f:
+        f.write("same content\n")
+    with open(os.path.join(dir_b, "value.txt"), "w") as f:
+        f.write("same content\n")
+
+    # Create directory symlink → dir-a.
+    symlink_path = os.path.join(snap, "linked-dir")
+    os.symlink("dir-a", symlink_path)
+
+    rc_a, fp_a, _, manifest_a = run_fingerprint(snap)
+    assert_eq("dir symlink fingerprint (a) exit", 0, rc_a)
+
+    # Verify manifest contains the symlink entry.
+    records = read_manifest(manifest_a)
+    link_entries = [r for r in records if r["path"] == "linked-dir"]
+    if len(link_entries) == 1:
+        _pass("directory symlink present in manifest")
+    else:
+        _fail("directory symlink missing from manifest")
+        return
+
+    entry = link_entries[0]
+    assert_eq("dir symlink entry type", "symlink", entry["type"])
+    assert_eq("dir symlink mode", "120000", entry["mode"])
+
+    # Verify the content hash matches the target string "dir-a".
+    expected_hash = hashlib.sha256(b"dir-a").hexdigest()
+    assert_eq("dir symlink target hash", expected_hash, entry["hash"])
+
+    # Verify files under the target are NOT duplicated through the link.
+    file_paths = {r["path"] for r in records}
+    if "linked-dir/value.txt" not in file_paths:
+        _pass("directory symlink target not traversed")
+    else:
+        _fail("directory symlink target was traversed (value.txt duplicated)")
+
+    # Replace symlink → dir-b.
+    os.unlink(symlink_path)
+    os.symlink("dir-b", symlink_path)
+    rc_b, fp_b, _, _ = run_fingerprint(snap)
+    assert_eq("dir symlink fingerprint (b) exit", 0, rc_b)
+
+    if fp_a != fp_b:
+        _pass("directory symlink target change alters fingerprint")
+    else:
+        _fail("directory symlink target change did not alter fingerprint")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 21: Broken directory-like symlink is fingerprinted
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_broken_symlink_fingerprint(tmp):
+    print()
+    print("=== Test 21: Broken symlink is fingerprinted ===")
+    if not hasattr(os, "symlink"):
+        _pass("broken symlink test skipped: platform does not support symlinks")
+        return
+
+    snap = os.path.join(tmp, "test21", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create broken symlink → missing directory.
+    os.symlink("missing-dir", os.path.join(snap, "linked-dir"))
+    rc, fp1, _, manifest_path = run_fingerprint(snap)
+    assert_eq("broken symlink fingerprint exit", 0, rc)
+
+    records = read_manifest(manifest_path)
+    link_entries = [r for r in records if r["path"] == "linked-dir"]
+    if len(link_entries) == 1:
+        _pass("broken symlink present in manifest")
+    else:
+        _fail("broken symlink missing from manifest")
+        return
+
+    entry = link_entries[0]
+    assert_eq("broken symlink type", "symlink", entry["type"])
+    assert_eq("broken symlink mode", "120000", entry["mode"])
+
+    expected_hash = hashlib.sha256(b"missing-dir").hexdigest()
+    assert_eq("broken symlink target hash", expected_hash, entry["hash"])
+
+    # Replace with different broken target.
+    os.unlink(os.path.join(snap, "linked-dir"))
+    os.symlink("another-missing", os.path.join(snap, "linked-dir"))
+    _, fp2, _, _ = run_fingerprint(snap)
+
+    if fp1 != fp2:
+        _pass("broken symlink target change alters fingerprint")
+    else:
+        _fail("broken symlink target change did not alter fingerprint")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 22: Cargo mutation of a directory symlink aborts publication
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_cargo_dir_symlink_mutation(tmp):
+    print()
+    print("=== Test 22: Cargo directory symlink mutation aborts publication ===")
+    if not hasattr(os, "symlink"):
+        _pass("dir symlink mutation test skipped: symlinks not supported")
+        return
+
+    test_dir = os.path.join(tmp, "test22")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    # Create committed directories and a directory symlink.
+    assets_v1 = os.path.join(repo, "assets-v1")
+    assets_v2 = os.path.join(repo, "assets-v2")
+    os.makedirs(assets_v1)
+    os.makedirs(assets_v2)
+    with open(os.path.join(assets_v1, "data.txt"), "w") as f:
+        f.write("v1\n")
+    with open(os.path.join(assets_v2, "data.txt"), "w") as f:
+        f.write("v2\n")
+
+    # Create symlink and commit.
+    os.symlink("assets-v1", os.path.join(repo, "active-assets"))
+    subprocess.run(
+        ["git", "-C", repo, "add", "assets-v1", "assets-v2", "active-assets"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", repo, "commit", "-q", "-m", "add dir symlink"],
+        check=True,
+    )
+
+    # Pre-create an old report.
+    latest_dir = os.path.join(repo, "target/bench-compare/latest")
+    os.makedirs(latest_dir)
+    with open(os.path.join(latest_dir, "old.txt"), "w") as f:
+        f.write("previous successful run\n")
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+
+    # Stub replaces active-assets → assets-v2 when CWD contains "/current".
+    make_stub_cargo(
+        stub_dir, cargo_log,
+        mutate_when_cwd_contains="/current",
+        mutate_shell=(
+            'rm -f "$CWD/active-assets" && '
+            'ln -s "assets-v2" "$CWD/active-assets"'
+        ),
+    )
+
+    env = bench_compare_env(stub_dir)
+    result = subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    # Must exit nonzero.
+    assert_ne("Cargo dir symlink mutation exit code", 0, result.returncode)
+
+    stderr = result.stderr
+    if "current source snapshot changed" in stderr:
+        _pass("error message identifies current snapshot mutation")
+    else:
+        _fail("missing current snapshot mutation error message")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+    # Old report must remain intact.
+    old_file = os.path.join(latest_dir, "old.txt")
+    if os.path.isfile(old_file):
+        _pass("old latest report preserved")
+    else:
+        _fail("old latest report was removed")
+
+    # No staging directory remains.
+    report_root = os.path.join(repo, "target/bench-compare")
+    staging_found = False
+    if os.path.isdir(report_root):
+        for entry in os.listdir(report_root):
+            if entry.startswith(".latest-staging-"):
+                staging_found = True
+                _fail(f"stale staging directory found: {entry}")
+    if not staging_found:
+        _pass("no staging directory remains")
+
+    # No backup directory remains.
+    backup_found = False
+    if os.path.isdir(report_root):
+        for entry in os.listdir(report_root):
+            if entry.startswith(".latest-backup-"):
+                backup_found = True
+                _fail(f"stale backup directory found: {entry}")
+    if not backup_found:
+        _pass("no backup directory remains")
+
+    # Lock released.
+    lock_dir = os.path.join(report_root, ".bench-compare-lock")
+    assert_file_absent(lock_dir, "comparison lock released")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 23: Unreadable directory causes failure
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_unreadable_directory_fails(tmp):
+    print()
+    print("=== Test 23: Unreadable directory causes failure ===")
+    snap = os.path.join(tmp, "test23", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    unreadable_dir = os.path.join(snap, "unreadable")
+    os.makedirs(unreadable_dir, exist_ok=True)
+
+    with open(os.path.join(unreadable_dir, "hidden.txt"), "w") as f:
+        f.write("secret\n")
+
+    if os.geteuid() == 0:
+        # Running as root — permissions are not enforced.
+        # Use the mock scandir failure hook instead.
+        env = os.environ.copy()
+        env["SCAH_TEST_FAIL_SCANDIR"] = "unreadable"
+        result = subprocess.run(
+            [sys.executable, FINGERPRINT_PY, "--root", snap,
+             "--manifest", os.path.join(tmp, "test23", "manifest.bin")],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        assert_ne("mock scandir failure exit nonzero", 0, result.returncode)
+        if "unreadable" in result.stderr:
+            _pass("mock scandir error names directory")
+        else:
+            _fail("mock scandir error does not name directory")
+            print(f"stderr: {result.stderr}", file=sys.stderr)
+        return
+
+    # Non-root: real permission test.
+    os.chmod(unreadable_dir, 0o000)
+
+    try:
+        rc, stdout, stderr, _ = run_fingerprint(snap)
+
+        if rc != 0:
+            _pass("unreadable directory causes nonzero exit")
+        else:
+            _fail("unreadable directory did not cause failure")
+
+        if "unreadable" in stderr:
+            _pass("error message names unreadable directory")
+        else:
+            _fail("error message does not name unreadable directory")
+            print(f"stderr: {stderr}", file=sys.stderr)
+    finally:
+        os.chmod(unreadable_dir, 0o755)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 24: Entry disappears during traversal
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_entry_disappears_during_traversal(tmp):
+    print()
+    print("=== Test 24: Entry disappears during traversal ===")
+    snap = os.path.join(tmp, "test24", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create a file that will "disappear" via mocked lstat failure.
+    with open(os.path.join(snap, "vanishing.txt"), "w") as f:
+        f.write("here today\n")
+
+    env = os.environ.copy()
+    env["SCAH_TEST_FAIL_LSTAT"] = "vanishing.txt"
+
+    result = subprocess.run(
+        [sys.executable, FINGERPRINT_PY, "--root", snap,
+         "--manifest", os.path.join(tmp, "test24", "manifest.bin")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert_ne("vanishing entry exit nonzero", 0, result.returncode)
+
+    stderr = result.stderr
+    if "vanishing.txt" in stderr:
+        _pass("error message names vanished entry")
+    else:
+        _fail("error message does not name vanished entry")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+    if "failed to stat" in stderr or "mocked lstat" in stderr:
+        _pass("error identifies stat failure")
+    else:
+        _fail("error does not identify stat failure")
+        print(f"stderr: {stderr}", file=sys.stderr)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 25: Directory symlink manifest records
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_directory_symlink_manifest_records(tmp):
+    print()
+    print("=== Test 25: Directory symlink manifest records ===")
+    if not hasattr(os, "symlink"):
+        _pass("manifest record test skipped: symlinks not supported")
+        return
+
+    snap = os.path.join(tmp, "test25", "snap")
+    os.makedirs(snap, exist_ok=True)
+
+    # Create a regular file.
+    with open(os.path.join(snap, "regular.txt"), "w") as f:
+        f.write("hello world\n")
+
+    # Create a real directory with a file inside.
+    real_dir = os.path.join(snap, "real-dir")
+    os.makedirs(real_dir)
+    with open(os.path.join(real_dir, "inner.txt"), "w") as f:
+        f.write("inside\n")
+
+    # Create a file symlink.
+    os.symlink("regular.txt", os.path.join(snap, "file-link"))
+
+    # Create a directory symlink.
+    os.symlink("real-dir", os.path.join(snap, "dir-link"))
+
+    # Create a broken symlink.
+    os.symlink("nowhere", os.path.join(snap, "broken-link"))
+
+    rc, fp, _, manifest_path = run_fingerprint(snap)
+    assert_eq("manifest records exit", 0, rc)
+
+    records = read_manifest(manifest_path)
+    record_by_path = {r["path"]: r for r in records}
+
+    # All expected entries present.
+    expected = {
+        "regular.txt": "file",
+        "real-dir/inner.txt": "file",
+        "file-link": "symlink",
+        "dir-link": "symlink",
+        "broken-link": "symlink",
+    }
+    for path, expected_type in expected.items():
+        if path in record_by_path:
+            _pass(f"manifest contains {path!r}")
+            actual_type = record_by_path[path]["type"]
+            assert_eq(
+                f"entry type for {path!r}",
+                expected_type,
+                actual_type,
+            )
+        else:
+            _fail(f"manifest missing {path!r}")
+
+    # Symlinks have mode 120000.
+    for path in ("file-link", "dir-link", "broken-link"):
+        if path in record_by_path:
+            assert_eq(f"mode for {path!r}", "120000", record_by_path[path]["mode"])
+
+    # Verify symlink hashes match target strings.
+    file_link_hash = hashlib.sha256(b"regular.txt").hexdigest()
+    dir_link_hash = hashlib.sha256(b"real-dir").hexdigest()
+    broken_link_hash = hashlib.sha256(b"nowhere").hexdigest()
+
+    if "file-link" in record_by_path:
+        assert_eq("file-link target hash", file_link_hash,
+                   record_by_path["file-link"]["hash"])
+    if "dir-link" in record_by_path:
+        assert_eq("dir-link target hash", dir_link_hash,
+                   record_by_path["dir-link"]["hash"])
+    if "broken-link" in record_by_path:
+        assert_eq("broken-link target hash", broken_link_hash,
+                   record_by_path["broken-link"]["hash"])
+
+    # Real directories are not recorded as entries.
+    for path in record_by_path:
+        if path == "real-dir":
+            _fail("real directory recorded as manifest entry")
+
+    # Files under the directory symlink target are NOT duplicated.
+    for path in record_by_path:
+        if path.startswith("dir-link/"):
+            _fail(f"directory symlink traversed: {path!r}")
+
+    # Verify deterministic ordering: byte-oriented sort.
+    paths = [r["path"] for r in records]
+    byte_sorted = sorted(paths, key=lambda p: os.fsencode(p))
+    assert_eq("manifest is sorted", byte_sorted, paths)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1644,6 +2098,14 @@ def main():
         test_unreadable_entries_fail(tmp)
         test_unsupported_entry_fails(tmp)
         test_manifest_hash_file(tmp)
+
+        # Directory symlink and traversal-error tests (20-25).
+        test_directory_symlink_fingerprint(tmp)
+        test_broken_symlink_fingerprint(tmp)
+        test_cargo_dir_symlink_mutation(tmp)
+        test_unreadable_directory_fails(tmp)
+        test_entry_disappears_during_traversal(tmp)
+        test_directory_symlink_manifest_records(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

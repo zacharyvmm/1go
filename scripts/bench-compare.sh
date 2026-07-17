@@ -213,7 +213,7 @@ create_base_worktree() {
 
 create_current_snapshot() {
     echo
-    echo "Creating immutable current-tree snapshot..."
+    echo "Creating isolated current-tree snapshot..."
 
     # Detached worktree at HEAD.
     if ! git -C "$ROOT" worktree add \

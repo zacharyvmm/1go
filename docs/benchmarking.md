@@ -115,14 +115,21 @@ The source fingerprint is produced by `scripts/source-fingerprint.py` (stdlib on
 - Each entry records: `entry-type`, `mode`, `content-hash`, `relative-path`,
   NUL-delimited.
 - Entry types: `file` or `symlink`.
-- Modes: `100644` (non-executable), `100755` (executable), `120000` (symlink).
+- Modes: `100644` (non-executable regular file), `100755` (executable
+  regular file), `120000` (symlink).
 - For regular files, the content hash is SHA-256 of file contents.
 - For symlinks, the content hash is SHA-256 of the symlink target string
-  (the link is not followed).
+  (the link is never followed). This applies to symlinks to regular files,
+  symlinks to directories, and broken symlinks — all are fingerprinted by
+  their target string, not by the target's contents.
 - `.git` (whether a directory, regular file, or symlink) is excluded.
-- Unreadable or unsupported entry types (FIFOs, sockets, devices) cause a
-  fatal error — entries are never silently skipped.
-- The manifest is sorted by relative path for determinism.
+- The walker uses explicit `os.scandir()` recursion: every entry is
+  inspected with `os.lstat()`, and directory symlinks are detected before
+  they could be mistaken for real directories. Failures to open a directory,
+  stat an entry, read a file, or read a symlink target all abort the
+  comparison — no entries are ever silently skipped.
+- Unsupported entry types (FIFOs, sockets, devices) cause a fatal error.
+- The manifest is sorted by byte-oriented relative path for determinism.
 - Identical source trees at different paths produce identical fingerprints.
 
 ### First-merge limitation
