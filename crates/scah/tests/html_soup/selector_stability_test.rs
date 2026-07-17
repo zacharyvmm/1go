@@ -212,3 +212,109 @@ fn attribute_match_operators_require_equals() {
     assert!(Query::all(r#"a[href^="http"]"#, Save::none()).is_ok());
     assert!(Query::all(r#"div[class~="foo"]"#, Save::none()).is_ok());
 }
+
+// ── Cursor canonicalization regression tests (Commit 1) ─────────────────
+// Public result-count tests; cursor-invariant checks live in executor unit tests.
+
+/// Test A (public): `main > div p` nested div — one p result.
+#[test]
+fn cursor_canonicalization_a_main_div_p_single_result() {
+    let html = r#"<main><div><div><p>Hello World</p></div></div></main>"#;
+    let store = parse_all(html, &["main > div p"]);
+    assert_eq!(elements(&store, "main > div p").len(), 1);
+}
+
+/// Test B: sibling direct children — both p match.
+#[test]
+fn cursor_canonicalization_b_sibling_direct_children() {
+    let html = r#"<main><div><p>A</p></div><div><p>B</p></div></main>"#;
+    let store = parse_all(html, &["main > div p"]);
+    assert_eq!(elements(&store, "main > div p").len(), 2);
+}
+
+/// Test C: overlapping nested prefixes — one p result.
+#[test]
+fn cursor_canonicalization_c_overlapping_nested_prefixes() {
+    let html = r#"<main><div><main><div><p>Hello</p></div></main></div></main>"#;
+    let store = parse_all(html, &["main > div p"]);
+    assert_eq!(elements(&store, "main > div p").len(), 1);
+}
+
+/// Test D: repeated child-prefix overlap — one p result.
+#[test]
+fn cursor_canonicalization_d_repeated_child_prefix_overlap() {
+    let html = r#"<div><div><div><p>Hello</p></div></div></div>"#;
+    let store = parse_all(html, &["div > div p"]);
+    assert_eq!(elements(&store, "div > div p").len(), 1);
+}
+
+/// Test E: child anchors not over-pruned — both direct p match.
+#[test]
+fn cursor_canonicalization_e_child_anchors_not_over_pruned() {
+    let html = r#"<div><p>Outer</p><div><p>Inner</p></div></div>"#;
+    let store = parse_all(html, &["div > p"]);
+    assert_eq!(elements(&store, "div > p").len(), 2);
+}
+
+/// Test F: terminal `all()` nested matches — all three divs.
+#[test]
+fn cursor_canonicalization_f_terminal_all_nested_divs() {
+    let html = r#"<div><div><div></div></div></div>"#;
+    let store = parse_all(html, &["div"]);
+    assert_eq!(elements(&store, "div").len(), 3);
+}
+
+/// Test G: `.then()` scopes not globally canonicalized.
+#[test]
+fn cursor_canonicalization_g_then_scopes_distinct_parents() {
+    let html = r#"<div><div><div><p>Hello</p></div></div></div>"#;
+    let queries = &[Query::all("div", Save::all())
+        .unwrap()
+        .then(|div| Ok([div.all("p", Save::all())?]))
+        .unwrap()
+        .build()];
+    let store = parse(html, queries).unwrap();
+
+    let divs: Vec<_> = store.get("div").unwrap().collect();
+    assert_eq!(divs.len(), 3);
+    let parents_with_p = divs
+        .iter()
+        .filter(|div| div.get(&store, "p").unwrap().next().is_some())
+        .count();
+    assert_eq!(
+        parents_with_p, 3,
+        "Each div scope must keep its own p (not globally deduped)"
+    );
+}
+
+/// Test H: `first()` flat and `.then()` child — one match each scope.
+#[test]
+fn cursor_canonicalization_h_first_flat_and_then() {
+    let html = r#"<div><p>A</p><p>B</p></div><div><p>C</p><p>D</p></div>"#;
+    let flat_first = Query::first("div p", Save::all()).unwrap().build();
+    let queries = [flat_first];
+    let store = parse(html, &queries).unwrap();
+    assert_eq!(elements(&store, "div p").len(), 1);
+
+    let html2 = r#"<div><p>A</p><p>B</p></div>"#;
+    let queries2 = &[Query::all("div", Save::none())
+        .unwrap()
+        .then(|div| Ok([div.first("p", Save::all())?]))
+        .unwrap()
+        .build()];
+    let store2 = parse(html2, queries2).unwrap();
+    let divs: Vec<_> = store2.get("div").unwrap().collect();
+    assert_eq!(divs[0].get(&store2, "p").unwrap().count(), 1);
+}
+
+/// Test I: dominance-sensitive query survives implicit close and self-closing.
+#[test]
+fn cursor_canonicalization_i_implicit_close_and_self_closing() {
+    let html = "<ul><li><div><div><p>X</p></div></div><li>Y</ul>";
+    let store = parse_all(html, &["div > div p"]);
+    assert_eq!(elements(&store, "div > div p").len(), 1);
+
+    let html2 = "<div><div><br /><p>Y</p></div></div>";
+    let store2 = parse_all(html2, &["div > div p"]);
+    assert_eq!(elements(&store2, "div > div p").len(), 1);
+}

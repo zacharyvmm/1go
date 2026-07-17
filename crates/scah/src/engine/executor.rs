@@ -467,6 +467,46 @@ mod tests {
         ScopedCursor::new_anchored(scope_depth, parent, position)
     }
 
+    fn elem(name: &'static str) -> XHtmlElement<'static> {
+        XHtmlElement {
+            name,
+            id: None,
+            class: None,
+            attributes: &[],
+        }
+    }
+
+    fn doc_pos(depth: u16) -> DocumentPosition {
+        DocumentPosition {
+            reader_position: 0,
+            text_content_position: 0,
+            element_depth: depth,
+            self_closing: false,
+        }
+    }
+
+    fn terminal_state<Q: QuerySpec<'static>>(query: &Q) -> TransitionId {
+        let section = query.get_selection(QuerySectionId(0));
+        TransitionId(section.range.end.index() - 1)
+    }
+
+    fn live_moving_cursors_at(
+        selection: &QueryExecutor<'_, Query>,
+        state: TransitionId,
+        parent: ElementId,
+    ) -> usize {
+        selection
+            .cursors
+            .iter()
+            .filter(|c| {
+                !c.end()
+                    && c.is_moving()
+                    && c.position.state == state
+                    && c.parent == parent
+            })
+            .count()
+    }
+
     #[test]
     fn test_fsm_next_descendant() {
         let query = &Query::all("div a", Save::none()).unwrap().build();
@@ -1313,5 +1353,320 @@ mod tests {
         assert!(remaining_scopes.contains(&1));
         assert!(!remaining_scopes.contains(&2));
         assert!(!remaining_scopes.contains(&3));
+    }
+
+    // ── Cursor canonicalization regression tests (Commit 1) ───────────────
+    // These document expected cursor invariants before executor refactor.
+    // Cursor-invariant assertions are expected to FAIL until the fix lands.
+
+    /// Test A: child-depth regression (`main > div p`).
+    /// After the direct-child div matches, descendant cursors must keep main
+    /// depth as match base; nested div must not spawn redundant p cursors.
+    #[test]
+    fn test_a_child_depth_regression_main_div_p() {
+        let query = Query::all("main > div p", Save::all()).unwrap().build();
+        let query = &query;
+        let p_state = terminal_state(query);
+
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        // depth 0: <main>
+        selection.next(0, &elem("main"), &doc_pos(0), &mut store, &mut save_hits);
+
+        // depth 1: direct-child <div>
+        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+
+        let main_depth = 0u16;
+        let output_parent = ElementId::default();
+
+        // CURSOR INVARIANT (expected to fail): p cursors keep main as match base.
+        let p_cursors: Vec<_> = selection
+            .cursors
+            .iter()
+            .filter(|c| c.is_moving() && !c.end() && c.position.state == p_state)
+            .collect();
+        assert!(
+            !p_cursors.is_empty(),
+            "Expected live p-position cursors after direct-child div match"
+        );
+        for cursor in &p_cursors {
+            assert_eq!(
+                cursor.effective_last_depth(),
+                main_depth,
+                "p cursor match base must remain main depth ({main_depth}), not rebased to matched div depth"
+            );
+        }
+
+        // depth 2: nested <div> — must not fork another p obligation.
+        selection.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
+
+        assert_eq!(
+            live_moving_cursors_at(&selection, p_state, output_parent),
+            1,
+            "CURSOR INVARIANT (expected to fail): nested div must not spawn duplicate live p cursors for same parent+position"
+        );
+
+        // depth 3: <p>
+        selection.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
+
+        let ps: Vec<_> = store.get("main > div p").unwrap().collect();
+        assert_eq!(ps.len(), 1, "Expected exactly one p result");
+    }
+
+    /// Test B: sibling direct children still work (`main > div p`).
+    #[test]
+    fn test_b_sibling_direct_children_main_div_p() {
+        let html = "<main><div><p>A</p></div><div><p>B</p></div></main>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::all("main > div p", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+
+        let ps: Vec<_> = store.get("main > div p").unwrap().collect();
+        assert_eq!(ps.len(), 2, "Both sibling p elements must match");
+    }
+
+    /// Test C: overlapping nested prefixes — deeper p candidate rejected.
+    #[test]
+    fn test_c_overlapping_nested_prefixes() {
+        let query = Query::all("main > div p", Save::all()).unwrap().build();
+        let query = &query;
+        let p_state = terminal_state(query);
+
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("main"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        selection.next(0, &elem("main"), &doc_pos(2), &mut store, &mut save_hits);
+        selection.next(0, &elem("div"), &doc_pos(3), &mut store, &mut save_hits);
+
+        let output_parent = ElementId::default();
+        assert_eq!(
+            live_moving_cursors_at(&selection, p_state, output_parent),
+            1,
+            "CURSOR INVARIANT (expected to fail): overlapping nested main>div prefixes must not leave two live p cursors with same parent+position"
+        );
+
+        selection.next(0, &elem("p"), &doc_pos(4), &mut store, &mut save_hits);
+
+        let ps: Vec<_> = store.get("main > div p").unwrap().collect();
+        assert_eq!(ps.len(), 1, "Expected exactly one p result");
+    }
+
+    /// Test D: repeated child-prefix overlap (`div > div p`).
+    #[test]
+    fn test_d_repeated_child_prefix_overlap() {
+        let query = Query::all("div > div p", Save::all()).unwrap().build();
+        let query = &query;
+        let p_state = terminal_state(query);
+
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+
+        let output_parent = ElementId::default();
+        let p_count_after_second_div =
+            live_moving_cursors_at(&selection, p_state, output_parent);
+        assert_eq!(
+            p_count_after_second_div, 1,
+            "CURSOR INVARIANT (expected to fail): only one live p cursor after first div>div match"
+        );
+
+        // Third nested div must not rebased-match as another direct child.
+        selection.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
+        assert_eq!(
+            live_moving_cursors_at(&selection, p_state, output_parent),
+            1,
+            "CURSOR INVARIANT (expected to fail): innermost div must not spawn another p cursor"
+        );
+
+        selection.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
+
+        let ps: Vec<_> = store.get("div > div p").unwrap().collect();
+        assert_eq!(ps.len(), 1, "Expected exactly one p result");
+    }
+
+    /// Test E: child anchors not over-pruned (`div > p`).
+    #[test]
+    fn test_e_child_anchors_not_over_pruned() {
+        let html = "<div><p>Outer</p><div><p>Inner</p></div></div>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::all("div > p", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+
+        let ps: Vec<_> = store.get("div > p").unwrap().collect();
+        assert_eq!(ps.len(), 2, "Both direct-child p elements must match");
+    }
+
+    /// Test F: terminal `all()` nested matches (`div`).
+    #[test]
+    fn test_f_terminal_all_nested_matches() {
+        let html = "<div><div><div></div></div></div>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::all("div", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+
+        let divs: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(divs.len(), 3, "All three nested divs must match");
+    }
+
+    /// Test G: `.then()` scopes are not globally canonicalized.
+    #[test]
+    fn test_g_then_scopes_not_globally_canonicalized() {
+        let html = "<div><div><div><p>Hello</p></div></div></div>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::all("div", Save::all())
+            .unwrap()
+            .then(|div| Ok([div.all("p", Save::all())?]))
+            .unwrap()
+            .build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+
+        let divs: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(divs.len(), 3);
+
+        let mut parents_with_p = 0;
+        let mut p_refs = Vec::new();
+        for div in &divs {
+            let ps: Vec<_> = div.get(&store, "p").unwrap().collect();
+            if !ps.is_empty() {
+                parents_with_p += 1;
+                p_refs.push(ps[0] as *const _);
+            }
+        }
+        assert_eq!(
+            parents_with_p, 3,
+            "Each matching div scope must retain its own p child (not globally deduped)"
+        );
+        assert_eq!(p_refs.len(), 3);
+        assert!(
+            p_refs.windows(2).all(|w| !std::ptr::eq(w[0], w[1])),
+            "Distinct .then() parents must keep separate saved p elements"
+        );
+    }
+
+    /// Test H: `first()` behavior unchanged for flat and `.then()` child queries.
+    #[test]
+    fn test_h_first_behavior_flat_and_then() {
+        let html = "<div><p>A</p><p>B</p></div><div><p>C</p><p>D</p></div>";
+        let reader = &mut Reader::new(html);
+        let query = &[Query::first("div p", Save::all()).unwrap().build()];
+        let manager = QueryMultiplexer::new(query);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+
+        let ps: Vec<_> = store.get("div p").unwrap().collect();
+        assert_eq!(ps.len(), 1, "first('div p') must match only one p globally");
+
+        let html2 = "<div><p>A</p><p>B</p></div>";
+        let reader2 = &mut Reader::new(html2);
+        let query2 = &[Query::all("div", Save::none())
+            .unwrap()
+            .then(|div| Ok([div.first("p", Save::all())?]))
+            .unwrap()
+            .build()];
+        let manager2 = QueryMultiplexer::new(query2);
+        let mut parser2 = XHtmlParser::new(manager2);
+        while parser2.next(reader2) {}
+        let store2 = parser2.matches();
+
+        let divs: Vec<_> = store2.get("div").unwrap().collect();
+        assert_eq!(divs.len(), 1);
+        let child_ps: Vec<_> = divs[0].get(&store2, "p").unwrap().collect();
+        assert_eq!(child_ps.len(), 1, "then first('p') must match one p per parent");
+
+        // Early exit for flat first() is covered by the single global result above;
+        // verify first('div') still triggers early_exit on the executor directly.
+        let div_only = Query::first("div", Save::all()).unwrap().build();
+        let mut selection = QueryExecutor::new(&div_only);
+        let mut store3 = Store::default();
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store3,
+            &mut Vec::new(),
+        );
+        assert!(
+            selection.early_exit(),
+            "first('div') must set early_exit after terminal match"
+        );
+    }
+
+    /// Test I: malformed / implicit-close / self-closing — cursor set stays valid.
+    #[test]
+    fn test_i_malformed_implicit_close_self_closing_cursors_valid() {
+        let query = Query::all("div > div p", Save::all()).unwrap().build();
+        let query = &query;
+        let p_state = terminal_state(query);
+
+        // Implicit <li> close variant.
+        let html_li = "<ul><li><div><div><p>X</p></div></div><li>Y</ul>";
+        let reader = &mut Reader::new(html_li);
+        let queries = [query.clone()];
+        let manager = QueryMultiplexer::new(&queries);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        let store = parser.matches();
+        let ps: Vec<_> = store.get("div > div p").unwrap().collect();
+        assert_eq!(ps.len(), 1, "Implicit close must still yield one p match");
+
+        // Mismatched close + self-closing: drive manually to inspect cursors.
+        let mut store2 = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store2, &mut save_hits);
+        selection.next(0, &elem("div"), &doc_pos(1), &mut store2, &mut save_hits);
+        selection.next(
+            0,
+            &XHtmlElement {
+                name: "br",
+                id: None,
+                class: None,
+                attributes: &[],
+            },
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 2,
+                self_closing: true,
+            },
+            &mut store2,
+            &mut save_hits,
+        );
+        selection.next(0, &elem("p"), &doc_pos(3), &mut store2, &mut save_hits);
+
+        let live_p: Vec<_> = selection
+            .cursors
+            .iter()
+            .filter(|c| c.is_moving() && c.position.state == p_state)
+            .collect();
+        assert!(
+            live_p.iter().all(|c| c.end() || c.effective_last_depth() <= 3),
+            "CURSOR INVARIANT: live p cursors must have sane depth after self-closing element"
+        );
+
+        let ps2: Vec<_> = store2.get("div > div p").unwrap().collect();
+        assert_eq!(ps2.len(), 1);
     }
 }
