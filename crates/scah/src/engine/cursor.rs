@@ -236,6 +236,10 @@ impl ScopedCursor {
         }
     }
 
+    #[cfg(not(debug_assertions))]
+    #[inline(always)]
+    fn debug_assert_moving_invariants(&self) {}
+
     pub fn is_active(&self) -> bool {
         flags_is_active(self.activity_flags())
     }

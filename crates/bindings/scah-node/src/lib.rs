@@ -50,6 +50,12 @@ fn parse(html: String, queries: Vec<Reference<JsQuery>>) -> Result<JSStore> {
                 "parse requires at least one query".to_owned(),
             ));
         }
+        Err(ParseError::MaximumDepthExceeded) => {
+            return Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                "HTML nesting depth exceeds the maximum supported depth".to_owned(),
+            ));
+        }
     };
 
     Ok(JSStore {
