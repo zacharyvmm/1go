@@ -133,10 +133,26 @@ BASE_WORKTREE="$TEMP_ROOT/base"
 BASE_TARGET="$TEMP_ROOT/base-target"
 HEAD_TARGET="$TEMP_ROOT/head-target"
 
+REPORT_ROOT="$ROOT/target/bench-compare"
+REPORT_DIR="$REPORT_ROOT/latest"
+REPORT_STAGING="$REPORT_ROOT/.latest-staging-$$"
+REPORT_BACKUP="$REPORT_ROOT/.latest-backup-$$"
+
 cleanup() {
     git -C "$ROOT" worktree remove --force "$BASE_WORKTREE" \
         >/dev/null 2>&1 || true
+
     rm -rf "$TEMP_ROOT"
+
+    if [ -n "${REPORT_STAGING:-}" ]; then
+        rm -rf "$REPORT_STAGING"
+    fi
+
+    if [ -n "${REPORT_BACKUP:-}" ] &&
+       [ -e "$REPORT_BACKUP" ] &&
+       [ ! -e "${REPORT_DIR:-}" ]; then
+        mv "$REPORT_BACKUP" "$REPORT_DIR" >/dev/null 2>&1 || true
+    fi
 }
 
 trap cleanup EXIT INT TERM
@@ -178,15 +194,13 @@ export CARGO_INCREMENTAL=0
 export SCAH_BENCH_PROFILE="$PROFILE"
 
 run_cargo_bench() {
-    # Wrapper so --locked failures get an actionable message without rewriting
-    # Cargo.lock. Arguments are forwarded to `cargo bench`.
-    if ! cargo bench --locked "$@"; then
+    cargo bench --locked "$@" || {
         echo >&2
         echo "error: cargo bench --locked failed." >&2
-        echo "The benchmark comparison requires Cargo.lock to be up to date." >&2
-        echo "Update and commit or stage the lockfile intentionally before rerunning." >&2
+        echo "Inspect the Cargo output above for the actual cause." >&2
+        echo "Cargo.lock was not updated automatically." >&2
         return 1
-    fi
+    }
 }
 
 # ── Compile both revisions before measuring ─────────────────────────────────
@@ -257,65 +271,6 @@ echo "Measuring current working tree..."
         --baseline "$BASELINE_NAME"
 )
 
-# ── Copy final report ───────────────────────────────────────────────────────
-
-REPORT_ROOT="$ROOT/target/bench-compare"
-REPORT_DIR="$REPORT_ROOT/latest"
-
-mkdir -p "$REPORT_ROOT"
-rm -rf "$REPORT_DIR"
-mkdir -p "$REPORT_DIR"
-
-cp -a "$HEAD_TARGET/criterion/." "$REPORT_DIR/"
-# ── Metadata ────────────────────────────────────────────────────────────────
-
-if [ -n "$INITIAL_WORKTREE_STATUS" ]; then
-    DIRTY_COUNT="$(
-        printf '%s\n' "$INITIAL_WORKTREE_STATUS" |
-        wc -l |
-        tr -d ' '
-    )"
-else
-    DIRTY_COUNT=0
-fi
-
-RUSTC_VERSION="$(rustc --version 2>/dev/null || echo "unknown")"
-CARGO_VERSION="$(cargo --version 2>/dev/null || echo "unknown")"
-HOST_TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' || echo "unknown")"
-
-cat > "$REPORT_DIR/metadata.txt" <<EOF
-base_ref=$BASE_REF
-base_sha=$BASE_SHA
-head_sha=$HEAD_SHA
-head_dirty_files=$DIRTY_COUNT
-working_tree_unchanged=true
-cargo_locked=true
-benchmark=$BENCH
-profile=$PROFILE
-rustc=$RUSTC_VERSION
-cargo=$CARGO_VERSION
-host=$HOST_TRIPLE
-benchmark_harness_diff_present=$HARNESS_DIFF_PRESENT
-benchmark_harness_diff_allowed=$ALLOW_BENCH_HARNESS_DIFF
-date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-EOF
-
-printf '%s\n' "$INITIAL_WORKTREE_STATUS" > "$REPORT_DIR/working-tree-status.txt"
-
-if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
-    {
-        if [ -n "$TRACKED_HARNESS_DIFF" ]; then
-            echo "[tracked]"
-            printf '%s\n' "$TRACKED_HARNESS_DIFF"
-        fi
-
-        if [ -n "$UNTRACKED_HARNESS_FILES" ]; then
-            echo "[untracked]"
-            printf '%s\n' "$UNTRACKED_HARNESS_FILES"
-        fi
-    } > "$REPORT_DIR/harness-diff.txt"
-fi
-
 # ── Post-run mutation detection ─────────────────────────────────────────────
 
 FINAL_WORKTREE_STATUS="$(
@@ -338,6 +293,93 @@ if [ "$FINAL_WORKTREE_STATUS" != "$INITIAL_WORKTREE_STATUS" ]; then
     else
         echo "  (clean)" >&2
     fi
+    exit 1
+fi
+
+# ── Build staged report ─────────────────────────────────────────────────────
+
+mkdir -p "$REPORT_ROOT"
+rm -rf "$REPORT_STAGING" "$REPORT_BACKUP"
+mkdir -p "$REPORT_STAGING"
+
+cp -a "$HEAD_TARGET/criterion/." "$REPORT_STAGING/"
+
+# ── Metadata ────────────────────────────────────────────────────────────────
+
+if [ -n "$INITIAL_WORKTREE_STATUS" ]; then
+    DIRTY_COUNT="$(
+        printf '%s\n' "$INITIAL_WORKTREE_STATUS" |
+        wc -l |
+        tr -d ' '
+    )"
+else
+    DIRTY_COUNT=0
+fi
+
+RUSTC_VERSION="$(rustc --version 2>/dev/null || echo "unknown")"
+CARGO_VERSION="$(cargo --version 2>/dev/null || echo "unknown")"
+HOST_TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' || echo "unknown")"
+
+cat > "$REPORT_STAGING/metadata.txt" <<EOF
+base_ref=$BASE_REF
+base_sha=$BASE_SHA
+head_sha=$HEAD_SHA
+head_dirty_files=$DIRTY_COUNT
+working_tree_unchanged=true
+cargo_locked=true
+benchmark=$BENCH
+profile=$PROFILE
+rustc=$RUSTC_VERSION
+cargo=$CARGO_VERSION
+host=$HOST_TRIPLE
+benchmark_harness_diff_present=$HARNESS_DIFF_PRESENT
+benchmark_harness_diff_allowed=$ALLOW_BENCH_HARNESS_DIFF
+date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EOF
+
+printf '%s\n' "$INITIAL_WORKTREE_STATUS" > "$REPORT_STAGING/working-tree-status.txt"
+
+if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
+    {
+        if [ -n "$TRACKED_HARNESS_DIFF" ]; then
+            echo "[tracked]"
+            printf '%s\n' "$TRACKED_HARNESS_DIFF"
+        fi
+
+        if [ -n "$UNTRACKED_HARNESS_FILES" ]; then
+            echo "[untracked]"
+            printf '%s\n' "$UNTRACKED_HARNESS_FILES"
+        fi
+    } > "$REPORT_STAGING/harness-diff.txt"
+fi
+
+# ── Validate staged report ──────────────────────────────────────────────────
+
+if [ ! -f "$REPORT_STAGING/report/index.html" ]; then
+    echo "error: Criterion report index was not generated" >&2
+    exit 1
+fi
+
+if [ ! -f "$REPORT_STAGING/metadata.txt" ]; then
+    echo "error: benchmark metadata was not generated" >&2
+    exit 1
+fi
+
+# ── Publish staged report ───────────────────────────────────────────────────
+
+if [ -e "$REPORT_DIR" ]; then
+    mv "$REPORT_DIR" "$REPORT_BACKUP"
+fi
+
+if mv "$REPORT_STAGING" "$REPORT_DIR"; then
+    rm -rf "$REPORT_BACKUP"
+else
+    echo "error: failed to publish benchmark report" >&2
+
+    if [ -e "$REPORT_BACKUP" ]; then
+        mv "$REPORT_BACKUP" "$REPORT_DIR" || true
+    fi
+
     exit 1
 fi
 
