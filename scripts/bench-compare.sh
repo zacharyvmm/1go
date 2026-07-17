@@ -357,29 +357,24 @@ create_current_snapshot() {
         fi
     fi
 
-    # Copy untracked entries from the captured staging directory.
-    # Never read from $ROOT — captured bytes are the source of truth.
-    if [ -s "$UNTRACKED_LIST" ] && [ -d "$CAPTURED_UNTRACKED" ]; then
-        while IFS= read -r -d '' file; do
-            if [ -z "$file" ]; then
-                continue
-            fi
-            local src="$CAPTURED_UNTRACKED/$file"
-            local dst="$CURRENT_WORKTREE/$file"
-            mkdir -p "$(dirname "$dst")"
+    # Restore untracked entries from staged capture; never read from $ROOT.
+    if [ ! -f "$UNTRACKED_LIST" ] || [ ! -f "$UNTRACKED_CAPTURE_MANIFEST" ]; then
+        echo "error: missing untracked capture artifacts" >&2
+        exit 1
+    fi
 
-            if [ -L "$src" ]; then
-                # Preserve symlink from the captured staging directory.
-                local target
-                target="$(readlink "$src")"
-                ln -s "$target" "$dst"
-            elif [ -f "$src" ]; then
-                cp -p "$src" "$dst"
-            else
-                echo "error: captured entry missing or unsupported: $file" >&2
-                exit 1
-            fi
-        done < "$UNTRACKED_LIST"
+    if [ -s "$UNTRACKED_LIST" ]; then
+        if [ ! -d "$CAPTURED_UNTRACKED" ]; then
+            echo "error: captured untracked directory missing" >&2
+            exit 1
+        fi
+        if ! python3 "$SCRIPT_DIR/capture-untracked.py" restore \
+            --root "$CAPTURED_UNTRACKED" \
+            --paths "$UNTRACKED_LIST" \
+            --destination "$CURRENT_WORKTREE"; then
+            echo "error: failed to restore untracked capture into current worktree" >&2
+            exit 1
+        fi
     fi
 }
 
