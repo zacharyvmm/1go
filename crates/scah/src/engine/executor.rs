@@ -619,6 +619,14 @@ mod tests {
             .count()
     }
 
+    fn parse<'html>(html: &'html str, queries: &'html [Query]) -> Store<'html, 'html> {
+        let reader = &mut Reader::new(html);
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+        while parser.next(reader) {}
+        parser.matches()
+    }
+
     #[test]
     fn test_fsm_next_descendant() {
         let query = &Query::all("div a", Save::none()).unwrap().build();
@@ -1826,6 +1834,87 @@ mod tests {
         assert!(root.end());
         assert_eq!(root.unwind_depth(), None);
         assert!(selection.early_exit());
+    }
+
+    #[test]
+    fn first_child_selector_skips_failed_prefix() {
+        let html = r#"
+            <div><span>no match</span></div>
+            <div><p id="hit">match</p></div>
+        "#;
+
+        let queries = &[Query::first("div > p", Save::all())
+            .unwrap()
+            .build()];
+
+        let store = parse(html, queries);
+
+        let hits: Vec<_> = store.get("div > p").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn first_descendant_selector_skips_failed_prefix() {
+        let html = r#"
+            <div><span>no match</span></div>
+            <div><section><p id="hit">match</p></section></div>
+        "#;
+
+        let queries = &[Query::first("div p", Save::all())
+            .unwrap()
+            .build()];
+
+        let store = parse(html, queries);
+
+        let hits: Vec<_> = store.get("div p").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn first_mixed_child_descendant_selector_skips_failed_prefix() {
+        let html = r#"
+            <main><section><span>no match</span></section></main>
+            <main><section><p id="hit">match</p></section></main>
+        "#;
+
+        let queries = &[Query::first("main > section p", Save::all())
+            .unwrap()
+            .build()];
+
+        let store = parse(html, queries);
+
+        let hits: Vec<_> = store.get("main > section p").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn first_then_child_selector_skips_failed_prefix() {
+        let html = r#"
+            <article>
+                <div><span>no</span></div>
+                <div><p id="hit">yes</p></div>
+            </article>
+        "#;
+
+        let queries = &[Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::all())?]))
+            .unwrap()
+            .build()];
+
+        let store = parse(html, queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 1);
+        let hits: Vec<_> = articles[0]
+            .get(&store, "div > p")
+            .unwrap()
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
     }
 
     #[test]
