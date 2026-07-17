@@ -14,7 +14,7 @@ import os
 import stat
 import subprocess
 import sys
-from typing import List
+from typing import List, Tuple
 
 
 def _is_git_metadata(rel_path: str) -> bool:
@@ -46,7 +46,9 @@ def _is_ignored(root: str, rel_path: str) -> bool:
     raise OSError(f"git check-ignore failed for {rel_path}: {err or proc.returncode}")
 
 
-def _scan_directory(root: str, rel_dir: str, findings: List[str]) -> None:
+def _scan_directory(
+    root: str, rel_dir: str, findings: List[Tuple[str, str]]
+) -> None:
     dir_path = root if not rel_dir else os.path.join(root, rel_dir)
 
     try:
@@ -73,17 +75,30 @@ def _scan_directory(root: str, rel_dir: str, findings: List[str]) -> None:
 
         label = _special_label(st.st_mode)
         if label is not None:
-            findings.append(f"unsupported entry type {label}: {rel_path}")
+            findings.append((label, rel_path))
 
         if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
             _scan_directory(root, rel_path, findings)
 
 
-def scan_worktree(root: str) -> list[str]:
+def scan_worktree(root: str) -> list[tuple[str, str]]:
     root = os.path.abspath(root)
-    findings: list[str] = []
+    findings: list[tuple[str, str]] = []
     _scan_directory(root, "", findings)
     return findings
+
+
+def write_manifest(path: str, findings: list[tuple[str, str]]) -> None:
+    """Write TYPE\\0RELPATH\\0 records sorted by encoded relative path."""
+    manifest_dir = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(manifest_dir, exist_ok=True)
+    sorted_findings = sorted(findings, key=lambda item: os.fsencode(item[1]))
+    payload = b"".join(
+        item[0].encode("utf-8") + b"\0" + os.fsencode(item[1]) + b"\0"
+        for item in sorted_findings
+    )
+    with open(path, "wb") as fh:
+        fh.write(payload)
 
 
 def main() -> None:
@@ -91,6 +106,10 @@ def main() -> None:
         description="Reject unsupported special files in a Git worktree."
     )
     parser.add_argument("--root", required=True, help="Repository root")
+    parser.add_argument(
+        "--manifest",
+        help="Write special-file manifest (empty when clean)",
+    )
     args = parser.parse_args()
 
     try:
@@ -99,11 +118,14 @@ def main() -> None:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    if args.manifest:
+        write_manifest(args.manifest, findings)
+
     if not findings:
         return
 
-    for message in findings:
-        print(f"error: {message}", file=sys.stderr)
+    for label, rel_path in findings:
+        print(f"error: unsupported entry type {label}: {rel_path}", file=sys.stderr)
     sys.exit(1)
 
 

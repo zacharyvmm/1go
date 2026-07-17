@@ -2962,6 +2962,335 @@ def test_capture_race_continuous_mutation_fails(tmp):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Special-file capture race tests
+#
+# Endpoint-based scanning catches FIFOs/sockets Git omits from ls-files.
+# A special that appears only between scan A and scan B can still disappear
+# before the next attempt's scan A; that transient gap is not detected.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _fifo_supported():
+    try:
+        probe = os.path.join(tempfile.gettempdir(), f"scah-fifo-probe-{os.getpid()}")
+        os.mkfifo(probe)
+        os.unlink(probe)
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
+def _unix_socket_supported():
+    probe = os.path.join(tempfile.gettempdir(), f"scah-sock-probe-{os.getpid()}")
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(probe)
+        sock.close()
+        os.unlink(probe)
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
+def test_capture_race_fifo_after_capture_continuous(tmp):
+    print()
+    print("=== Special-file race: FIFO after capture (continuous) ===")
+    if not _fifo_supported():
+        _pass("FIFO creation not supported on this platform — skipping")
+        return
+
+    fifo_path_holder = {}
+
+    def mutate():
+        repo = fifo_path_holder["repo"]
+        fifo_path = os.path.join(repo, "late.fifo")
+        if not os.path.exists(fifo_path):
+            os.mkfifo(fifo_path)
+
+    test_dir = os.path.join(tmp, "special-fifo-continuous")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "generated.rs", "v1\n")
+    setup_prior_report(repo)
+    fifo_path_holder["repo"] = repo
+
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    stop_event = threading.Event()
+    mutator = threading.Thread(
+        target=continuous_capture_mutator,
+        args=(block, mutate, stop_event),
+        daemon=True,
+    )
+    mutator.start()
+    time.sleep(0.05)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    mutator.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_ne("continuous FIFO race exit nonzero", 0, proc.returncode)
+    assert_text_contains(
+        stderr,
+        "unsupported special file appeared during source capture",
+        "stderr mentions special file during capture",
+    )
+    assert_text_contains(stderr, "late.fifo", "stderr names FIFO path")
+    assert_text_contains(stderr, "FIFO", "stderr mentions FIFO type")
+    if (
+        "attempt 3/3" in stderr
+        or "attempts: 3" in stderr
+        or "present before source capture" in stderr
+    ):
+        _pass("stderr documents special-file failure")
+    else:
+        _fail("stderr missing special-file failure detail")
+        print(f"stderr: {stderr}", file=sys.stderr)
+    assert_cargo_not_run(cargo_log, "Cargo not invoked for continuous FIFO race")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock absent after continuous FIFO race failure")
+    assert_no_staging_or_backup(repo)
+
+    fifo_path = os.path.join(repo, "late.fifo")
+    if os.path.exists(fifo_path):
+        os.unlink(fifo_path)
+
+
+def test_capture_race_socket_after_capture_continuous(tmp):
+    print()
+    print("=== Special-file race: socket after capture (continuous) ===")
+    if not _unix_socket_supported():
+        _pass("AF_UNIX socket creation not supported — skipping")
+        return
+
+    sock_path_holder = {}
+
+    def mutate():
+        repo = sock_path_holder["repo"]
+        sock_path = os.path.join(repo, "late.sock")
+        if os.path.exists(sock_path):
+            return
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(sock_path)
+        sock.close()
+
+    test_dir = os.path.join(tmp, "special-socket-continuous")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "generated.rs", "v1\n")
+    setup_prior_report(repo)
+    sock_path_holder["repo"] = repo
+
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    stop_event = threading.Event()
+    mutator = threading.Thread(
+        target=continuous_capture_mutator,
+        args=(block, mutate, stop_event),
+        daemon=True,
+    )
+    mutator.start()
+    time.sleep(0.05)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    mutator.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_ne("continuous socket race exit nonzero", 0, proc.returncode)
+    assert_text_contains(
+        stderr,
+        "unsupported special file appeared during source capture",
+        "stderr mentions special file during capture",
+    )
+    assert_text_contains(stderr, "late.sock", "stderr names socket path")
+    assert_text_contains(stderr, "socket", "stderr mentions socket type")
+    assert_cargo_not_run(cargo_log, "Cargo not invoked for continuous socket race")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock absent after continuous socket race failure")
+    assert_no_staging_or_backup(repo)
+
+    sock_path = os.path.join(repo, "late.sock")
+    if os.path.exists(sock_path):
+        os.unlink(sock_path)
+
+
+def test_capture_race_fifo_after_list_continuous(tmp):
+    print()
+    print("=== Special-file race: FIFO after untracked list (continuous) ===")
+    if not _fifo_supported():
+        _pass("FIFO creation not supported on this platform — skipping")
+        return
+
+    fifo_path_holder = {}
+
+    def mutate():
+        repo = fifo_path_holder["repo"]
+        fifo_path = os.path.join(repo, "late.fifo")
+        if not os.path.exists(fifo_path):
+            os.mkfifo(fifo_path)
+
+    test_dir = os.path.join(tmp, "special-fifo-after-list")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "generated.rs", "v1\n")
+    setup_prior_report(repo)
+    fifo_path_holder["repo"] = repo
+
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    stop_event = threading.Event()
+    mutator = threading.Thread(
+        target=continuous_capture_mutator,
+        args=(block, mutate, stop_event),
+        daemon=True,
+    )
+    mutator.start()
+    time.sleep(0.05)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    mutator.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_ne("FIFO after list race exit nonzero", 0, proc.returncode)
+    if "unsupported special file appeared during source capture" in stderr:
+        _pass("stderr mentions special file during capture")
+    elif "unsupported special file present before source capture" in stderr:
+        _pass("stderr mentions special file before next attempt")
+    else:
+        _fail("stderr missing special-file rejection")
+        print(f"stderr: {stderr}", file=sys.stderr)
+    assert_cargo_not_run(cargo_log, "Cargo not invoked for FIFO after list race")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock absent after FIFO after list race failure")
+    assert_no_staging_or_backup(repo)
+
+    fifo_path = os.path.join(repo, "late.fifo")
+    if os.path.exists(fifo_path):
+        os.unlink(fifo_path)
+
+
+def test_capture_race_fifo_after_capture_one_time_success(tmp):
+    print()
+    print("=== Special-file race: FIFO after capture (one-time, retry succeeds) ===")
+    if not _fifo_supported():
+        _pass("FIFO creation not supported on this platform — skipping")
+        return
+
+    test_dir = os.path.join(tmp, "special-fifo-one-time")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "generated.rs", "v1\n")
+
+    block = os.path.join(test_dir, "capture-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+    fifo_path = os.path.join(repo, "late.fifo")
+    stderr_path = block + ".stderr"
+
+    def mutate():
+        if not os.path.exists(fifo_path):
+            os.mkfifo(fifo_path)
+
+    stop_event = threading.Event()
+
+    def remove_fifo_after_detection():
+        deadline = time.time() + 120
+        while not stop_event.is_set() and time.time() < deadline:
+            if os.path.isfile(stderr_path):
+                with open(stderr_path) as fh:
+                    text = fh.read()
+                if "unsupported special file appeared during source capture" in text:
+                    try:
+                        os.unlink(fifo_path)
+                    except FileNotFoundError:
+                        pass
+                    return
+            time.sleep(0.05)
+
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(block, stop_event, mutate, False),
+        daemon=True,
+    )
+    cleanup = threading.Thread(target=remove_fifo_after_detection, daemon=True)
+    releaser.start()
+    cleanup.start()
+
+    proc, f_out, f_err, _, _ = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    cleanup.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_eq("one-time FIFO race succeeds after retry", 0, proc.returncode)
+    if "unsupported special file appeared during source capture" in stderr:
+        _pass("stderr mentions transient FIFO during capture")
+    else:
+        _pass("capture succeeded without persistent FIFO")
+    assert_cargo_ran(cargo_log, "Cargo ran after FIFO removed before retry")
+    assert_lock_absent(repo, "lock released after one-time FIFO race success")
+
+    if os.path.exists(fifo_path):
+        os.unlink(fifo_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Symlink policy workflow tests (38–45)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -3373,6 +3702,10 @@ def main():
         test_capture_race_added_file_after_list(tmp)
         test_capture_race_deleted_file_before_inspect(tmp)
         test_capture_race_continuous_mutation_fails(tmp)
+        test_capture_race_fifo_after_capture_continuous(tmp)
+        test_capture_race_socket_after_capture_continuous(tmp)
+        test_capture_race_fifo_after_list_continuous(tmp)
+        test_capture_race_fifo_after_capture_one_time_success(tmp)
         test_symlink_relative_escape_harness(tmp)
         test_symlink_chained_escape(tmp)
         test_symlink_broken_escape(tmp)

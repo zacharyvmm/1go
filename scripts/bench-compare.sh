@@ -56,14 +56,21 @@ resolve_revisions() {
 capture_source_state() {
     local max_attempts=3
     local attempt=1
-
-    # Reject special files Git may omit from ls-files (FIFO, socket, device).
-    if ! python3 "$SCRIPT_DIR/scan-special-files.py" --root "$ROOT"; then
-        echo "error: unsupported special files in working tree" >&2
-        exit 1
-    fi
+    local special_exhausted=0
 
     while [ "$attempt" -le "$max_attempts" ]; do
+        SPECIAL_SCAN_BEFORE="$TEMP_ROOT/special-scan-before.txt"
+        SPECIAL_SCAN_AFTER="$TEMP_ROOT/special-scan-after.txt"
+
+        # Endpoint A: reject specials present at attempt start.
+        if ! python3 "$SCRIPT_DIR/scan-special-files.py" \
+            --root "$ROOT" \
+            --manifest "$SPECIAL_SCAN_BEFORE"; then
+            echo "error: unsupported special file present before source capture" >&2
+            echo "  attempt: $attempt/$max_attempts" >&2
+            exit 1
+        fi
+
         # Working-tree status for dirty-file count and diagnostics.
         INITIAL_WORKTREE_STATUS="$(
             git -C "$ROOT" status --porcelain=v1 --untracked-files=all
@@ -139,6 +146,14 @@ capture_source_state() {
             exit 1
         fi
 
+        # Endpoint B: scan again before accepting coherence.
+        local special_after_rc=0
+        if ! python3 "$SCRIPT_DIR/scan-special-files.py" \
+            --root "$ROOT" \
+            --manifest "$SPECIAL_SCAN_AFTER"; then
+            special_after_rc=1
+        fi
+
         # ── Coherence check ───────────────────────────────────────────────
 
         local coherent=1
@@ -157,17 +172,49 @@ capture_source_state() {
             fi
         fi
 
+        if [ "$special_after_rc" != 0 ]; then
+            coherent=0
+            echo "  unsupported special file appeared during source capture (attempt $attempt/$max_attempts)" >&2
+        fi
+
+        if ! cmp -s "$SPECIAL_SCAN_BEFORE" "$SPECIAL_SCAN_AFTER"; then
+            coherent=0
+        fi
+
         if [ "$coherent" = 1 ]; then
             break  # Capture is coherent.
+        fi
+
+        if [ "$special_after_rc" != 0 ]; then
+            special_exhausted=1
         fi
 
         echo "  working tree changed during snapshot capture (attempt $attempt/$max_attempts)"
         attempt=$((attempt + 1))
 
         if [ "$attempt" -gt "$max_attempts" ]; then
-            echo "error: working tree changed during snapshot capture" >&2
-            echo "  untracked content, type, mode, or symlink target changed" >&2
-            echo "  attempts: $max_attempts" >&2
+            if [ "$special_exhausted" = 1 ]; then
+                echo "error: unsupported special file appeared during source capture" >&2
+                if [ -s "$SPECIAL_SCAN_AFTER" ]; then
+                    python3 - "$SPECIAL_SCAN_AFTER" <<'PY'
+import os
+import sys
+
+data = open(sys.argv[1], "rb").read()
+parts = [part for part in data.split(b"\0") if part]
+for index in range(0, len(parts) - 1, 2):
+    entry_type = parts[index].decode("utf-8")
+    rel_path = os.fsdecode(parts[index + 1])
+    print(f"  type: {entry_type}", file=sys.stderr)
+    print(f"  path: {rel_path}", file=sys.stderr)
+PY
+                fi
+                echo "  attempt: $max_attempts/$max_attempts" >&2
+            else
+                echo "error: working tree changed during snapshot capture" >&2
+                echo "  untracked content, type, mode, or symlink target changed" >&2
+                echo "  attempts: $max_attempts" >&2
+            fi
             exit 1
         fi
 
@@ -179,6 +226,8 @@ capture_source_state() {
         rm -f "$tracked_diff_verify"
         rm -f "$UNTRACKED_LIST"
         rm -f "$untracked_list_verify"
+        rm -f "$SPECIAL_SCAN_BEFORE"
+        rm -f "$SPECIAL_SCAN_AFTER"
     done
 
     # Determine dirty state.
