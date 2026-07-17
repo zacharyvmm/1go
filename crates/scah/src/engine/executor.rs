@@ -2381,4 +2381,309 @@ mod tests {
         while parser3.next(reader3) {}
         assert!(reader3.get_position() < br_len);
     }
+
+    #[test]
+    fn first_scope_cancels_nested_alternate_prefixes() {
+        let html = r#"
+            <div>
+                <span id="first">
+                    <div>
+                        <span id="second"></span>
+                    </div>
+                </span>
+            </div>
+        "#;
+
+        let queries = &[Query::first("div > span", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+
+        let spans: Vec<_> = store.get("div > span").unwrap().collect();
+        assert_eq!(spans.len(), 1, "First scope must cancel nested alternate prefixes");
+        assert_eq!(spans[0].id, Some("first"));
+    }
+
+    #[test]
+    fn then_first_scope_selects_once_per_parent() {
+        let html = r#"
+            <article>
+                <div><p id="first"></p></div>
+                <div><p id="second"></p></div>
+            </article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 1);
+        let ps: Vec<_> = articles[0]
+            .get(&store, "div > p")
+            .unwrap()
+            .collect();
+        assert_eq!(ps.len(), 1, "then first('div > p') must select once per parent");
+        assert_eq!(ps[0].id, Some("first"));
+    }
+
+    #[test]
+    fn then_first_scopes_independent_per_parent() {
+        let html = r#"
+            <article id="a">
+                <div><p id="a-first"></p></div>
+                <div><p id="a-second"></p></div>
+            </article>
+            <article id="b">
+                <div><p id="b-first"></p></div>
+                <div><p id="b-second"></p></div>
+            </article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 2);
+
+        let article_a = articles
+            .iter()
+            .find(|a| a.id == Some("a"))
+            .expect("article a");
+        let article_b = articles
+            .iter()
+            .find(|a| a.id == Some("b"))
+            .expect("article b");
+
+        let a_ps: Vec<_> = article_a.get(&store, "div > p").unwrap().collect();
+        assert_eq!(a_ps.len(), 1);
+        assert_eq!(a_ps[0].id, Some("a-first"));
+
+        let b_ps: Vec<_> = article_b.get(&store, "div > p").unwrap().collect();
+        assert_eq!(b_ps.len(), 1);
+        assert_eq!(b_ps[0].id, Some("b-first"));
+    }
+
+    #[test]
+    fn then_first_scope_preserves_sibling_all_section() {
+        let html = r#"
+            <article>
+                <div><p id="first"></p><a id="a1"></a></div>
+                <div><p id="second"></p><a id="a2"></a></div>
+                <a id="a3"></a>
+            </article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| {
+                Ok([
+                    article.first("div > p", Save::all())?,
+                    article.all("a", Save::all())?,
+                ])
+            })
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 1);
+
+        let ps: Vec<_> = articles[0].get(&store, "div > p").unwrap().collect();
+        assert_eq!(ps.len(), 1, "First scope must claim only one p per parent");
+        assert_eq!(ps[0].id, Some("first"));
+
+        let links: Vec<_> = articles[0].get(&store, "a").unwrap().collect();
+        assert_eq!(
+            links.len(),
+            3,
+            "claiming First scope must not cancel sibling all('a') section"
+        );
+    }
+
+    #[test]
+    fn first_scope_preserves_selected_then_children() {
+        let html = r#"
+            <div>
+                <p id="first">
+                    <span id="inner"></span>
+                    <div>
+                        <p id="second">
+                            <span id="nested"></span>
+                        </p>
+                    </div>
+                </p>
+            </div>
+        "#;
+
+        let query = Query::first("div > p", Save::all())
+            .unwrap()
+            .then(|p| Ok([p.all("span", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let ps: Vec<_> = store.get("div > p").unwrap().collect();
+        assert_eq!(ps.len(), 1, "First scope must select only one p");
+        assert_eq!(ps[0].id, Some("first"));
+
+        let spans: Vec<_> = ps[0].get(&store, "span").unwrap().collect();
+        assert_eq!(
+            spans.len(),
+            1,
+            "selected p's then-child span section must survive scope cancellation"
+        );
+        assert_eq!(spans[0].id, Some("inner"));
+    }
+
+    #[test]
+    fn all_retained_prefix_reactivates_same_transition() {
+        let html = r#"
+            <main>
+                <div><span>no match</span></div>
+                <div><p id="hit"></p></div>
+            </main>
+        "#;
+
+        let queries = &[Query::all("main div > p", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+
+        let hits: Vec<_> = store.get("main div > p").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn first_retained_prefix_reactivates_same_transition() {
+        let html = r#"
+            <main>
+                <div><span>no match</span></div>
+                <div><p id="hit"></p></div>
+            </main>
+        "#;
+
+        let queries = &[Query::first("main div > p", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+
+        let hits: Vec<_> = store.get("main div > p").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn longer_retained_prefix_reactivates_same_transition() {
+        let html = r#"
+            <main>
+                <section>
+                    <div><span>no</span></div>
+                    <div><p id="hit"></p></div>
+                </section>
+            </main>
+        "#;
+
+        let queries = &[Query::all("main section div > p", Save::all())
+            .unwrap()
+            .build()];
+        let store = parse(html, queries);
+
+        let hits: Vec<_> = store.get("main section div > p").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn descendant_suffix_retained_prefix_survives_close() {
+        let html = r#"
+            <main>
+                <div></div>
+                <div><span id="hit"></span></div>
+            </main>
+        "#;
+
+        let queries = &[Query::all("main div span", Save::all()).unwrap().build()];
+        let store = parse(html, queries);
+
+        let hits: Vec<_> = store.get("main div span").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn then_retained_prefix_reactivates_same_transition() {
+        let html = r#"
+            <article>
+                <main>
+                    <div><span>no</span></div>
+                    <div><p id="hit"></p></div>
+                </main>
+            </article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.all("main div > p", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 1);
+        let hits: Vec<_> = articles[0]
+            .get(&store, "main div > p")
+            .unwrap()
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, Some("hit"));
+    }
+
+    #[test]
+    fn blocked_cursor_reactivates_at_same_position() {
+        let query = Query::all("main div > p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("main"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+
+        let blocked_idx = selection
+            .cursors
+            .iter()
+            .position(|c| {
+                c.is_moving()
+                    && c.is_blocked()
+                    && !query.is_save_point(&c.position)
+            })
+            .expect("blocked moving cursor at div transition (not save point)");
+        let before_position = selection.cursors[blocked_idx].position;
+        assert!(selection.cursors[blocked_idx].is_blocked());
+
+        selection.back(0, "div", &doc_pos(1), &mut store);
+
+        let reactivated = selection
+            .cursors
+            .iter()
+            .find(|c| c.is_moving() && c.position == before_position)
+            .expect("cursor at same position after div close");
+        assert!(
+            reactivated.is_active(),
+            "blocked cursor must reactivate at the same transition"
+        );
+        assert_eq!(
+            reactivated.unwind_depth(),
+            None,
+            "reactivated retained prefix must not retain unwind depth"
+        );
+    }
 }
