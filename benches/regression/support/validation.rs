@@ -1,4 +1,4 @@
-use scah::Store;
+use scah::{Element, Store};
 
 // ── Basic validation ───────────────────────────────────────────────────────
 
@@ -136,7 +136,6 @@ pub fn assert_save_none_result(store: &Store<'_, '_>, selector: &str, expected_c
     }
 }
 
-
 /// Validate `Save::only_inner_html()` semantics: every element has exact inner
 /// HTML, correct href, and no text content. All results are exhaustively
 /// enumerated — a regression that drops inner HTML for middle elements will fail.
@@ -176,7 +175,6 @@ pub fn assert_save_inner_html_result(store: &Store<'_, '_>, selector: &str, expe
         );
     }
 }
-
 
 /// Validate `Save::only_text_content()` semantics: every element has exact text
 /// content, correct href, and no inner HTML. All results are exhaustively
@@ -260,6 +258,131 @@ pub fn assert_save_all_result(store: &Store<'_, '_>, selector: &str, expected_co
     }
 }
 
+// ── Shared product-result validator ─────────────────────────────────────────
+
+/// Validate one product result completely: parent saved data and every child.
+///
+/// This is the shared validator used by both `nested_all` and `nested_first`.
+/// It enforces identical `Save::all()` semantics regardless of which benchmark
+/// path produced the results.
+fn assert_product_result(
+    store: &Store<'_, '_>,
+    product: &Element<'_>,
+    index: usize,
+    title_selector: &str,
+    rating_selector: &str,
+    description_selector: &str,
+) {
+    // ── Parent validation ──────────────────────────────────────────────
+    assert_eq!(
+        product.class,
+        Some("product"),
+        "product[{index}]: expected class 'product'"
+    );
+
+    let expected_inner = super::fixtures::expected_product_inner_html(index);
+    assert_eq!(
+        product.inner_html,
+        Some(expected_inner.as_str()),
+        "product[{index}]: wrong parent inner HTML"
+    );
+
+    let expected_text = super::fixtures::expected_product_text(index);
+    assert_eq!(
+        product.text_content(store),
+        Some(expected_text.as_str()),
+        "product[{index}]: wrong parent text content"
+    );
+
+    // ── Child validation ───────────────────────────────────────────────
+    let titles: Vec<_> = product
+        .get(store, title_selector)
+        .expect("title child query should exist")
+        .collect();
+    let ratings: Vec<_> = product
+        .get(store, rating_selector)
+        .expect("rating child query should exist")
+        .collect();
+    let descriptions: Vec<_> = product
+        .get(store, description_selector)
+        .expect("description child query should exist")
+        .collect();
+
+    assert_eq!(
+        titles.len(),
+        1,
+        "product[{index}]: expected 1 title, got {}",
+        titles.len()
+    );
+    assert_eq!(
+        ratings.len(),
+        1,
+        "product[{index}]: expected 1 rating, got {}",
+        ratings.len()
+    );
+    assert_eq!(
+        descriptions.len(),
+        1,
+        "product[{index}]: expected 1 description, got {}",
+        descriptions.len()
+    );
+
+    let product_number = index + 1;
+
+    // Title: text + inner HTML + no class.
+    let expected_title = super::fixtures::expected_product_title(product_number);
+    assert_eq!(
+        titles[0].text_content(store),
+        Some(expected_title.as_str()),
+        "product[{index}]: wrong title text"
+    );
+    assert_eq!(
+        titles[0].inner_html,
+        Some(expected_title.as_str()),
+        "product[{index}]: wrong title inner HTML"
+    );
+    assert!(
+        titles[0].class.is_none(),
+        "product[{index}]: title should have no class"
+    );
+
+    // Rating: text + inner HTML + class.
+    let expected_rating = super::fixtures::expected_product_rating(index);
+    assert_eq!(
+        ratings[0].text_content(store),
+        Some(expected_rating.as_str()),
+        "product[{index}]: wrong rating text"
+    );
+    assert_eq!(
+        ratings[0].inner_html,
+        Some(expected_rating.as_str()),
+        "product[{index}]: wrong rating inner HTML"
+    );
+    assert_eq!(
+        ratings[0].class,
+        Some("rating"),
+        "product[{index}]: expected rating class 'rating'"
+    );
+
+    // Description: text + inner HTML + class.
+    let expected_desc = super::fixtures::expected_product_description(product_number);
+    assert_eq!(
+        descriptions[0].text_content(store),
+        Some(expected_desc.as_str()),
+        "product[{index}]: wrong description text"
+    );
+    assert_eq!(
+        descriptions[0].inner_html,
+        Some(expected_desc.as_str()),
+        "product[{index}]: wrong description inner HTML"
+    );
+    assert_eq!(
+        descriptions[0].class,
+        Some("description"),
+        "product[{index}]: expected description class 'description'"
+    );
+}
+
 // ── Nested product catalog validation ──────────────────────────────────────
 
 /// Validate nested_all product results: parent count, parent saved data, every
@@ -287,116 +410,20 @@ pub fn assert_product_catalog_all(
     );
 
     for (index, product) in products.iter().enumerate() {
-        // ── Parent validation ──────────────────────────────────────────
-        assert_eq!(
-            product.class,
-            Some("product"),
-            "product[{index}]: expected class 'product'"
-        );
-
-        let expected_inner = super::fixtures::expected_product_inner_html(index);
-        assert_eq!(
-            product.inner_html,
-            Some(expected_inner.as_str()),
-            "product[{index}]: wrong parent inner HTML"
-        );
-
-        let expected_text = super::fixtures::expected_product_text(index);
-        assert_eq!(
-            product.text_content(store),
-            Some(expected_text.as_str()),
-            "product[{index}]: wrong parent text content"
-        );
-
-        // ── Child validation ───────────────────────────────────────────
-        let titles: Vec<_> = product
-            .get(store, title_selector)
-            .expect("title child query should exist")
-            .collect();
-        let ratings: Vec<_> = product
-            .get(store, rating_selector)
-            .expect("rating child query should exist")
-            .collect();
-        let descriptions: Vec<_> = product
-            .get(store, description_selector)
-            .expect("description child query should exist")
-            .collect();
-
-        assert_eq!(
-            titles.len(), 1,
-            "product[{index}]: expected 1 title, got {}",
-            titles.len()
-        );
-        assert_eq!(
-            ratings.len(), 1,
-            "product[{index}]: expected 1 rating, got {}",
-            ratings.len()
-        );
-        assert_eq!(
-            descriptions.len(), 1,
-            "product[{index}]: expected 1 description, got {}",
-            descriptions.len()
-        );
-
-        let product_number = index + 1;
-
-        // Title: text + inner HTML (should match since no nested markup) + no
-        // unexpected class.
-        let expected_title = super::fixtures::expected_product_title(product_number);
-        assert_eq!(
-            titles[0].text_content(store),
-            Some(expected_title.as_str()),
-            "product[{index}]: wrong title text"
-        );
-        assert_eq!(
-            titles[0].inner_html,
-            Some(expected_title.as_str()),
-            "product[{index}]: wrong title inner HTML"
-        );
-        assert!(
-            titles[0].class.is_none(),
-            "product[{index}]: title should have no class"
-        );
-
-        // Rating: text + inner HTML + class.
-        let expected_rating = super::fixtures::expected_product_rating(index);
-        assert_eq!(
-            ratings[0].text_content(store),
-            Some(expected_rating.as_str()),
-            "product[{index}]: wrong rating text"
-        );
-        assert_eq!(
-            ratings[0].inner_html,
-            Some(expected_rating.as_str()),
-            "product[{index}]: wrong rating inner HTML"
-        );
-        assert_eq!(
-            ratings[0].class,
-            Some("rating"),
-            "product[{index}]: expected rating class 'rating'"
-        );
-
-        // Description: text + inner HTML + class.
-        let expected_desc = super::fixtures::expected_product_description(product_number);
-        assert_eq!(
-            descriptions[0].text_content(store),
-            Some(expected_desc.as_str()),
-            "product[{index}]: wrong description text"
-        );
-        assert_eq!(
-            descriptions[0].inner_html,
-            Some(expected_desc.as_str()),
-            "product[{index}]: wrong description inner HTML"
-        );
-        assert_eq!(
-            descriptions[0].class,
-            Some("description"),
-            "product[{index}]: expected description class 'description'"
+        assert_product_result(
+            store,
+            product,
+            index,
+            title_selector,
+            rating_selector,
+            description_selector,
         );
     }
 }
 
-/// Validate nested_first product results: exactly one parent with all child selectors.
+/// Validate nested_first product results: exactly one product with all saved
+/// fields verified — parent class, inner HTML, text, plus every child field.
+/// Uses the same shared validator as `nested_all`.
 pub fn assert_product_catalog_first(
     store: &Store<'_, '_>,
     product_selector: &str,
@@ -412,33 +439,18 @@ pub fn assert_product_catalog_first(
     assert_eq!(
         products.len(),
         1,
-        "expected exactly 1 product, got {}",
+        "expected exactly 1 product for nested_first, got {}",
         products.len()
     );
 
-    let product = &products[0];
-
-    let titles: Vec<_> = product
-        .get(store, title_selector)
-        .expect("title child query should exist")
-        .collect();
-    assert_eq!(titles.len(), 1);
-
-    let ratings: Vec<_> = product
-        .get(store, rating_selector)
-        .expect("rating child query should exist")
-        .collect();
-    assert_eq!(ratings.len(), 1);
-
-    let descriptions: Vec<_> = product
-        .get(store, description_selector)
-        .expect("description child query should exist")
-        .collect();
-    assert_eq!(descriptions.len(), 1);
-
-    assert_eq!(titles[0].text_content(store), Some("Product #1"));
-    assert_eq!(descriptions[0].text_content(store), Some("Description #1"));
-    assert_eq!(ratings[0].text_content(store), Some("1/5"));
+    assert_product_result(
+        store,
+        products[0],
+        0,
+        title_selector,
+        rating_selector,
+        description_selector,
+    );
 }
 
 // ── Multi-query validation ─────────────────────────────────────────────────
@@ -452,12 +464,13 @@ fn expected_class_count(element_count: usize, query_count: usize, class_index: u
 
 /// Validate multi-query results: each selector's exact count, returned element
 /// identity via data-index, class tokens, inner HTML, and text content. All
-/// results are exhaustively validated — a regression that drops saved fields
-/// or returns elements under the wrong selector will fail.
+/// results are exhaustively validated — a regression that drops saved fields,
+/// returns elements under the wrong selector, or produces duplicate/missing
+/// identities will fail.
 pub fn assert_multi_query_results(store: &Store<'_, '_>, element_count: usize, query_count: usize) {
     let selectors: Vec<String> = (0..query_count).map(|i| format!(".class-{i}")).collect();
 
-    let mut total = 0usize;
+    let mut seen = vec![false; element_count];
 
     for (class_index, selector) in selectors.iter().enumerate() {
         let elements: Vec<_> = store
@@ -477,11 +490,24 @@ pub fn assert_multi_query_results(store: &Store<'_, '_>, element_count: usize, q
 
         for element in &elements {
             let classes = element.class.expect("matched div should have a class");
+
+            // Exact class-token validation: each element must have exactly
+            // two tokens: "item" and "class-N". Reject ambiguous multi-class
+            // corruption (e.g. "item class-0 class-1").
+            let class_tokens: Vec<_> = classes.split_ascii_whitespace().collect();
+            assert_eq!(
+                class_tokens.len(),
+                2,
+                "selector {selector}: expected exactly 2 class tokens, got {} ({classes:?})",
+                class_tokens.len()
+            );
             assert!(
-                classes
-                    .split_ascii_whitespace()
-                    .any(|class| class == expected_class),
-                "selector {selector} returned element with classes {classes:?}",
+                class_tokens.contains(&"item"),
+                "selector {selector}: element missing 'item' class token ({classes:?})"
+            );
+            assert!(
+                class_tokens.contains(&expected_class.as_str()),
+                "selector {selector}: element missing {expected_class} class token ({classes:?})"
             );
 
             // Validate data-index attribute for identity.
@@ -491,15 +517,21 @@ pub fn assert_multi_query_results(store: &Store<'_, '_>, element_count: usize, q
                 .parse()
                 .expect("data-index should be a valid usize");
 
+            // Out-of-range safety check.
+            assert!(
+                data_index < element_count,
+                "selector {selector}: data-index {data_index} out of range 0..{element_count}"
+            );
+
+            // Duplicate detection.
+            assert!(
+                !seen[data_index],
+                "selector {selector}: duplicate data-index {data_index}"
+            );
+            seen[data_index] = true;
+
             // The element's class must be consistent with its data-index.
             let data_index_class = format!("class-{}", data_index % query_count);
-            assert!(
-                classes
-                    .split_ascii_whitespace()
-                    .any(|class| class == data_index_class),
-                "selector {selector}: element data-index={data_index} has classes {classes:?}, \
-                 expected class {data_index_class}"
-            );
             assert_eq!(
                 data_index_class, expected_class,
                 "selector {selector}: element data-index={data_index} belongs to class \
@@ -520,12 +552,10 @@ pub fn assert_multi_query_results(store: &Store<'_, '_>, element_count: usize, q
                 "selector {selector}: wrong text content for data-index={data_index}"
             );
         }
-
-        total += elements.len();
     }
 
-    assert_eq!(
-        total, element_count,
-        "total across all selectors should equal {element_count}, got {total}"
-    );
+    // Every index from 0..element_count must have been seen exactly once.
+    for (index, was_seen) in seen.iter().enumerate() {
+        assert!(*was_seen, "multi-query result missing data-index {index}");
+    }
 }

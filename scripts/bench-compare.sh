@@ -71,11 +71,24 @@ capture_source_state() {
         git -C "$ROOT" ls-files --others --exclude-standard -z \
             > "$UNTRACKED_LIST"
 
+        # Test hook: block after untracked list so tests can mutate files.
+        if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST:-}" ]; then
+            touch "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.started"
+            while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.released" ]; do
+                sleep 0.05
+            done
+        fi
+
         # Stage untracked entries into a temporary capture directory.
         CAPTURED_UNTRACKED="$TEMP_ROOT/captured-untracked"
         UNTRACKED_CAPTURE_MANIFEST="$TEMP_ROOT/untracked-capture-manifest.jsonl"
 
-        if ! python3 "$SCRIPT_DIR/capture-untracked.py" \
+        if [ -d "$CAPTURED_UNTRACKED" ]; then
+            rm -rf "$CAPTURED_UNTRACKED"
+        fi
+        mkdir -p "$CAPTURED_UNTRACKED"
+
+        if ! python3 "$SCRIPT_DIR/capture-untracked.py" capture \
             --root "$ROOT" \
             --paths "$UNTRACKED_LIST" \
             --destination "$CAPTURED_UNTRACKED" \
@@ -84,17 +97,54 @@ capture_source_state() {
             exit 1
         fi
 
-        # Re-capture tracked diff and untracked inventory for verification.
+        # Test hook: block after capture so tests can mutate files post-capture.
+        if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE:-}" ]; then
+            touch "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.started"
+            while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.released" ]; do
+                sleep 0.05
+            done
+        fi
+
+        # ── Independent verification ──────────────────────────────────────
+
+        # Re-capture tracked diff.
         local tracked_diff_verify="$TEMP_ROOT/tracked-diff-verify.patch"
         git -C "$ROOT" diff --binary HEAD > "$tracked_diff_verify"
 
+        # Re-capture untracked path inventory.
         local untracked_list_verify="$TEMP_ROOT/untracked-verify.txt"
         git -C "$ROOT" ls-files --others --exclude-standard -z \
             > "$untracked_list_verify"
 
-        # Verify nothing changed during capture.
-        if cmp -s "$TRACKED_DIFF" "$tracked_diff_verify" && \
-           cmp -s "$UNTRACKED_LIST" "$untracked_list_verify"; then
+        # Inspect live untracked entries without modifying the staging directory.
+        UNTRACKED_LIVE_VERIFY_MANIFEST="$TEMP_ROOT/untracked-live-verify-manifest.jsonl"
+        if ! python3 "$SCRIPT_DIR/capture-untracked.py" inspect \
+            --root "$ROOT" \
+            --paths "$UNTRACKED_LIST" \
+            --manifest "$UNTRACKED_LIVE_VERIFY_MANIFEST"; then
+            echo "error: failed to inspect live untracked entries" >&2
+            exit 1
+        fi
+
+        # ── Coherence check ───────────────────────────────────────────────
+
+        local coherent=1
+
+        if ! cmp -s "$TRACKED_DIFF" "$tracked_diff_verify"; then
+            coherent=0
+        fi
+
+        if ! cmp -s "$UNTRACKED_LIST" "$untracked_list_verify"; then
+            coherent=0
+        fi
+
+        if [ -s "$UNTRACKED_CAPTURE_MANIFEST" ] || [ -s "$UNTRACKED_LIVE_VERIFY_MANIFEST" ]; then
+            if ! cmp -s "$UNTRACKED_CAPTURE_MANIFEST" "$UNTRACKED_LIVE_VERIFY_MANIFEST"; then
+                coherent=0
+            fi
+        fi
+
+        if [ "$coherent" = 1 ]; then
             break  # Capture is coherent.
         fi
 
@@ -102,12 +152,20 @@ capture_source_state() {
         attempt=$((attempt + 1))
 
         if [ "$attempt" -gt "$max_attempts" ]; then
-            echo "error: working tree changed during snapshot capture after $max_attempts attempts" >&2
+            echo "error: working tree changed during snapshot capture" >&2
+            echo "  untracked content, type, mode, or symlink target changed" >&2
+            echo "  attempts: $max_attempts" >&2
             exit 1
         fi
 
         # Clean up and retry.
         rm -rf "$CAPTURED_UNTRACKED"
+        rm -f "$UNTRACKED_CAPTURE_MANIFEST"
+        rm -f "$UNTRACKED_LIVE_VERIFY_MANIFEST"
+        rm -f "$TRACKED_DIFF"
+        rm -f "$tracked_diff_verify"
+        rm -f "$UNTRACKED_LIST"
+        rm -f "$untracked_list_verify"
     done
 
     # Determine dirty state.
@@ -118,8 +176,7 @@ capture_source_state() {
 
     if [ -n "$INITIAL_WORKTREE_STATUS" ]; then
         HEAD_DIRTY_FILES="$(
-            printf '%s
-' "$INITIAL_WORKTREE_STATUS" | wc -l | tr -d ' '
+            printf '%s\n' "$INITIAL_WORKTREE_STATUS" | wc -l | tr -d ' '
         )"
     else
         HEAD_DIRTY_FILES=0
@@ -460,23 +517,34 @@ measure_current() {
     mkdir -p "$CURRENT_TARGET"
     rm -rf "$CURRENT_TARGET/criterion"
 
+    CRITERION_BASELINE_INVENTORY="$TEMP_ROOT/criterion-baseline-inventory.jsonl"
+
     echo "Copying saved-baseline measurements..."
     if ! python3 "$SCRIPT_DIR/copy-criterion-baseline.py" \
         --source "$BASE_TARGET/criterion" \
         --destination "$CURRENT_TARGET/criterion" \
-        --baseline "$BASELINE_NAME"; then
+        --baseline "$BASELINE_NAME" \
+        --inventory "$CRITERION_BASELINE_INVENTORY"; then
         echo "error: failed to copy baseline measurements" >&2
         exit 1
     fi
 
-    # Record copied baseline inventory for post-measurement validation.
-    BASELINE_INVENTORY="$(find "$CURRENT_TARGET/criterion" -type f | sort)"
+    # ── Baseline integrity: record manifest BEFORE current run ────────────
+
+    BASELINE_MANIFEST_BEFORE="$TEMP_ROOT/criterion-baseline-manifest-before.txt"
+    BASELINE_MANIFEST_SHA256_BEFORE="$TEMP_ROOT/criterion-baseline-manifest-before.sha256"
+
+    if [ -s "$CRITERION_BASELINE_INVENTORY" ]; then
+        find "$CURRENT_TARGET/criterion" -type f \
+            -path "*/$BASELINE_NAME/*" \
+            ! -name "*.tmp" \
+            -exec sha256sum {} \; | sort > "$BASELINE_MANIFEST_BEFORE"
+        sha256_hash "$BASELINE_MANIFEST_BEFORE" > "$BASELINE_MANIFEST_SHA256_BEFORE"
+    fi
 
     # Ensure no stale output exists before measuring.
-    if [ -d "$CURRENT_TARGET/criterion/report" ] || \
-       [ -d "$CURRENT_TARGET/criterion/new" ] || \
-       [ -d "$CURRENT_TARGET/criterion/change" ]; then
-        echo "error: stale Criterion output already present in current target" >&2
+    if [ -d "$CURRENT_TARGET/criterion/report" ]; then
+        echo "error: stale Criterion report already present in current target" >&2
         exit 1
     fi
 
@@ -490,23 +558,39 @@ measure_current() {
             --baseline "$BASELINE_NAME"
     )
 
-    # Fresh-output validation: the current run must produce new results.
+    # Fresh-output validation: the current run must produce a report.
     if [ ! -d "$CURRENT_TARGET/criterion/report" ]; then
         echo "error: Criterion did not produce a fresh report" >&2
         exit 1
     fi
 
-    if [ ! -d "$CURRENT_TARGET/criterion/new" ] && \
-       [ ! -d "$CURRENT_TARGET/criterion/change" ]; then
-        echo "error: Criterion produced no new measurement or change data" >&2
+    # Validate that every expected benchmark produced nested new/ and change/ data.
+    echo "Validating Criterion comparison output..."
+    if ! python3 "$SCRIPT_DIR/validate-criterion-comparison.py" \
+        --criterion-root "$CURRENT_TARGET/criterion" \
+        --inventory "$CRITERION_BASELINE_INVENTORY"; then
+        echo "error: Criterion comparison output is incomplete" >&2
         exit 1
     fi
 
-    # Verify the copied baseline inventory was not modified by the current run.
-    local final_inventory
-    final_inventory="$(find "$CURRENT_TARGET/criterion" -type f | sort)"
-    if ! printf '%s\n' "$BASELINE_INVENTORY" | grep -q .; then
-        :  # No baseline inventory to check (shouldn't happen, but ok)
+    # ── Baseline integrity: verify manifest AFTER current run ──────────────
+
+    BASELINE_MANIFEST_AFTER="$TEMP_ROOT/criterion-baseline-manifest-after.txt"
+    BASELINE_INTEGRITY_OK=0
+
+    if [ -s "$CRITERION_BASELINE_INVENTORY" ]; then
+        find "$CURRENT_TARGET/criterion" -type f \
+            -path "*/$BASELINE_NAME/*" \
+            ! -name "*.tmp" \
+            -exec sha256sum {} \; | sort > "$BASELINE_MANIFEST_AFTER"
+
+        if cmp -s "$BASELINE_MANIFEST_BEFORE" "$BASELINE_MANIFEST_AFTER"; then
+            BASELINE_INTEGRITY_OK=1
+            echo "  baseline measurements unchanged — integrity verified"
+        else
+            echo "error: copied baseline measurements were modified during current run" >&2
+            exit 1
+        fi
     fi
 }
 
@@ -548,6 +632,8 @@ cargo=$CARGO_VERSION
 host=$HOST_TRIPLE
 benchmark_harness_diff_present=$HARNESS_DIFF_PRESENT
 benchmark_harness_diff_allowed=$ALLOW_BENCH_HARNESS_DIFF
+criterion_baseline_measurements_unchanged=${BASELINE_INTEGRITY_OK:-0}
+criterion_baseline_manifest_sha256=$(cat "$BASELINE_MANIFEST_SHA256_BEFORE" 2>/dev/null || echo "")
 date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
 

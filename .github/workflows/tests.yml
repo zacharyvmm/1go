@@ -44,8 +44,13 @@ jobs:
 
       - name: Check benchmark comparison script syntax
         run: bash -n scripts/bench-compare.sh
-      - name: Check fingerprint helper syntax
-        run: python3 -m py_compile scripts/source-fingerprint.py
+      - name: Check Python helper syntax
+        run: |
+          python3 -m py_compile scripts/source-fingerprint.py
+          python3 -m py_compile scripts/capture-untracked.py
+          python3 -m py_compile scripts/copy-criterion-baseline.py
+          python3 -m py_compile scripts/validate-criterion-comparison.py
+          python3 -m py_compile scripts/tests/bench-compare-test.py
 
       - name: Test benchmark comparison workflow
         run: python3 scripts/tests/bench-compare-test.py

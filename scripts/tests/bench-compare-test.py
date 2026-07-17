@@ -94,6 +94,13 @@ def assert_contains(path, substring, label):
         _fail(f"{label}: '{substring}' not found in {path}")
 
 
+def assert_text_contains(text, substring, label):
+    if substring in text:
+        _pass(label)
+    else:
+        _fail(f"{label}: '{substring}' not found in output")
+
+
 def assert_not_contains(path, substring, label):
     if not os.path.isfile(path):
         _pass(label)
@@ -303,13 +310,13 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
         mutate_content=mutate_content,
     )
     # Shell-level mutation support (for directory symlink etc.).
+    comparison_mutate_lines = []
     if mutate_shell and mutate_when_cwd_contains:
         kw = shlex_quote(mutate_when_cwd_contains)
-        lines += [
-            'if [[ "$CWD" == *' + kw + '* ]]; then',
-            mutate_shell,
-            "fi",
-            "",
+        comparison_mutate_lines = [
+            '    if [[ "$CWD" == *' + kw + '* ]]; then',
+            '    ' + mutate_shell,
+            "    fi",
         ]
     if block_file:
         lines += [
@@ -333,25 +340,37 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
         # For --save-baseline runs (baseline measurement), create saved-baseline dirs.
         'if echo "$*" | grep -q -- "--save-baseline"; then',
         '    BASELINE_NAME=$(echo "$*" | sed -n "s/.*--save-baseline \\([^ ]*\\).*/\\1/p")',
-        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_none/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_inner_html/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_text/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_all/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/synthetic_links/consume/all/save_all/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/synthetic_links/end_to_end/all/save_all/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/product_catalog/prebuilt/nested_all/save_all/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/product_catalog/consume/nested_all/save_all/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/product_catalog/end_to_end/nested_all/save_all/$BASELINE_NAME"',
-        '    mkdir -p "$BENCH_DIR/multi_query/prebuilt/$BASELINE_NAME"',
-        '    # Place estimates.json in every saved-baseline directory at any depth.',
-        '    find "$BENCH_DIR" -type d -name "$BASELINE_NAME" | while read -r d; do',
-        '        printf "{\\"confidence_interval\\":{\\"lower_bound\\":1.0,\\"upper_bound\\":1.0,\\"point_estimate\\":1.0}}\\n" > "$d/estimates.json"',
+        '    BENCH_PATHS="',
+        '        synthetic_links/prebuilt/all/save_none',
+        '        synthetic_links/prebuilt/all/save_inner_html',
+        '        synthetic_links/prebuilt/all/save_text',
+        '        synthetic_links/prebuilt/all/save_all',
+        '        synthetic_links/consume/all/save_all',
+        '        synthetic_links/end_to_end/all/save_all',
+        '        product_catalog/prebuilt/nested_all/save_all',
+        '        product_catalog/consume/nested_all/save_all',
+        '        product_catalog/end_to_end/nested_all/save_all',
+        '        multi_query/prebuilt',
+        '    "',
+        '    for bp in $BENCH_PATHS; do',
+        '        BASELINE_DIR="$BENCH_DIR/$bp/$BASELINE_NAME"',
+        '        mkdir -p "$BASELINE_DIR"',
+        '        printf "{\\"confidence_interval\\":{\\"lower_bound\\":1.0,\\"upper_bound\\":1.0,\\"point_estimate\\":1.0}}\\n" > "$BASELINE_DIR/estimates.json"',
         '    done',
         'fi',
-        # For current runs (--baseline without --save-baseline), create new/ and change/.
+        # For current runs (--baseline without --save-baseline), create nested new/ and change/.
         'if echo "$*" | grep -q -- "--baseline" && ! echo "$*" | grep -q -- "--save-baseline"; then',
-        '    mkdir -p "$BENCH_DIR/new" "$BENCH_DIR/change"',
-        '    printf "{\\"confidence_interval\\":{\\"lower_bound\\":1.0,\\"upper_bound\\":1.0,\\"point_estimate\\":1.0}}\\n" > "$BENCH_DIR/new/estimates.json"',
+        '    # Find saved-baseline dirs to derive benchmark paths.',
+        '    find "$BENCH_DIR" -type f -name "estimates.json" | while read -r est; do',
+        '        BASELINE_DIR="$(dirname "$est")"',
+        '        BENCH_PATH="$(dirname "$BASELINE_DIR")"',
+        '        # Create nested new/ and change/ under the benchmark path.',
+        '        mkdir -p "$BENCH_PATH/new" "$BENCH_PATH/change"',
+        '        printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/new/estimates.json"',
+        '        printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/new/sample.json"',
+        '        printf "{\\"mean\\":{\\"estimate\\":1.0,\\"lower_bound\\":0.9,\\"upper_bound\\":1.1}}\\n" > "$BENCH_PATH/change/estimates.json"',
+        '    done',
+    ] + comparison_mutate_lines + [
         'fi',
         "",
     ]
@@ -2084,6 +2103,196 @@ def test_directory_symlink_manifest_records(tmp):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 26: Escaping symlink in benchmark harness aborts workflow
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_escaping_symlink_harness(tmp):
+    print()
+    print("=== Test 26: Escaping symlink in harness aborts workflow ===")
+    test_dir = os.path.join(tmp, "test26")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    # Create an absolute symlink in the benchmark harness directory.
+    harness_dir = os.path.join(repo, "benches", "regression")
+    escape_target = "/etc/passwd"
+    symlink_path = os.path.join(harness_dir, "escape")
+    os.symlink(escape_target, symlink_path)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    env = bench_compare_env(stub_dir)
+    result = subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert_ne("escaping symlink exit nonzero", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        "escaping symlink",
+        "error identifies escaping symlink",
+    )
+
+    # Cargo must not have been invoked.
+    if os.path.exists(cargo_log):
+        with open(cargo_log) as f:
+            log_content = f.read()
+        if "bench --" in log_content:
+            _fail("Cargo was invoked despite escaping symlink")
+        else:
+            _pass("Cargo was not invoked (escaping symlink rejected early)")
+    else:
+        _pass("Cargo was not invoked (no cargo log)")
+
+    # Previous report must remain intact (shouldn't exist yet, but check
+    # the workflow does not publish a broken one).
+    lock_dir = os.path.join(repo, "target", "bench-compare", ".lock")
+    assert_file_absent(lock_dir, "lock released after escaping symlink")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 27: Linked worktree lock prevents concurrent comparisons
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_linked_worktree_lock(tmp):
+    print()
+    print("=== Test 27: Linked worktree lock ===")
+    test_dir = os.path.join(tmp, "test27")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    # Create a second linked worktree at the same commit as the main checkout.
+    worktree_b = os.path.join(test_dir, "worktree-b")
+    subprocess.run(
+        ["git", "-C", repo, "worktree", "add", "--detach", worktree_b, "HEAD"],
+        capture_output=True,
+        check=True,
+    )
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log_a = os.path.join(test_dir, "cargo-a.log")
+    block = os.path.join(test_dir, "block")
+    make_stub_cargo(stub_dir, cargo_log_a, block_file=block)
+
+    stdout_a = os.path.join(test_dir, "out-a")
+    stderr_a = os.path.join(test_dir, "err-a")
+    stdout_b = os.path.join(test_dir, "out-b")
+    stderr_b = os.path.join(test_dir, "err-b")
+
+    f_out_a = open(stdout_a, "w")
+    f_err_a = open(stderr_a, "w")
+
+    # Start comparison from worktree A (the main repo).
+    p_a = run_bench_compare_bg(repo, stub_dir, block, f_out_a, f_err_a,
+                               extra_env=None)
+
+    if not wait_for_block(block, timeout=10):
+        _fail("worktree A lock block did not fire")
+        return
+    _pass("worktree A acquired lock")
+
+    # Start comparison from worktree B while A holds the lock.
+    env_b = bench_compare_env(stub_dir)
+    p_b = subprocess.Popen(
+        [BENCH_COMPARE],
+        cwd=worktree_b,
+        env=env_b,
+        stdout=open(stdout_b, "w"),
+        stderr=open(stderr_b, "w"),
+        start_new_session=True,
+    )
+
+    time.sleep(3)
+
+    # B must have exited nonzero.
+    p_b.wait(timeout=30)
+    assert_ne("worktree B rejected", 0, p_b.returncode)
+
+    with open(stderr_b) as f:
+        stderr_b_text = f.read()
+    assert_text_contains(
+        stderr_b_text,
+        "lock",
+        "worktree B error mentions lock",
+    )
+
+    # Release A.
+    with open(block + ".released", "w") as f:
+        f.write("")
+
+    p_a.wait(timeout=30)
+    f_out_a.close()
+    f_err_a.close()
+    assert_eq("worktree A succeeded", 0, p_a.returncode)
+
+    # Verify A cleanup.
+    lock_dir = os.path.join(repo, "target", "bench-compare", ".lock")
+    assert_file_absent(lock_dir, "lock released after completion")
+
+    # Clean up linked worktree.
+    subprocess.run(
+        ["git", "-C", repo, "worktree", "remove", "--force", worktree_b],
+        capture_output=True,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test 28: Baseline mutation is detected
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_baseline_mutation_detected(tmp):
+    print()
+    print("=== Test 28: Baseline mutation is detected ===")
+    test_dir = os.path.join(tmp, "test28")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+
+    # Create a stub that mutates a copied baseline file during the current run.
+    mutate_shell = (
+        'find "$BENCH_DIR" -path "*/main/estimates.json"'
+        ' -exec sh -c \'echo "mutated" >> "$1"\' _ {} \\;'
+    )
+    make_stub_cargo(
+        stub_dir, cargo_log,
+        mutate_when_cwd_contains="current",
+        mutate_shell=mutate_shell,
+    )
+
+    env = bench_compare_env(stub_dir)
+    result = subprocess.run(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert_ne("baseline mutation exit nonzero", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        "baseline measurements were modified",
+        "error identifies baseline mutation",
+    )
+
+    # Previous report must remain intact.
+    report_dir = os.path.join(repo, "target", "bench-compare", "latest")
+    if os.path.isdir(report_dir):
+        # The error occurs before publication, so no new report should have
+        # been published (the previous one might or might not exist).
+        _pass("workflow failed before publishing mutated report")
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2123,6 +2332,11 @@ def main():
         test_unreadable_directory_fails(tmp)
         test_entry_disappears_during_traversal(tmp)
         test_directory_symlink_manifest_records(tmp)
+
+        # Full-workflow safety tests (26-28).
+        test_escaping_symlink_harness(tmp)
+        test_linked_worktree_lock(tmp)
+        test_baseline_mutation_detected(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

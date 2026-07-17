@@ -13,99 +13,102 @@ Interface::
     python3 scripts/copy-criterion-baseline.py \\
         --source <base-target>/criterion \\
         --destination <current-target>/criterion \\
-        --baseline <baseline-name>
+        --baseline <baseline-name> \\
+        [--inventory <inventory-file.jsonl>]
 
-Fails when:
-  - No matching saved-baseline measurement directories exist.
-  - A source path has an unexpected shape.
-  - Destination paths would escape the target.
-  - A current-output directory already exists unexpectedly.
+The optional ``--inventory`` flag writes a JSON-lines file with one record
+per copied benchmark::
+
+    {"benchmark_path": "parse/foo/100", "baseline_path": "parse/foo/100/main"}
+
+This inventory is the authoritative list of expected benchmark IDs for
+downstream validation.
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
+from typing import List
+
+
+class BaselineCopyError(RuntimeError):
+    """Raised when baseline copying fails for a recoverable reason."""
 
 
 def _is_measurement_dir(path: str) -> bool:
     """True when *path* looks like a Criterion saved-baseline measurement dir."""
     estimates = os.path.join(path, "estimates.json")
     return os.path.isfile(estimates)
+
+
 def copy_baseline(
-    source: str, destination: str, baseline_name: str
-) -> list[str]:
+    source: str,
+    destination: str,
+    baseline_name: str,
+) -> List[dict]:
     """Copy saved-baseline measurements from *source* to *destination*.
 
-    Walks the Criterion directory tree recursively. Any directory named
-    *baseline_name* containing an ``estimates.json`` file is treated as a
-    saved-baseline measurement and copied, preserving the relative path under
-    *source*.
+    Returns a list of dicts with ``benchmark_path`` and ``baseline_path``.
 
-    Returns the list of copied relative paths.
+    Raises ``BaselineCopyError`` on failure.
     """
     source = os.path.abspath(source)
     destination = os.path.abspath(destination)
-    copied: list[str] = []
+    entries: List[dict] = []
 
     if not os.path.isdir(source):
-        print(f"error: source directory does not exist: {source}", file=sys.stderr)
-        sys.exit(1)
+        raise BaselineCopyError(f"source directory does not exist: {source}")
 
     os.makedirs(destination, exist_ok=True)
 
     for dirpath, dirnames, _filenames in os.walk(source):
-        # Skip the report/, new/, change/ directories entirely.
         rel_dir = os.path.relpath(dirpath, source)
-        if rel_dir == "report" or rel_dir.startswith("report/") or \
-           rel_dir == "new" or rel_dir.startswith("new/") or \
-           rel_dir == "change" or rel_dir.startswith("change/"):
+        if (
+            rel_dir == "report"
+            or rel_dir.startswith("report/")
+            or rel_dir == "new"
+            or rel_dir.startswith("new/")
+            or rel_dir == "change"
+            or rel_dir.startswith("change/")
+        ):
             continue
 
-        # Check if this directory is a saved-baseline measurement.
         if os.path.basename(dirpath) != baseline_name:
             continue
 
         if not _is_measurement_dir(dirpath):
             continue
 
-        # Compute the relative path from source.
         rel = os.path.relpath(dirpath, source)
         dst = os.path.join(destination, rel)
 
-        # Sanity: destination must be under the destination root.
         dst_abs = os.path.abspath(dst)
         try:
             if os.path.commonpath([dst_abs, destination]) != destination:
-                print(f"error: destination escapes target: {rel}", file=sys.stderr)
-                sys.exit(1)
+                raise BaselineCopyError(f"destination escapes target: {rel}")
         except ValueError:
-            print(f"error: destination escapes target: {rel}", file=sys.stderr)
-            sys.exit(1)
+            raise BaselineCopyError(f"destination escapes target: {rel}")
 
         if os.path.exists(dst):
-            print(
-                f"error: destination already exists: {rel}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            raise BaselineCopyError(f"destination already exists: {rel}")
 
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copytree(dirpath, dst, symlinks=True)
-        copied.append(rel)
 
-        # Don't descend into the baseline directory (it's the leaf).
+        benchmark_path = os.path.dirname(rel)
+        entries.append({"benchmark_path": benchmark_path, "baseline_path": rel})
+
         dirnames.clear()
 
-    if not copied:
-        print(
-            f"error: no saved-baseline measurement directories found for "
-            f"baseline '{baseline_name}' in {source}",
-            file=sys.stderr,
+    if not entries:
+        raise BaselineCopyError(
+            f"no saved-baseline measurement directories found for "
+            f"baseline '{baseline_name}' in {source}"
         )
-        sys.exit(1)
 
-    return copied
+    return entries
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -115,27 +118,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Copy Criterion saved-baseline measurements only."
     )
-    parser.add_argument(
-        "--source",
-        required=True,
-        help="Baseline Criterion directory (e.g. <base-target>/criterion)",
-    )
-    parser.add_argument(
-        "--destination",
-        required=True,
-        help="Current Criterion directory (e.g. <current-target>/criterion)",
-    )
-    parser.add_argument(
-        "--baseline",
-        required=True,
-        help="Saved-baseline name (e.g. 'main')",
-    )
+    parser.add_argument("--source", required=True, help="Baseline Criterion directory")
+    parser.add_argument("--destination", required=True, help="Current Criterion directory")
+    parser.add_argument("--baseline", required=True, help="Saved-baseline name")
+    parser.add_argument("--inventory", default=None, help="Optional JSONL inventory output")
     args = parser.parse_args()
 
-    copied = copy_baseline(args.source, args.destination, args.baseline)
-    print(f"copied {len(copied)} saved-baseline measurement directories:")
-    for path in copied:
-        print(f"  {path}")
+    try:
+        entries = copy_baseline(args.source, args.destination, args.baseline)
+    except BaselineCopyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"copied {len(entries)} saved-baseline measurement directories:")
+    for entry in entries:
+        print(f"  {entry['baseline_path']}")
+
+    if args.inventory:
+        with open(args.inventory, "w", encoding="utf-8") as fh:
+            for entry in entries:
+                json.dump(entry, fh, sort_keys=True)
+                fh.write("\n")
 
 
 if __name__ == "__main__":
