@@ -266,12 +266,12 @@ def test_concurrent(tmp):
         _pass("no nested staging directory")
 
 
-# ── Test 2: TERM signal releases lock ────────────────────────────────────────
+# ── Test 2: Signal releases lock ─────────────────────────────────────────────
 
-def test_term(tmp):
+def test_signal_releases_lock(tmp, sig, label):
     print()
-    print("=== Test 2: TERM signal releases lock ===")
-    test_dir = os.path.join(tmp, "test2")
+    print(f"=== Test 2: {label} signal releases lock ===")
+    test_dir = os.path.join(tmp, f"test2-{label}")
     repo = os.path.join(test_dir, "repo")
     create_test_repo(repo)
 
@@ -284,21 +284,21 @@ def test_term(tmp):
     p = run_bench_compare_bg(repo, stub_dir, block_file, f_out, f_err)
 
     if not wait_for_block(block_file):
-        _fail("TERM test: process did not start cargo")
+        _fail(f"{label} test: process did not start cargo")
         p.kill()
         p.wait()
         f_out.close()
         f_err.close()
         return
-    _pass("TERM test: process started and is blocking")
+    _pass(f"{label} test: process started and is blocking")
 
-    # Send SIGTERM to process group
+    # Send signal to process group
     pgid = os.getpgid(p.pid)
-    os.killpg(pgid, signal.SIGTERM)
+    os.killpg(pgid, sig)
     try:
         p.wait(timeout=15)
     except subprocess.TimeoutExpired:
-        _fail("TERM test: process did not exit within 15s")
+        _fail(f"{label} test: process did not exit within 15s")
         os.killpg(pgid, signal.SIGKILL)
         p.wait()
 
@@ -308,9 +308,14 @@ def test_term(tmp):
 
     lock = os.path.join(repo, "target/bench-compare/.bench-compare-lock")
     if os.path.exists(lock):
-        _fail(f"lock released on TERM: path '{lock}' unexpectedly exists")
+        _fail(f"lock released on {label}: path '{lock}' unexpectedly exists")
     else:
-        _pass("lock released on TERM")
+        _pass(f"lock released on {label}")
+
+
+def test_signals(tmp):
+    test_signal_releases_lock(tmp, signal.SIGTERM, "TERM")
+    test_signal_releases_lock(tmp, signal.SIGINT, "INT")
 
 
 # ── Test 3: Pre-existing lock ────────────────────────────────────────────────
@@ -374,7 +379,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="bench-compare-test-")
     try:
         test_concurrent(tmp)
-        test_term(tmp)
+        test_signals(tmp)
         test_existing_lock(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

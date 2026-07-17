@@ -206,12 +206,6 @@ acquire_report_lock() {
     hostname > "$REPORT_LOCK/hostname" 2>/dev/null || true
 }
 
-release_report_lock() {
-    if [ "${REPORT_LOCK_HELD:-0}" = "1" ]; then
-        rm -rf "$REPORT_LOCK"
-        REPORT_LOCK_HELD=0
-    fi
-}
 
 # ── Acquire benchmark lock ───────────────────────────────────────────────────
 
