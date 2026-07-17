@@ -161,6 +161,10 @@ pub mod bench_internals {
         let mut reader = Reader::new(html);
         while parser.next(&mut reader) {}
 
+        if let Some(err) = parser.take_parse_error() {
+            return Err(err);
+        }
+
         let max_live_cursors = parser.selectors.max_live_cursors();
         Ok((parser.finish(), max_live_cursors))
     }
@@ -172,12 +176,17 @@ pub enum ParseError {
     /// The query slice passed to [`parse`] is empty.
     /// At least one query is required.
     EmptyQueries,
+    /// The open-element stack exceeded [`engine::MAX_ELEMENT_DEPTH`].
+    MaximumDepthExceeded,
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ParseError::EmptyQueries => write!(f, "parse requires at least one query"),
+            ParseError::MaximumDepthExceeded => {
+                write!(f, "HTML nesting depth exceeds the maximum supported depth")
+            }
         }
     }
 }
@@ -193,7 +202,8 @@ impl std::error::Error for ParseError {}
 /// # Errors
 ///
 /// Returns [`ParseError::EmptyQueries`] if the query slice is empty.
-/// At least one query is required.
+/// At least one query is required. Returns [`ParseError::MaximumDepthExceeded`]
+/// if open-element nesting exceeds [`engine::MAX_ELEMENT_DEPTH`].
 ///
 /// # Parameters
 ///
@@ -241,6 +251,10 @@ where
     let mut reader = Reader::new(html);
     parser.trace_parse_started(html.len(), queries.len());
     while parser.next(&mut reader) {}
+
+    if let Some(err) = parser.take_parse_error() {
+        return Err(err);
+    }
 
     Ok(parser.finish())
 }

@@ -1,4 +1,5 @@
-use crate::engine::DepthSize;
+use crate::ParseError;
+use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
 use crate::store::ElementId;
 
@@ -32,24 +33,34 @@ impl<'html> Default for OpenElementStack<'html> {
 
 impl<'html> OpenElementStack<'html> {
     pub fn depth(&self) -> DepthSize {
-        self.entries.len().try_into().unwrap_or(DepthSize::MAX)
+        self.entries.len().try_into().unwrap_or(MAX_ELEMENT_DEPTH)
     }
 
-    pub fn push_classified(&mut self, name: &'html str, tag: TagFlags) {
-        debug_assert!(
-            self.entries.len() < DepthSize::MAX as usize,
-            "open-element depth must stay below DepthSize::MAX (sentinel/NO_UNWIND)"
-        );
+    /// Whether pushing another open element would exceed [`MAX_ELEMENT_DEPTH`].
+    #[inline]
+    pub(crate) const fn would_exceed_max_depth(len: usize) -> bool {
+        len >= MAX_ELEMENT_DEPTH as usize
+    }
+
+    pub fn push_classified(
+        &mut self,
+        name: &'html str,
+        tag: TagFlags,
+    ) -> Result<(), ParseError> {
+        if Self::would_exceed_max_depth(self.entries.len()) {
+            return Err(ParseError::MaximumDepthExceeded);
+        }
         self.entries.push(OpenElement {
             name,
             tag,
             saved: Vec::new(),
         });
+        Ok(())
     }
 
     #[cfg(test)]
-    pub fn push(&mut self, name: &'html str) {
-        self.push_classified(name, TagFlags::classify(name));
+    pub fn push(&mut self, name: &'html str) -> Result<(), ParseError> {
+        self.push_classified(name, TagFlags::classify(name))
     }
 
     pub fn attach_saved(
@@ -186,12 +197,23 @@ impl<'html> OpenElementStack<'html> {
 #[cfg(test)]
 mod tests {
     use super::OpenElementStack;
+    use crate::engine::MAX_ELEMENT_DEPTH;
+
+    #[test]
+    fn would_exceed_max_depth_at_boundary() {
+        assert!(!OpenElementStack::would_exceed_max_depth(
+            MAX_ELEMENT_DEPTH as usize - 1
+        ));
+        assert!(OpenElementStack::would_exceed_max_depth(
+            MAX_ELEMENT_DEPTH as usize
+        ));
+    }
 
     #[test]
     fn test_misnested_close_bubbles_to_match() {
         let mut stack = OpenElementStack::default();
-        stack.push("div");
-        stack.push("span");
+        stack.push("div").unwrap();
+        stack.push("span").unwrap();
 
         let popped = stack.close_by_end_tag("div");
         assert_eq!(popped.len(), 2);
@@ -202,7 +224,7 @@ mod tests {
     #[test]
     fn test_stray_close_is_ignored() {
         let mut stack = OpenElementStack::default();
-        stack.push("div");
+        stack.push("div").unwrap();
 
         let popped = stack.close_by_end_tag("span");
         assert!(popped.is_empty());
@@ -212,8 +234,8 @@ mod tests {
     #[test]
     fn test_opening_li_closes_previous_li() {
         let mut stack = OpenElementStack::default();
-        stack.push("ul");
-        stack.push("li");
+        stack.push("ul").unwrap();
+        stack.push("li").unwrap();
 
         let popped = stack.prepare_for_open("li");
         assert_eq!(popped.len(), 1);
@@ -223,8 +245,8 @@ mod tests {
     #[test]
     fn test_opening_option_closes_previous_option() {
         let mut stack = OpenElementStack::default();
-        stack.push("select");
-        stack.push("option");
+        stack.push("select").unwrap();
+        stack.push("option").unwrap();
 
         let popped = stack.prepare_for_open("option");
         assert_eq!(popped.len(), 1);
@@ -234,9 +256,9 @@ mod tests {
     #[test]
     fn test_opening_optgroup_closes_option_then_optgroup() {
         let mut stack = OpenElementStack::default();
-        stack.push("select");
-        stack.push("optgroup");
-        stack.push("option");
+        stack.push("select").unwrap();
+        stack.push("optgroup").unwrap();
+        stack.push("option").unwrap();
 
         let popped = stack.prepare_for_open("optgroup");
         assert_eq!(popped.len(), 2);
@@ -247,9 +269,9 @@ mod tests {
     #[test]
     fn test_opening_td_closes_previous_cell() {
         let mut stack = OpenElementStack::default();
-        stack.push("table");
-        stack.push("tr");
-        stack.push("td");
+        stack.push("table").unwrap();
+        stack.push("tr").unwrap();
+        stack.push("td").unwrap();
 
         let popped = stack.prepare_for_open("td");
         assert_eq!(popped.len(), 1);
@@ -259,8 +281,8 @@ mod tests {
     #[test]
     fn test_opening_button_closes_previous_button() {
         let mut stack = OpenElementStack::default();
-        stack.push("div");
-        stack.push("button");
+        stack.push("div").unwrap();
+        stack.push("button").unwrap();
 
         let popped = stack.prepare_for_open("button");
         assert_eq!(popped.len(), 1);
@@ -271,8 +293,8 @@ mod tests {
     #[test]
     fn test_select_scope_ignores_non_select_end_tags() {
         let mut stack = OpenElementStack::default();
-        stack.push("select");
-        stack.push("option");
+        stack.push("select").unwrap();
+        stack.push("option").unwrap();
 
         let popped = stack.close_by_end_tag("div");
         assert!(popped.is_empty());

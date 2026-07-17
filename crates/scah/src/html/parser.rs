@@ -4,6 +4,8 @@ use super::tag::TagFlags;
 use crate::QuerySpec;
 use crate::Reader;
 use crate::XHtmlElement;
+use crate::ParseError;
+use crate::engine::MAX_ELEMENT_DEPTH;
 use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
@@ -27,6 +29,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     capture_text_content: bool,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
+    parse_error: Option<ParseError>,
 }
 
 /// A raw-text end tag is only "appropriate" when the tag name is immediately
@@ -60,6 +63,7 @@ where
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
+            parse_error: None,
             store: Store::default(),
         }
     }
@@ -80,6 +84,7 @@ where
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
+            parse_error: None,
             store: Store::with_capacity_options(
                 capacity,
                 crate::CapacityOptions {
@@ -91,6 +96,9 @@ where
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
+        if self.parse_error.is_some() {
+            return false;
+        }
         if let Some(close_tag) = self.raw_text_close {
             loop {
                 reader.next_until(b'<');
@@ -205,13 +213,18 @@ where
                 self.position.self_closing = is_self_closing;
                 if is_self_closing {
                     let depth = self.open_elements.depth().saturating_add(1);
-                    debug_assert!(
-                        depth < crate::engine::DepthSize::MAX,
-                        "void element depth must stay below DepthSize::MAX (NO_UNWIND)"
-                    );
+                    if depth > MAX_ELEMENT_DEPTH {
+                        self.record_parse_error(ParseError::MaximumDepthExceeded);
+                        return false;
+                    }
                     self.position.element_depth = depth;
+                } else if let Err(err) =
+                    self.open_elements
+                        .push_classified(self.element.name, tag)
+                {
+                    self.record_parse_error(err);
+                    return false;
                 } else {
-                    self.open_elements.push_classified(self.element.name, tag);
                     self.position.element_depth = self.open_elements.depth();
                 }
 
@@ -278,6 +291,16 @@ where
                 query_count,
             }
         );
+    }
+
+    pub fn take_parse_error(&mut self) -> Option<ParseError> {
+        self.parse_error.take()
+    }
+
+    fn record_parse_error(&mut self, err: ParseError) {
+        if self.parse_error.is_none() {
+            self.parse_error = Some(err);
+        }
     }
 
     pub fn finish(

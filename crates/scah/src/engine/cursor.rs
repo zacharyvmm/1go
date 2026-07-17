@@ -9,12 +9,9 @@ use crate::store::ElementId;
 /// depth-scoped cursor pruning.
 pub const SENTINEL_SCOPE: super::DepthSize = super::DepthSize::MAX;
 
-/// Sentinel for moving cursors with no pending close callback. Real element
-/// depths never reach [`DepthSize::MAX`], same invariant as [`SENTINEL_SCOPE`].
-const NO_UNWIND: super::DepthSize = super::DepthSize::MAX;
-
 const FLAG_BLOCKED: u8 = 1 << 0;
 const FLAG_COMPLETE: u8 = 1 << 1;
+const FLAG_HAS_UNWIND: u8 = 1 << 2;
 
 #[inline]
 const fn flags_is_active(flags: u8) -> bool {
@@ -29,6 +26,11 @@ const fn flags_is_blocked(flags: u8) -> bool {
 #[inline]
 const fn flags_is_complete(flags: u8) -> bool {
     flags & FLAG_COMPLETE != 0
+}
+
+#[inline]
+const fn flags_has_unwind(flags: u8) -> bool {
+    flags & FLAG_HAS_UNWIND != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,8 +52,12 @@ impl CursorActivity {
 }
 
 #[inline]
-const fn optional_unwind_depth(raw: super::DepthSize) -> Option<super::DepthSize> {
-    if raw == NO_UNWIND { None } else { Some(raw) }
+const fn optional_unwind_depth(flags: u8, raw: super::DepthSize) -> Option<super::DepthSize> {
+    if flags_has_unwind(flags) {
+        Some(raw)
+    } else {
+        None
+    }
 }
 
 /// The operational mode of a [`ScopedCursor`].
@@ -63,10 +69,10 @@ pub enum CursorMode {
     Moving {
         /// The Dᵢ value used to evaluate the current transition.
         match_base_depth: super::DepthSize,
-        /// The matched element whose close should update this cursor.
-        /// [`NO_UNWIND`] when no close callback is pending.
+        /// Depth whose close should update this cursor when [`FLAG_HAS_UNWIND`] is set.
         unwind_depth: super::DepthSize,
-        /// Activity and mode flags; see [`FLAG_BLOCKED`] and [`FLAG_COMPLETE`].
+        /// Activity, unwind-presence, and mode flags; see [`FLAG_BLOCKED`],
+        /// [`FLAG_COMPLETE`], and [`FLAG_HAS_UNWIND`].
         flags: u8,
     },
     Anchored {
@@ -105,7 +111,7 @@ impl ScopedCursor {
             position,
             mode: CursorMode::Moving {
                 match_base_depth,
-                unwind_depth: NO_UNWIND,
+                unwind_depth: 0,
                 flags: CursorActivity::Active.to_flags(),
             },
         }
@@ -124,7 +130,7 @@ impl ScopedCursor {
             position,
             mode: CursorMode::Moving {
                 match_base_depth,
-                unwind_depth: NO_UNWIND,
+                unwind_depth: 0,
                 flags: CursorActivity::Active.to_flags(),
             },
         }
@@ -137,7 +143,7 @@ impl ScopedCursor {
             position,
             mode: CursorMode::Moving {
                 match_base_depth: 0,
-                unwind_depth: NO_UNWIND,
+                unwind_depth: 0,
                 flags: CursorActivity::Active.to_flags(),
             },
         }
@@ -182,7 +188,11 @@ impl ScopedCursor {
     /// Depth whose close should reactivate this cursor, if any.
     pub fn unwind_depth(&self) -> Option<super::DepthSize> {
         match &self.mode {
-            CursorMode::Moving { unwind_depth, .. } => optional_unwind_depth(*unwind_depth),
+            CursorMode::Moving {
+                flags,
+                unwind_depth,
+                ..
+            } => optional_unwind_depth(*flags, *unwind_depth),
             CursorMode::Anchored { .. } => None,
         }
     }
@@ -193,6 +203,7 @@ impl ScopedCursor {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn set_activity_flags(&mut self, flags: u8) {
         match &mut self.mode {
             CursorMode::Moving { flags: f, .. } | CursorMode::Anchored { flags: f } => *f = flags,
@@ -203,18 +214,18 @@ impl ScopedCursor {
     fn debug_assert_moving_invariants(&self) {
         if let CursorMode::Moving {
             flags,
-            unwind_depth,
+            unwind_depth: _,
             ..
         } = &self.mode
         {
             if flags_is_blocked(*flags) {
                 debug_assert!(
-                    *unwind_depth != NO_UNWIND,
+                    flags_has_unwind(*flags),
                     "blocked moving cursor must have pending unwind depth"
                 );
             } else if flags_is_active(*flags) {
                 debug_assert!(
-                    *unwind_depth == NO_UNWIND,
+                    !flags_has_unwind(*flags),
                     "active moving cursor must not have pending unwind depth"
                 );
             }
@@ -250,7 +261,7 @@ impl ScopedCursor {
             position: next_position,
             mode: CursorMode::Moving {
                 match_base_depth: at_depth,
-                unwind_depth: NO_UNWIND,
+                unwind_depth: 0,
                 flags: CursorActivity::Active.to_flags(),
             },
         }
@@ -270,8 +281,8 @@ impl ScopedCursor {
     /// Pause matching until the element at `depth` closes.
     pub fn block_until_close(&mut self, depth: super::DepthSize) {
         debug_assert!(
-            depth != NO_UNWIND,
-            "element depth must not use the NO_UNWIND sentinel"
+            depth <= super::MAX_ELEMENT_DEPTH,
+            "element depth must not exceed MAX_ELEMENT_DEPTH"
         );
         debug_assert!(
             !self.is_complete(),
@@ -283,8 +294,8 @@ impl ScopedCursor {
             ..
         } = &mut self.mode
         {
-            *flags = CursorActivity::Blocked.to_flags();
             *unwind_depth = depth;
+            *flags = CursorActivity::Blocked.to_flags() | FLAG_HAS_UNWIND;
             self.debug_assert_moving_invariants();
         }
     }
@@ -303,7 +314,7 @@ impl ScopedCursor {
         } = &mut self.mode
         {
             *flags = CursorActivity::Active.to_flags();
-            *unwind_depth = NO_UNWIND;
+            *unwind_depth = 0;
             self.debug_assert_moving_invariants();
         }
     }
@@ -318,7 +329,7 @@ impl ScopedCursor {
         } = &mut self.mode
         {
             *flags = CursorActivity::Complete.to_flags();
-            *unwind_depth = NO_UNWIND;
+            *unwind_depth = 0;
             self.debug_assert_moving_invariants();
         }
     }
@@ -327,8 +338,8 @@ impl ScopedCursor {
     /// to close.
     pub fn complete_until_close(&mut self, depth: super::DepthSize) {
         debug_assert!(
-            depth != NO_UNWIND,
-            "element depth must not use the NO_UNWIND sentinel"
+            depth <= super::MAX_ELEMENT_DEPTH,
+            "element depth must not exceed MAX_ELEMENT_DEPTH"
         );
         debug_assert!(self.is_active(), "complete_until_close requires active cursor");
         if let CursorMode::Moving {
@@ -337,8 +348,8 @@ impl ScopedCursor {
             ..
         } = &mut self.mode
         {
-            *flags = CursorActivity::Complete.to_flags();
             *unwind_depth = depth;
+            *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND;
             self.debug_assert_moving_invariants();
         }
     }
@@ -352,9 +363,11 @@ impl ScopedCursor {
                 unwind_depth,
                 ..
             } => {
-                *flags = CursorActivity::Complete.to_flags();
-                if !keep_unwind {
-                    *unwind_depth = NO_UNWIND;
+                if keep_unwind {
+                    *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND;
+                } else {
+                    *flags = CursorActivity::Complete.to_flags();
+                    *unwind_depth = 0;
                 }
                 self.debug_assert_moving_invariants();
             }
@@ -566,8 +579,14 @@ mod tests {
     #[should_panic(expected = "active moving cursor must not have pending unwind depth")]
     fn active_with_pending_unwind_panics_in_debug() {
         let mut cursor = moving_cursor();
-        if let CursorMode::Moving { unwind_depth, .. } = &mut cursor.mode {
+        if let CursorMode::Moving {
+            unwind_depth,
+            flags,
+            ..
+        } = &mut cursor.mode
+        {
             *unwind_depth = 4;
+            *flags |= super::FLAG_HAS_UNWIND;
         }
         cursor.debug_assert_moving_invariants();
     }
@@ -783,8 +802,7 @@ mod tests {
 
     #[test]
     fn scoped_cursor_size_is_stable() {
-        // Moving { match_base_depth: u16, unwind_depth: u16, flags: u8 } uses
-        // NO_UNWIND sentinel instead of Option<u16> niche encoding.
+        // FLAG_HAS_UNWIND tracks pending unwind depth instead of a sentinel value.
         let cursor_size = std::mem::size_of::<ScopedCursor>();
         let mode_size = std::mem::size_of::<CursorMode>();
         let position_size = std::mem::size_of::<Position>();
