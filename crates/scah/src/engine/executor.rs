@@ -255,49 +255,29 @@ where
         }
     }
 
-    /// For descendant steps, live cursors at the same `(parent, position)` form
-    /// an antichain on `match_base_depth`: shallower bases dominate deeper ones,
-    /// so at most one non-`end` cursor survives per obligation key.
-    fn existing_dominates(existing: &ScopedCursor, candidate: &ScopedCursor, query: &Q) -> bool {
-        if existing.end() {
-            return false;
-        }
-        if existing.parent != candidate.parent || existing.position != candidate.position {
-            return false;
-        }
-
-        let existing_base = existing.match_base_depth();
-        let candidate_base = candidate.match_base_depth();
-
-        match &query.get_transition(candidate.position.state).guard {
-            Combinator::Descendant => {
-                if existing_base <= candidate_base {
-                    true
-                } else {
-                    debug_assert!(false, "shallower descendant candidate while deeper exists");
-                    false
-                }
+    #[cfg(any(debug_assertions, test))]
+    fn trace_cursor_suppressed(
+        store: &mut Store<'html, 'query>,
+        runner_index: usize,
+        candidate: &ScopedCursor,
+        existing: &ScopedCursor,
+        reason: CursorSuppressionReason,
+    ) {
+        crate::scah_trace!(
+            store,
+            TraceEvent::CursorSuppressed {
+                runner_index,
+                parent: candidate.parent,
+                selection: candidate.position.selection,
+                state: candidate.position.state,
+                candidate_base_depth: candidate.match_base_depth(),
+                dominating_base_depth: existing.match_base_depth(),
+                reason,
             }
-            Combinator::Child => existing_base == candidate_base,
-            // Future sibling admission will key on more than depth:
-            // - Adjacent (+): exact key including sibling stream + SiblingsRemaining(1)
-            // - Subsequent (~): one Scope watcher per sibling stream + position + output parent
-            // - Nth countdown: sibling stream + remaining/formula state
-            // Depth-only equivalence is insufficient, so never dominate here yet.
-            Combinator::NextSibling | Combinator::SubsequentSibling => {
-                debug_assert!(
-                    false,
-                    "sibling cursor admission requires sibling-stream identity"
-                );
-                false
-            }
-            Combinator::Namespace => false,
-        }
+        );
     }
 
-    /// Push `candidate` unless an existing live cursor already dominates it
-    /// (same parent+position, antichain on match_base_depth for descendants).
-    fn try_push_cursor(
+    fn finish_push_cursor(
         &mut self,
         candidate: ScopedCursor,
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
@@ -307,37 +287,6 @@ where
         >,
         create_reason: Option<ScopedCursorReason>,
     ) -> SpawnOutcome {
-        for existing in self.cursors.iter().rev() {
-            if Self::existing_dominates(existing, &candidate, self.query) {
-                #[cfg(any(debug_assertions, test))]
-                {
-                    let reason = match &self.query.get_transition(candidate.position.state).guard {
-                        Combinator::Descendant => {
-                            if existing.match_base_depth() == candidate.match_base_depth() {
-                                CursorSuppressionReason::ExactDuplicate
-                            } else {
-                                CursorSuppressionReason::DescendantDominated
-                            }
-                        }
-                        _ => CursorSuppressionReason::ExactDuplicate,
-                    };
-                    crate::scah_trace!(
-                        store,
-                        TraceEvent::CursorSuppressed {
-                            runner_index,
-                            parent: candidate.parent,
-                            selection: candidate.position.selection,
-                            state: candidate.position.state,
-                            candidate_base_depth: candidate.match_base_depth(),
-                            dominating_base_depth: existing.match_base_depth(),
-                            reason,
-                        }
-                    );
-                }
-                return SpawnOutcome::Dominated;
-            }
-        }
-
         #[cfg(any(debug_assertions, test))]
         if let Some(reason) = create_reason {
             crate::scah_trace!(
@@ -377,6 +326,123 @@ where
 
         self.cursors.push(candidate);
         SpawnOutcome::Inserted
+    }
+
+    /// For descendant steps, live cursors at the same `(parent, position)` form
+    /// an antichain on `match_base_depth`: shallower bases dominate deeper ones,
+    /// so at most one non-`end` cursor survives per obligation key.
+    fn try_push_descendant(
+        &mut self,
+        candidate: ScopedCursor,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
+            'html,
+            'query,
+        >,
+        create_reason: Option<ScopedCursorReason>,
+    ) -> SpawnOutcome {
+        let candidate_base = candidate.match_base_depth();
+        for existing in self.cursors.iter().rev() {
+            if existing.end() {
+                continue;
+            }
+            if existing.parent != candidate.parent || existing.position != candidate.position {
+                continue;
+            }
+            let existing_base = existing.match_base_depth();
+            if existing_base <= candidate_base {
+                #[cfg(any(debug_assertions, test))]
+                {
+                    let reason = if existing_base == candidate_base {
+                        CursorSuppressionReason::ExactDuplicate
+                    } else {
+                        CursorSuppressionReason::DescendantDominated
+                    };
+                    Self::trace_cursor_suppressed(
+                        store,
+                        runner_index,
+                        &candidate,
+                        existing,
+                        reason,
+                    );
+                }
+                return SpawnOutcome::Dominated;
+            }
+            debug_assert!(false, "shallower descendant candidate while deeper exists");
+        }
+        self.finish_push_cursor(candidate, runner_index, store, create_reason)
+    }
+
+    /// Child obligations key on exact `(parent, position, match_base_depth)`.
+    /// Anchored and moving sources can still collide on that key, so keep the
+    /// exact-equality scan in release builds.
+    fn try_push_child(
+        &mut self,
+        candidate: ScopedCursor,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
+            'html,
+            'query,
+        >,
+        create_reason: Option<ScopedCursorReason>,
+    ) -> SpawnOutcome {
+        let candidate_base = candidate.match_base_depth();
+        for existing in self.cursors.iter().rev() {
+            if existing.end() {
+                continue;
+            }
+            if existing.parent != candidate.parent || existing.position != candidate.position {
+                continue;
+            }
+            if existing.match_base_depth() == candidate_base {
+                #[cfg(any(debug_assertions, test))]
+                Self::trace_cursor_suppressed(
+                    store,
+                    runner_index,
+                    &candidate,
+                    existing,
+                    CursorSuppressionReason::ExactDuplicate,
+                );
+                return SpawnOutcome::Dominated;
+            }
+        }
+        self.finish_push_cursor(candidate, runner_index, store, create_reason)
+    }
+
+    /// Push `candidate` unless an existing live cursor already dominates it
+    /// (same parent+position, antichain on match_base_depth for descendants).
+    fn try_push_cursor(
+        &mut self,
+        candidate: ScopedCursor,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
+            'html,
+            'query,
+        >,
+        create_reason: Option<ScopedCursorReason>,
+    ) -> SpawnOutcome {
+        let guard = &self.query.get_transition(candidate.position.state).guard;
+        match guard {
+            Combinator::Descendant => {
+                self.try_push_descendant(candidate, runner_index, store, create_reason)
+            }
+            Combinator::Child => self.try_push_child(candidate, runner_index, store, create_reason),
+            // Future sibling admission will key on more than depth:
+            // - Adjacent (+): exact key including sibling stream + SiblingsRemaining(1)
+            // - Subsequent (~): one Scope watcher per sibling stream + position + output parent
+            // - Nth countdown: sibling stream + remaining/formula state
+            // Depth-only equivalence is insufficient, so never dominate here yet.
+            Combinator::NextSibling | Combinator::SubsequentSibling => {
+                debug_assert!(
+                    false,
+                    "sibling cursor admission requires sibling-stream identity"
+                );
+                self.finish_push_cursor(candidate, runner_index, store, create_reason)
+            }
+            Combinator::Namespace => {
+                self.finish_push_cursor(candidate, runner_index, store, create_reason)
+            }
+        }
     }
 
     pub fn next(
