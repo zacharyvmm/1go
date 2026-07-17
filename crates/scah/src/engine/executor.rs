@@ -89,7 +89,11 @@ where
         });
     }
 
-    fn is_then_child_section(&self, section: QuerySectionId, first_section: QuerySectionId) -> bool {
+    fn is_then_child_section(
+        &self,
+        section: QuerySectionId,
+        first_section: QuerySectionId,
+    ) -> bool {
         let mut current = section;
         loop {
             let parent = self.query.get_selection(current).parent;
@@ -366,8 +370,7 @@ where
             let section_kind = self.query.get_section_selection_kind(position.selection);
             let is_first = matches!(section_kind, SelectionKind::First);
             let self_closing = document_position.self_closing;
-            let terminal_first =
-                is_save_point && matches!(section_kind, SelectionKind::First);
+            let terminal_first = is_save_point && matches!(section_kind, SelectionKind::First);
             let terminal_all = is_save_point
                 && matches!(section_kind, SelectionKind::All)
                 && position.next_child(self.query).is_none();
@@ -545,11 +548,7 @@ where
                         save_hits.push(hit);
                         if is_first {
                             self.cursors[i].mark_complete();
-                            self.note_first_terminal_match(
-                                depth,
-                                element_id,
-                                position.selection,
-                            );
+                            self.note_first_terminal_match(depth, element_id, position.selection);
                         }
                         base.parent
                     } else {
@@ -623,10 +622,7 @@ where
                             );
                         }
                     } else {
-                        debug_assert!(
-                            false,
-                            "active cursor should not have pending unwind"
-                        );
+                        debug_assert!(false, "active cursor should not have pending unwind");
                     }
                     significant_close = true;
                 }
@@ -1955,9 +1951,7 @@ mod tests {
             <div><p id="hit">match</p></div>
         "#;
 
-        let queries = &[Query::first("div > p", Save::all())
-            .unwrap()
-            .build()];
+        let queries = &[Query::first("div > p", Save::all()).unwrap().build()];
 
         let store = parse(html, queries);
 
@@ -1973,9 +1967,7 @@ mod tests {
             <div><section><p id="hit">match</p></section></div>
         "#;
 
-        let queries = &[Query::first("div p", Save::all())
-            .unwrap()
-            .build()];
+        let queries = &[Query::first("div p", Save::all()).unwrap().build()];
 
         let store = parse(html, queries);
 
@@ -2021,10 +2013,7 @@ mod tests {
 
         let articles: Vec<_> = store.get("article").unwrap().collect();
         assert_eq!(articles.len(), 1);
-        let hits: Vec<_> = articles[0]
-            .get(&store, "div > p")
-            .unwrap()
-            .collect();
+        let hits: Vec<_> = articles[0].get(&store, "div > p").unwrap().collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, Some("hit"));
     }
@@ -2233,7 +2222,10 @@ mod tests {
             &mut save_hits,
         );
         assert!(
-            selection.cursors.iter().any(|c| c.is_blocked() && c.unwind_depth() == Some(1)),
+            selection
+                .cursors
+                .iter()
+                .any(|c| c.is_blocked() && c.unwind_depth() == Some(1)),
             "intermediate br prefix must block until synthetic close"
         );
         assert!(
@@ -2265,9 +2257,7 @@ mod tests {
     #[test]
     fn first_compound_void_then_early_exit_at_synthetic_close() {
         let filler = "<span>filler</span>".repeat(100);
-        let html = format!(
-            "<div><br>{filler}</div><div>tail</div>"
-        );
+        let html = format!("<div><br>{filler}</div><div>tail</div>");
         let html_len = html.len();
 
         let query = Query::first("div br", Save::all())
@@ -2287,13 +2277,9 @@ mod tests {
         let store = parser.matches();
         let brs: Vec<_> = store.get("div br").unwrap().collect();
         assert_eq!(brs.len(), 1);
-        let span_count = brs[0]
-            .get(&store, "span")
-            .map(|it| it.count())
-            .unwrap_or(0);
+        let span_count = brs[0].get(&store, "span").map(|it| it.count()).unwrap_or(0);
         assert_eq!(
-            span_count,
-            0,
+            span_count, 0,
             "void br cannot contain span descendants; sibling filler must not attach"
         );
     }
@@ -2301,9 +2287,7 @@ mod tests {
     #[test]
     fn first_compound_then_early_exit_after_selected_close() {
         let filler = "<div>filler</div>".repeat(100);
-        let html = format!(
-            "<article><p>hit<span>inner</span></p>tail</article>{filler}"
-        );
+        let html = format!("<article><p>hit<span>inner</span></p>tail</article>{filler}");
         let html_len = html.len();
 
         let query = Query::first("article p", Save::all())

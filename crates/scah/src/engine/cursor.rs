@@ -341,7 +341,10 @@ impl ScopedCursor {
             depth <= super::MAX_ELEMENT_DEPTH,
             "element depth must not exceed MAX_ELEMENT_DEPTH"
         );
-        debug_assert!(self.is_active(), "complete_until_close requires active cursor");
+        debug_assert!(
+            self.is_active(),
+            "complete_until_close requires active cursor"
+        );
         if let CursorMode::Moving {
             flags,
             unwind_depth,
@@ -810,7 +813,10 @@ mod tests {
             cursor_size <= 32,
             "ScopedCursor={cursor_size} CursorMode={mode_size} Position={position_size} exceeds 32-byte budget"
         );
-        assert_eq!(cursor_size, 32, "ScopedCursor should remain exactly 32 bytes");
+        assert_eq!(
+            cursor_size, 32,
+            "ScopedCursor should remain exactly 32 bytes"
+        );
         assert_eq!(mode_size, 6, "CursorMode should remain exactly 6 bytes");
         assert!(position_size > 0);
     }

@@ -1,14 +1,14 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
+use crate::ParseError;
 use crate::QuerySpec;
 use crate::Reader;
 use crate::XHtmlElement;
-use crate::ParseError;
-use crate::engine::MAX_ELEMENT_DEPTH;
 use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
+use crate::engine::MAX_ELEMENT_DEPTH;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
 use crate::store::Store;
 
@@ -218,9 +218,7 @@ where
                         return false;
                     }
                     self.position.element_depth = depth;
-                } else if let Err(err) =
-                    self.open_elements
-                        .push_classified(self.element.name, tag)
+                } else if let Err(err) = self.open_elements.push_classified(self.element.name, tag)
                 {
                     self.record_parse_error(err);
                     return false;

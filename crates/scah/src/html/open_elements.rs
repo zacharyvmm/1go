@@ -42,11 +42,7 @@ impl<'html> OpenElementStack<'html> {
         len >= MAX_ELEMENT_DEPTH as usize
     }
 
-    pub fn push_classified(
-        &mut self,
-        name: &'html str,
-        tag: TagFlags,
-    ) -> Result<(), ParseError> {
+    pub fn push_classified(&mut self, name: &'html str, tag: TagFlags) -> Result<(), ParseError> {
         if Self::would_exceed_max_depth(self.entries.len()) {
             return Err(ParseError::MaximumDepthExceeded);
         }
