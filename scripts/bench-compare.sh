@@ -376,6 +376,26 @@ create_current_snapshot() {
             exit 1
         fi
     fi
+
+    RECONSTRUCTED_UNTRACKED_MANIFEST="$TEMP_ROOT/untracked-reconstructed-manifest.jsonl"
+    if ! python3 "$SCRIPT_DIR/capture-untracked.py" inspect \
+        --root "$CURRENT_WORKTREE" \
+        --paths "$UNTRACKED_LIST" \
+        --manifest "$RECONSTRUCTED_UNTRACKED_MANIFEST"; then
+        echo "error: failed to inspect reconstructed untracked entries" >&2
+        exit 1
+    fi
+
+    if ! cmp -s \
+        "$UNTRACKED_CAPTURE_MANIFEST" \
+        "$RECONSTRUCTED_UNTRACKED_MANIFEST"; then
+        echo "error: reconstructed current worktree does not match accepted untracked capture" >&2
+        exit 1
+    fi
+
+    UNTRACKED_RECONSTRUCTION_VERIFIED=true
+    UNTRACKED_CAPTURE_MANIFEST_SHA256="$(sha256_hash "$UNTRACKED_CAPTURE_MANIFEST")"
+    UNTRACKED_RECONSTRUCTED_MANIFEST_SHA256="$(sha256_hash "$RECONSTRUCTED_UNTRACKED_MANIFEST")"
 }
 
 # ── Compute source fingerprint ──────────────────────────────────────────────
@@ -649,6 +669,9 @@ criterion_baseline_manifest_sha256_before=${BASELINE_MANIFEST_SHA256_BEFORE:-}
 criterion_baseline_manifest_sha256_after=${BASELINE_MANIFEST_SHA256_AFTER:-}
 criterion_baseline_measurement_manifests_match=${BASELINE_INTEGRITY_OK:-false}
 criterion_baseline_measurements_unchanged=${BASELINE_INTEGRITY_OK:-false}
+untracked_capture_reconstruction_verified=${UNTRACKED_RECONSTRUCTION_VERIFIED:-false}
+untracked_capture_manifest_sha256=${UNTRACKED_CAPTURE_MANIFEST_SHA256:-}
+untracked_reconstructed_manifest_sha256=${UNTRACKED_RECONSTRUCTED_MANIFEST_SHA256:-}
 date_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
 
@@ -879,6 +902,7 @@ main() {
     CURRENT_WORKTREE="$TEMP_ROOT/current"
     BASE_TARGET="$TEMP_ROOT/base-target"
     CURRENT_TARGET="$TEMP_ROOT/current-target"
+    UNTRACKED_RECONSTRUCTION_VERIFIED=false
 
     REPORT_ROOT="$ROOT/target/bench-compare"
     REPORT_DIR="$REPORT_ROOT/latest"
