@@ -299,6 +299,82 @@ def fingerprint(root: str, manifest_path: str) -> str:
     return write_manifest(entries, manifest_path)
 
 
+
+
+def validate_symlink_containment(root, entries):
+    """Validate every symlink stays inside root. Exit 1 on escape."""
+    root_abs = os.path.abspath(root)
+    max_hops = 40
+
+    for entry in entries:
+        if entry.entry_type != "symlink":
+            continue
+
+        resolved = _resolve_symlink_chain(
+            root_abs, entry.relative_path, entry.content_hash, max_hops
+        )
+        if resolved is None:
+            target = _read_link_target(os.path.join(root_abs, entry.relative_path))
+            print(f"escaping symlink: {entry.relative_path} -> {target}", file=sys.stderr)
+            sys.exit(1)
+
+
+def _resolve_symlink_chain(root_abs, rel_path, target_hash, max_hops):
+    """Resolve a symlink chain. Return normalized absolute path if contained, None if escaping."""
+    seen_inodes = set()
+    current_path = os.path.join(root_abs, rel_path)
+    hops = 0
+
+    while hops < max_hops:
+        hops += 1
+
+        if not os.path.islink(current_path):
+            # Not a symlink — check containment of this final path.
+            try:
+                if os.path.commonpath([os.path.abspath(current_path), root_abs]) != root_abs:
+                    return None
+            except ValueError:
+                return None
+            return os.path.abspath(current_path)
+
+        # Track symlink by inode to detect loops (not by realpath which resolves
+        # the entire chain, causing false positives when a symlink's target is
+        # also reachable through a different resolution step).
+        try:
+            st = os.lstat(current_path)
+            inode_key = (st.st_dev, st.st_ino)
+            if inode_key in seen_inodes:
+                print(f"symlink loop detected at: {rel_path}", file=sys.stderr)
+                sys.exit(1)
+            seen_inodes.add(inode_key)
+        except OSError:
+            pass
+
+        target = os.readlink(current_path)
+        if os.path.isabs(target):
+            return None  # Absolute symlinks always escape.
+
+        # Resolve relative target.
+        current_dir = os.path.dirname(current_path)
+        current_path = os.path.normpath(os.path.join(current_dir, target))
+
+        # Check containment after each hop.
+        try:
+            if os.path.commonpath([os.path.abspath(current_path), root_abs]) != root_abs:
+                return None
+        except ValueError:
+            return None
+
+    print(f"symlink chain too long at: {rel_path}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _read_link_target(path):
+    """Read symlink target, handling errors."""
+    try:
+        return os.readlink(path)
+    except OSError:
+        return "<unreadable>"
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
@@ -316,6 +392,11 @@ def main() -> None:
         required=True,
         help="Path for the binary manifest output",
     )
+    parser.add_argument(
+        "--reject-escaping-symlinks",
+        action="store_true",
+        help="Reject symlinks that escape the root directory.",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.root):
@@ -326,7 +407,16 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        fp = fingerprint(args.root, args.manifest)
+        entries = collect_entries(args.root)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.reject_escaping_symlinks:
+        validate_symlink_containment(args.root, entries)
+
+    try:
+        fp = write_manifest(entries, args.manifest)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)

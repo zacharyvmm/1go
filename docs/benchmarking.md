@@ -52,62 +52,81 @@ just bench-compare HEAD~1    # Compare against a specific revision
 `just bench-compare` (backed by `scripts/bench-compare.sh`):
 
 1. Resolves the baseline and current revisions.
-2. Captures the current source state: a binary-safe diff of tracked changes
-   plus a list of non-ignored untracked files.
+2. Captures the current source state atomically: a binary-safe diff of tracked
+   changes plus all untracked entries staged into a capture directory. The
+   capture is verified coherent (tracked and untracked state unchanged during
+   staging, with up to three retry attempts).
 3. Creates a temporary detached Git worktree for the baseline revision.
 4. Creates a second temporary detached worktree for the current revision,
-   applies tracked dirty changes, and copies untracked files into it —
-   producing an **isolated source snapshot** of the current tree.
-5. Fingerprints both snapshots (baseline and current) before any Cargo
-   invocation. The fingerprint depends only on relative source paths,
-   file types, modes, file contents, and symlink targets — it does not
-   depend on clone or temporary-directory location. `.git` administration
-   metadata is excluded.
-6. Hashes both `Cargo.lock` files before any Cargo invocation.
-7. Compiles the benchmark binary for both baseline and current snapshot in
+   applies tracked dirty changes, and copies untracked files from the capture
+   directory — producing an **isolated source snapshot** that never reads
+   bytes from the live repository.
+5. Validates that no symlink in either snapshot escapes the snapshot root
+   (rejects absolute targets, `../` escapes, and chained escapes).
+6. Fingerprints both snapshots before any Cargo invocation. The fingerprint
+   depends only on relative source paths, file types, modes, file contents,
+   and symlink targets — it does not depend on clone or temporary-directory
+   location. `.git` administration metadata is excluded.
+7. Hashes both `Cargo.lock` files before any Cargo invocation.
+8. Compiles the benchmark binary for both baseline and current snapshot in
    **separate** `CARGO_TARGET_DIR` directories.
-8. Runs the baseline benchmarks and saves Criterion baseline data.
-9. Copies only Criterion's measurement data to the current target directory.
-10. Runs the current benchmarks against the saved baseline — from the
-    snapshot, not the live repository.
-11. Re-fingerprints both snapshots and re-hashes both lockfiles **after**
+9. Fingerprints both snapshots after compilation to detect persistent mutation.
+10. Runs the baseline benchmarks and saves Criterion baseline data.
+11. Copies only named Criterion saved-baseline measurement directories to the
+    current target directory (excluding `report/`, `new/`, `change/`).
+12. Runs the current benchmarks against the saved baseline — from the
+    snapshot, not the live repository. Requires fresh measurement and
+    comparison output.
+13. Fingerprints both snapshots after measurement to detect persistent mutation.
+14. Re-fingerprints both snapshots and re-hashes both lockfiles **after**
     all Cargo commands complete.
-12. Verifies that all before/after values are identical. If any snapshot
+15. Verifies that all before/after values are identical. If any snapshot
     or lockfile changed during compilation or measurement, publication is
-    aborted with a diagnostic identifying the affected resource.
-13. Stages the Criterion report, metadata, and source manifest. Validates
-    that all required artifacts are present.
-14. Atomically publishes the report to `target/bench-compare/latest/`.
-15. Cleans up the temporary worktrees and directories, including proper
-    rollback or removal of stale backup directories.
-
-**Key properties**:
+    aborted with a diagnostic identifying the phase and affected resource.
+16. Stages the Criterion report, metadata, source manifest, and untracked
+    capture manifest. Validates that all required artifacts are present.
+17. Atomically publishes the report to `target/bench-compare/latest/`.
+18. Cleans up the temporary worktrees, capture directories, and the
+    repository-common lock.
 
 - Both baseline and current measurements run in detached temporary worktrees.
 - Dirty tracked changes are applied to the current snapshot; non-ignored
-  untracked files are copied into the snapshot.
+  untracked files are staged during capture and copied from the staging
+  directory — the live repository is never read during snapshot reconstruction.
+- Unsupported filesystem entries (FIFOs, sockets, devices) are rejected before
+  any Cargo invocation, preventing hangs.
 - Edits made to the live repository **after** snapshot capture are not part of
-  the measurement. The published source fingerprint identifies the snapshot.
+  the measurement. The snapshot is verified to be coherent (tracked and
+  untracked state captured atomically with retry).
 - Your current branch is never switched. No `git checkout` or `git switch`.
 - A dirty working tree is reported but does not prevent the comparison.
 - Build artifacts for baseline and current are fully isolated (separate
   `CARGO_TARGET_DIR` paths).
-- Only Criterion measurement data is shared between the two runs.
-- The report records separate base and current source fingerprints and
-  `Cargo.lock` SHA-256 hashes, all verified unchanged after benchmarking.
-- Integrity verification fields (`source_snapshots_verified_unchanged`,
-  `lockfiles_verified_unchanged`) are recorded in metadata.
+- Only named Criterion saved-baseline measurement directories are transferred
+  to the current target — baseline reports, `new/`, and `change/` are excluded.
+- Fresh current measurement and comparison output is required; a stale report
+  cannot satisfy validation.
+- Source fingerprints are checked before and after each Cargo phase (compile and
+  measurement) to detect persistent mutation. Endpoint equality does not prove
+  the absence of transient mutation within one Cargo process.
+- Metadata records explicit before/after fingerprints and lockfile hashes
+  (`source_snapshot_endpoint_fingerprints_match`, `lockfile_endpoint_hashes_match`).
+- Symlinks that escape the snapshot root (absolute targets, `../` escapes,
+  chained escapes) are rejected before any Cargo invocation. Safe internal
+  symlinks and broken internal symlinks are permitted.
 - Harness changes under `benches/regression` remain rejected unless
   explicitly overridden with `ALLOW_BENCH_HARNESS_DIFF=1`.
+- Linked worktrees of the same repository share one comparison lock derived
+  from the common Git directory.
 - `target/bench-compare/latest` contains local dirty-state metadata
   including `current-source-manifest.bin`, `current-source-manifest.sha256`,
-  `tracked-diff.patch`, and `untracked-files.txt`.
+  `tracked-diff.patch`, `untracked-files.txt`, and
+  `untracked-capture-manifest.jsonl`.
 - The previous successful report remains available after an integrity
   verification failure. No new report is published on failure.
 - The source fingerprint uses a NUL-delimited binary manifest format that
   is unambiguous for filenames containing tabs, newlines, or other
   special characters. The fingerprint is the SHA-256 of this binary manifest.
-
 ### Fingerprint details
 
 The source fingerprint is produced by `scripts/source-fingerprint.py` (stdlib only):

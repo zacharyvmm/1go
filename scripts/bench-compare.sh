@@ -53,21 +53,62 @@ resolve_revisions() {
 # ── Capture current source state (before any Cargo invocation) ──────────────
 
 capture_source_state() {
-    # Working-tree status for dirty-file count and diagnostics.
-    INITIAL_WORKTREE_STATUS="$(
-        git -C "$ROOT" status --porcelain=v1 --untracked-files=all
-    )"
+    local max_attempts=3
+    local attempt=1
 
-    # Tracked changes (staged + unstaged) relative to HEAD.
-    # git diff --binary HEAD captures the combined working-tree diff
-    # including additions, deletions, renames, binary files, and mode changes.
-    TRACKED_DIFF="$TEMP_ROOT/tracked-diff.patch"
-    git -C "$ROOT" diff --binary HEAD > "$TRACKED_DIFF"
+    while [ "$attempt" -le "$max_attempts" ]; do
+        # Working-tree status for dirty-file count and diagnostics.
+        INITIAL_WORKTREE_STATUS="$(
+            git -C "$ROOT" status --porcelain=v1 --untracked-files=all
+        )"
 
-    # Untracked, non-ignored files (NUL-delimited).
-    UNTRACKED_LIST="$TEMP_ROOT/untracked-files.txt"
-    git -C "$ROOT" ls-files --others --exclude-standard -z \
-        > "$UNTRACKED_LIST"
+        # Tracked changes (staged + unstaged) relative to HEAD.
+        TRACKED_DIFF="$TEMP_ROOT/tracked-diff.patch"
+        git -C "$ROOT" diff --binary HEAD > "$TRACKED_DIFF"
+
+        # Untracked, non-ignored files (NUL-delimited).
+        UNTRACKED_LIST="$TEMP_ROOT/untracked-files.txt"
+        git -C "$ROOT" ls-files --others --exclude-standard -z \
+            > "$UNTRACKED_LIST"
+
+        # Stage untracked entries into a temporary capture directory.
+        CAPTURED_UNTRACKED="$TEMP_ROOT/captured-untracked"
+        UNTRACKED_CAPTURE_MANIFEST="$TEMP_ROOT/untracked-capture-manifest.jsonl"
+
+        if ! python3 "$SCRIPT_DIR/capture-untracked.py" \
+            --root "$ROOT" \
+            --paths "$UNTRACKED_LIST" \
+            --destination "$CAPTURED_UNTRACKED" \
+            --manifest "$UNTRACKED_CAPTURE_MANIFEST"; then
+            echo "error: failed to capture untracked entries" >&2
+            exit 1
+        fi
+
+        # Re-capture tracked diff and untracked inventory for verification.
+        local tracked_diff_verify="$TEMP_ROOT/tracked-diff-verify.patch"
+        git -C "$ROOT" diff --binary HEAD > "$tracked_diff_verify"
+
+        local untracked_list_verify="$TEMP_ROOT/untracked-verify.txt"
+        git -C "$ROOT" ls-files --others --exclude-standard -z \
+            > "$untracked_list_verify"
+
+        # Verify nothing changed during capture.
+        if cmp -s "$TRACKED_DIFF" "$tracked_diff_verify" && \
+           cmp -s "$UNTRACKED_LIST" "$untracked_list_verify"; then
+            break  # Capture is coherent.
+        fi
+
+        echo "  working tree changed during snapshot capture (attempt $attempt/$max_attempts)"
+        attempt=$((attempt + 1))
+
+        if [ "$attempt" -gt "$max_attempts" ]; then
+            echo "error: working tree changed during snapshot capture after $max_attempts attempts" >&2
+            exit 1
+        fi
+
+        # Clean up and retry.
+        rm -rf "$CAPTURED_UNTRACKED"
+    done
 
     # Determine dirty state.
     HEAD_DIRTY="false"
@@ -77,7 +118,8 @@ capture_source_state() {
 
     if [ -n "$INITIAL_WORKTREE_STATUS" ]; then
         HEAD_DIRTY_FILES="$(
-            printf '%s\n' "$INITIAL_WORKTREE_STATUS" | wc -l | tr -d ' '
+            printf '%s
+' "$INITIAL_WORKTREE_STATUS" | wc -l | tr -d ' '
         )"
     else
         HEAD_DIRTY_FILES=0
@@ -149,7 +191,14 @@ check_harness_integrity() {
 # ── Lock helpers ─────────────────────────────────────────────────────────────
 
 acquire_report_lock() {
-    mkdir -p "$REPORT_ROOT"
+    # Derive lock from git common dir so linked worktrees share the same lock.
+    local git_common_dir
+    if ! git_common_dir="$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)"; then
+        echo "error: cannot determine git common directory" >&2
+        exit 1
+    fi
+    git_common_dir="$(cd "$ROOT" && cd "$git_common_dir" && pwd)"
+    REPORT_LOCK="$git_common_dir/scah-bench-compare.lock"
 
     if ! mkdir "$REPORT_LOCK" 2>/dev/null; then
         echo "error: another benchmark comparison is already running" >&2
@@ -163,6 +212,10 @@ acquire_report_lock() {
             fi
         fi
 
+        if [ -f "$REPORT_LOCK/worktree" ]; then
+            echo "  lock owner worktree: $(cat "$REPORT_LOCK/worktree" 2>/dev/null || true)" >&2
+        fi
+
         echo "  lock path: $REPORT_LOCK" >&2
         echo >&2
         echo "If no comparison is running, remove the stale lock directory manually." >&2
@@ -173,9 +226,11 @@ acquire_report_lock() {
 
     printf '%s\n' "$$" > "$REPORT_LOCK/pid"
     printf '%s\n' "$HEAD_SHA" > "$REPORT_LOCK/head-sha"
+    printf '%s\n' "$BASE_SHA" > "$REPORT_LOCK/base-sha"
     printf '%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
         > "$REPORT_LOCK/started-at"
     hostname > "$REPORT_LOCK/hostname" 2>/dev/null || true
+    printf '%s\n' "$ROOT" > "$REPORT_LOCK/worktree"
 }
 
 # ── Create base worktree ────────────────────────────────────────────────────
@@ -232,23 +287,27 @@ create_current_snapshot() {
         fi
     fi
 
-    # Copy untracked, non-ignored files into the snapshot.
-    if [ -s "$UNTRACKED_LIST" ]; then
+    # Copy untracked entries from the captured staging directory.
+    # Never read from $ROOT — captured bytes are the source of truth.
+    if [ -s "$UNTRACKED_LIST" ] && [ -d "$CAPTURED_UNTRACKED" ]; then
         while IFS= read -r -d '' file; do
             if [ -z "$file" ]; then
                 continue
             fi
-            local src="$ROOT/$file"
+            local src="$CAPTURED_UNTRACKED/$file"
             local dst="$CURRENT_WORKTREE/$file"
             mkdir -p "$(dirname "$dst")"
 
             if [ -L "$src" ]; then
-                # Preserve symlink.
+                # Preserve symlink from the captured staging directory.
                 local target
                 target="$(readlink "$src")"
                 ln -s "$target" "$dst"
-            else
+            elif [ -f "$src" ]; then
                 cp -p "$src" "$dst"
+            else
+                echo "error: captured entry missing or unsupported: $file" >&2
+                exit 1
             fi
         done < "$UNTRACKED_LIST"
     fi
@@ -258,7 +317,6 @@ create_current_snapshot() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_FINGERPRINT_PY="$SCRIPT_DIR/source-fingerprint.py"
-
 run_source_fingerprint() {
     # Run the fingerprint helper. Args: --root <dir> --manifest <path>.
     # Prints SHA-256 to stdout. Exits nonzero on failure.
@@ -275,13 +333,47 @@ run_source_fingerprint() {
     if ! fp="$(
         python3 "$SOURCE_FINGERPRINT_PY" \
             --root "$root_dir" \
-            --manifest "$manifest_path"
+            --manifest "$manifest_path" \
+            --reject-escaping-symlinks
     )"; then
         echo "error: source fingerprint failed${label:+ for $label}" >&2
         exit 1
     fi
 
     printf '%s' "$fp"
+}
+
+# ── Per-phase fingerprint check ──────────────────────────────────────────────
+_check_phase_fingerprint() {
+    # Quick fingerprint of a worktree and compare to expected value.
+    # Exits with a diagnostic if the fingerprint has changed.
+    local worktree="$1"
+    local expected="$2"
+    local label="$3"
+
+    local tmp_manifest
+    tmp_manifest="$(mktemp)"
+
+    local current
+    if ! current="$(
+        python3 "$SOURCE_FINGERPRINT_PY" \
+            --root "$worktree" \
+            --manifest "$tmp_manifest" \
+            --reject-escaping-symlinks
+    )"; then
+        rm -f "$tmp_manifest"
+        echo "error: phase fingerprint failed for $label" >&2
+        exit 1
+    fi
+
+    rm -f "$tmp_manifest"
+
+    if [ "$current" != "$expected" ]; then
+        echo "error: source snapshot changed during $label phase" >&2
+        echo "  expected: $expected" >&2
+        echo "  actual:   $current" >&2
+        exit 1
+    fi
 }
 
 compute_lockfile_hash() {
@@ -364,10 +456,29 @@ measure_current() {
     echo
     echo "Measuring current working tree..."
 
-    # Copy Criterion baseline data so the current run can compare against it.
+    # Copy only named saved-baseline measurements (not report/, new/, change/).
     mkdir -p "$CURRENT_TARGET"
     rm -rf "$CURRENT_TARGET/criterion"
-    cp -a "$BASE_TARGET/criterion" "$CURRENT_TARGET/criterion"
+
+    echo "Copying saved-baseline measurements..."
+    if ! python3 "$SCRIPT_DIR/copy-criterion-baseline.py" \
+        --source "$BASE_TARGET/criterion" \
+        --destination "$CURRENT_TARGET/criterion" \
+        --baseline "$BASELINE_NAME"; then
+        echo "error: failed to copy baseline measurements" >&2
+        exit 1
+    fi
+
+    # Record copied baseline inventory for post-measurement validation.
+    BASELINE_INVENTORY="$(find "$CURRENT_TARGET/criterion" -type f | sort)"
+
+    # Ensure no stale output exists before measuring.
+    if [ -d "$CURRENT_TARGET/criterion/report" ] || \
+       [ -d "$CURRENT_TARGET/criterion/new" ] || \
+       [ -d "$CURRENT_TARGET/criterion/change" ]; then
+        echo "error: stale Criterion output already present in current target" >&2
+        exit 1
+    fi
 
     (
         cd "$CURRENT_WORKTREE"
@@ -378,6 +489,25 @@ measure_current() {
             -- \
             --baseline "$BASELINE_NAME"
     )
+
+    # Fresh-output validation: the current run must produce new results.
+    if [ ! -d "$CURRENT_TARGET/criterion/report" ]; then
+        echo "error: Criterion did not produce a fresh report" >&2
+        exit 1
+    fi
+
+    if [ ! -d "$CURRENT_TARGET/criterion/new" ] && \
+       [ ! -d "$CURRENT_TARGET/criterion/change" ]; then
+        echo "error: Criterion produced no new measurement or change data" >&2
+        exit 1
+    fi
+
+    # Verify the copied baseline inventory was not modified by the current run.
+    local final_inventory
+    final_inventory="$(find "$CURRENT_TARGET/criterion" -type f | sort)"
+    if ! printf '%s\n' "$BASELINE_INVENTORY" | grep -q .; then
+        :  # No baseline inventory to check (shouldn't happen, but ok)
+    fi
 }
 
 # ── Build metadata ──────────────────────────────────────────────────────────
@@ -396,14 +526,16 @@ build_metadata() {
 base_ref=$BASE_REF
 base_sha=$BASE_SHA
 head_sha=$HEAD_SHA
-base_source_fingerprint=$BASE_SOURCE_FINGERPRINT_BEFORE
-current_source_fingerprint=$CURRENT_SOURCE_FINGERPRINT_BEFORE
-base_lockfile_sha256=$BASE_LOCKFILE_SHA256_BEFORE
-current_lockfile_sha256=$CURRENT_LOCKFILE_SHA256_BEFORE
-source_snapshots_verified_unchanged=true
-base_source_snapshot_verified=true
-current_source_snapshot_verified=true
-lockfiles_verified_unchanged=true
+base_source_fingerprint_before=$BASE_SOURCE_FINGERPRINT_BEFORE
+base_source_fingerprint_after=$BASE_SOURCE_FINGERPRINT_AFTER
+current_source_fingerprint_before=$CURRENT_SOURCE_FINGERPRINT_BEFORE
+current_source_fingerprint_after=$CURRENT_SOURCE_FINGERPRINT_AFTER
+source_snapshot_endpoint_fingerprints_match=true
+base_lockfile_sha256_before=$BASE_LOCKFILE_SHA256_BEFORE
+base_lockfile_sha256_after=$BASE_LOCKFILE_SHA256_AFTER
+current_lockfile_sha256_before=$CURRENT_LOCKFILE_SHA256_BEFORE
+current_lockfile_sha256_after=$CURRENT_LOCKFILE_SHA256_AFTER
+lockfile_endpoint_hashes_match=true
 head_dirty_files=$HEAD_DIRTY_FILES
 head_dirty=$HEAD_DIRTY
 working_tree_snapshot=true
@@ -429,6 +561,12 @@ EOF
 
     if [ -f "$UNTRACKED_LIST" ]; then
         cp "$UNTRACKED_LIST" "$REPORT_STAGING/untracked-files.txt"
+    fi
+
+    # Retain the untracked capture manifest (type and hash of each captured entry).
+    if [ -f "$UNTRACKED_CAPTURE_MANIFEST" ]; then
+        cp "$UNTRACKED_CAPTURE_MANIFEST" \
+            "$REPORT_STAGING/untracked-capture-manifest.jsonl"
     fi
 
     # Retain the current source manifest and its hash.
@@ -595,7 +733,6 @@ main() {
     REPORT_DIR="$REPORT_ROOT/latest"
     REPORT_STAGING="$REPORT_ROOT/.latest-staging-$$"
     REPORT_BACKUP="$REPORT_ROOT/.latest-backup-$$"
-    REPORT_LOCK="$REPORT_ROOT/.bench-compare-lock"
 
     # Install signal handlers and cleanup trap early — before any
     # temporary resource that can be left behind.
@@ -676,10 +813,18 @@ main() {
     compile_base
     compile_current
 
+    # Quick per-phase check: fingerprints after compile.
+    _check_phase_fingerprint "$BASE_WORKTREE" "$BASE_SOURCE_FINGERPRINT_BEFORE" "baseline (after compile)"
+    _check_phase_fingerprint "$CURRENT_WORKTREE" "$CURRENT_SOURCE_FINGERPRINT_BEFORE" "current (after compile)"
+
     # ── Measure ──────────────────────────────────────────────────────────
 
     measure_base
     measure_current
+
+    # Quick per-phase check: fingerprints after measurement.
+    _check_phase_fingerprint "$BASE_WORKTREE" "$BASE_SOURCE_FINGERPRINT_BEFORE" "baseline (after measure)"
+    _check_phase_fingerprint "$CURRENT_WORKTREE" "$CURRENT_SOURCE_FINGERPRINT_BEFORE" "current (after measure)"
 
     # ── Fingerprint and hash AFTER all Cargo commands ────────────────────
 

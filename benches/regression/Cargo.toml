@@ -34,3 +34,8 @@ name = "instruction_counts"
 path = "instruction_counts.rs"
 harness = false
 required-features = ["linux-instruction-benches"]
+
+[[test]]
+name = "validation_tests"
+path = "tests/validation_tests.rs"
+harness = true

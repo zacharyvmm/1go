@@ -323,11 +323,36 @@ def make_stub_cargo(stub_dir, cargo_log, block_file=None,
             "",
         ]
     lines += [
-        'mkdir -p "$CARGO_TARGET_DIR/criterion/report"',
+        'BENCH_DIR="$CARGO_TARGET_DIR/criterion"',
+        # Always create report/index.html.
+        'mkdir -p "$BENCH_DIR/report"',
         (
             "printf '<html>stub report</html>\\n'"
-            ' > "$CARGO_TARGET_DIR/criterion/report/index.html"'
+            ' > "$BENCH_DIR/report/index.html"'
         ),
+        # For --save-baseline runs (baseline measurement), create saved-baseline dirs.
+        'if echo "$*" | grep -q -- "--save-baseline"; then',
+        '    BASELINE_NAME=$(echo "$*" | sed -n "s/.*--save-baseline \\([^ ]*\\).*/\\1/p")',
+        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_none/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_inner_html/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_text/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/synthetic_links/prebuilt/all/save_all/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/synthetic_links/consume/all/save_all/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/synthetic_links/end_to_end/all/save_all/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/product_catalog/prebuilt/nested_all/save_all/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/product_catalog/consume/nested_all/save_all/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/product_catalog/end_to_end/nested_all/save_all/$BASELINE_NAME"',
+        '    mkdir -p "$BENCH_DIR/multi_query/prebuilt/$BASELINE_NAME"',
+        '    # Place estimates.json in every saved-baseline directory at any depth.',
+        '    find "$BENCH_DIR" -type d -name "$BASELINE_NAME" | while read -r d; do',
+        '        printf "{\\"confidence_interval\\":{\\"lower_bound\\":1.0,\\"upper_bound\\":1.0,\\"point_estimate\\":1.0}}\\n" > "$d/estimates.json"',
+        '    done',
+        'fi',
+        # For current runs (--baseline without --save-baseline), create new/ and change/.
+        'if echo "$*" | grep -q -- "--baseline" && ! echo "$*" | grep -q -- "--save-baseline"; then',
+        '    mkdir -p "$BENCH_DIR/new" "$BENCH_DIR/change"',
+        '    printf "{\\"confidence_interval\\":{\\"lower_bound\\":1.0,\\"upper_bound\\":1.0,\\"point_estimate\\":1.0}}\\n" > "$BENCH_DIR/new/estimates.json"',
+        'fi',
         "",
     ]
     with open(stub_path, "w") as f:
@@ -496,7 +521,7 @@ def test_concurrent(tmp):
     )
     assert_file_absent(
         os.path.join(
-            repo, "target/bench-compare/.bench-compare-lock"
+            repo, ".git/scah-bench-compare.lock"
         ),
         "lock released after success",
     )
@@ -562,7 +587,7 @@ def test_signal_releases_lock(tmp, sig, label):
     time.sleep(0.2)
 
     lock = os.path.join(
-        repo, "target/bench-compare/.bench-compare-lock"
+        repo, ".git/scah-bench-compare.lock"
     )
     if os.path.exists(lock):
         _fail(
@@ -595,7 +620,7 @@ def test_existing_lock(tmp):
 
     # Create a pre-existing lock.
     lock_dir = os.path.join(
-        repo, "target/bench-compare/.bench-compare-lock"
+        repo, ".git/scah-bench-compare.lock"
     )
     os.makedirs(lock_dir)
     with open(os.path.join(lock_dir, "pid"), "w") as f:
@@ -692,7 +717,7 @@ def test_dirty_snapshot(tmp):
 
     # Verify metadata has source fingerprint.
     meta = read_metadata(repo)
-    fp = meta.get("current_source_fingerprint", "")
+    fp = meta.get("current_source_fingerprint_before", "")
     if fp and fp != "missing":
         _pass(f"source fingerprint recorded: {fp[:16]}...")
     else:
@@ -831,7 +856,7 @@ def test_live_mutation_isolation(tmp):
 
     # Verify the fingerprint matches the snapshot.
     meta = read_metadata(repo)
-    fp = meta.get("current_source_fingerprint", "")
+    fp = meta.get("current_source_fingerprint_before", "")
     if fp and len(fp) == 64:
         _pass(f"fingerprint recorded: {fp[:16]}...")
     else:
@@ -886,8 +911,8 @@ def test_fingerprint_changes_with_content(tmp):
     meta_a = read_metadata(repo_a)
     meta_b = read_metadata(repo_b)
 
-    fp_a = meta_a.get("current_source_fingerprint", "")
-    fp_b = meta_b.get("current_source_fingerprint", "")
+    fp_a = meta_a.get("current_source_fingerprint_before", "")
+    fp_b = meta_b.get("current_source_fingerprint_before", "")
 
     if fp_a and fp_b:
         _pass("both fingerprints are present")
@@ -940,7 +965,7 @@ def test_lockfile_hashes(tmp):
     meta = read_metadata(repo)
 
     # Base is HEAD~1 which does NOT have Cargo.lock → "missing".
-    base_hash = meta.get("base_lockfile_sha256", "")
+    base_hash = meta.get("base_lockfile_sha256_before", "")
     assert_eq(
         "base lockfile hash is missing",
         "missing",
@@ -948,7 +973,7 @@ def test_lockfile_hashes(tmp):
     )
 
     # Current snapshot has the dirty lockfile.
-    current_hash = meta.get("current_lockfile_sha256", "")
+    current_hash = meta.get("current_lockfile_sha256_before", "")
     expected_current = sha256_file(
         os.path.join(repo, "Cargo.lock")
     )
@@ -1056,7 +1081,7 @@ def test_backup_cleanup(tmp):
         _pass("no stale staging directory")
 
     # Verify: comparison lock is removed.
-    lock_dir = os.path.join(report_root, ".bench-compare-lock")
+    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
     if not os.path.exists(lock_dir):
         _pass("comparison lock released")
     else:
@@ -1108,7 +1133,7 @@ def test_current_snapshot_mutation(tmp):
 
     # stderr must report current snapshot changed.
     stderr = result.stderr
-    if "current source snapshot changed" in stderr:
+    if "source snapshot changed" in stderr and "current" in stderr:
         _pass("error message identifies current snapshot mutation")
     else:
         _fail("missing current snapshot mutation error message")
@@ -1143,7 +1168,7 @@ def test_current_snapshot_mutation(tmp):
         _pass("no backup directory remains")
 
     # Lock released.
-    lock_dir = os.path.join(report_root, ".bench-compare-lock")
+    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
     assert_file_absent(lock_dir, "comparison lock released")
 
     # Temporary worktrees cleaned up (we can't inspect TEMP_ROOT directly,
@@ -1196,7 +1221,7 @@ def test_baseline_snapshot_mutation(tmp):
 
     # stderr must report baseline snapshot changed.
     stderr = result.stderr
-    if "baseline source snapshot changed" in stderr:
+    if "source snapshot changed" in stderr and "baseline" in stderr:
         _pass("error message identifies baseline snapshot mutation")
     else:
         _fail("missing baseline snapshot mutation error message")
@@ -1210,7 +1235,7 @@ def test_baseline_snapshot_mutation(tmp):
         _fail("old latest report was removed")
 
     # Lock released.
-    lock_dir = os.path.join(repo, "target/bench-compare/.bench-compare-lock")
+    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
     assert_file_absent(lock_dir, "comparison lock released")
 
 
@@ -1271,7 +1296,7 @@ def test_lockfile_mutation(tmp):
         meta_path = os.path.join(latest, "metadata.txt")
         if os.path.isfile(meta_path):
             meta = read_metadata(repo)
-            if meta.get("lockfiles_verified_unchanged") == "true":
+            if meta.get("lockfile_endpoint_hashes_match") == "true":
                 _fail("report published despite lockfile mutation")
             else:
                 _pass("no new report published after lockfile mutation")
@@ -1619,7 +1644,7 @@ def test_manifest_hash_file(tmp):
 
         # Verify metadata fingerprint matches.
         meta = read_metadata(repo)
-        meta_fp = meta.get("current_source_fingerprint", "")
+        meta_fp = meta.get("current_source_fingerprint_before", "")
         assert_eq(
             "metadata fingerprint matches manifest hash",
             stored_hash,
@@ -1629,23 +1654,15 @@ def test_manifest_hash_file(tmp):
     # Verify integrity fields in metadata.
     meta = read_metadata(repo)
     assert_eq(
-        "source_snapshots_verified_unchanged", "true",
-        meta.get("source_snapshots_verified_unchanged", "")
+        "source_snapshot_endpoint_fingerprints_match", "true",
+        meta.get("source_snapshot_endpoint_fingerprints_match", "")
     )
     assert_eq(
-        "lockfiles_verified_unchanged", "true",
-        meta.get("lockfiles_verified_unchanged", "")
-    )
-    assert_eq(
-        "base_source_snapshot_verified", "true",
-        meta.get("base_source_snapshot_verified", "")
-    )
-    assert_eq(
-        "current_source_snapshot_verified", "true",
-        meta.get("current_source_snapshot_verified", "")
+        "lockfile_endpoint_hashes_match", "true",
+        meta.get("lockfile_endpoint_hashes_match", "")
     )
     # base_source_fingerprint should also exist.
-    base_fp = meta.get("base_source_fingerprint", "")
+    base_fp = meta.get("base_source_fingerprint_before", "")
     if base_fp and len(base_fp) == 64:
         _pass("base source fingerprint recorded")
     else:
@@ -1833,7 +1850,7 @@ def test_cargo_dir_symlink_mutation(tmp):
     assert_ne("Cargo dir symlink mutation exit code", 0, result.returncode)
 
     stderr = result.stderr
-    if "current source snapshot changed" in stderr:
+    if "source snapshot changed" in stderr and "current" in stderr:
         _pass("error message identifies current snapshot mutation")
     else:
         _fail("missing current snapshot mutation error message")
@@ -1868,7 +1885,7 @@ def test_cargo_dir_symlink_mutation(tmp):
         _pass("no backup directory remains")
 
     # Lock released.
-    lock_dir = os.path.join(report_root, ".bench-compare-lock")
+    lock_dir = os.path.join(repo, ".git/scah-bench-compare.lock")
     assert_file_absent(lock_dir, "comparison lock released")
 
 
