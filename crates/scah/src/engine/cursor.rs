@@ -212,8 +212,7 @@ impl ScopedCursor {
 
     #[cfg(debug_assertions)]
     fn debug_assert_moving_invariants(&self) {
-        if let CursorMode::Moving { flags, .. } = &self.mode
-        {
+        if let CursorMode::Moving { flags, .. } = &self.mode {
             if flags_is_blocked(*flags) {
                 debug_assert!(
                     flags_has_unwind(*flags),

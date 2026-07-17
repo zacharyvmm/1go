@@ -91,9 +91,7 @@ where
         #[cfg(any(debug_assertions, test))]
         {
             let already_claimed = self.cursors.iter().any(|c| {
-                c.position.selection == section
-                    && c.parent == output_parent
-                    && c.is_complete()
+                c.position.selection == section && c.parent == output_parent && c.is_complete()
             }) && self.cursors.iter().any(|c| {
                 c.position.selection == section
                     && c.parent == output_parent
@@ -2460,7 +2458,11 @@ mod tests {
         let store = parse(html, queries);
 
         let spans: Vec<_> = store.get("div > span").unwrap().collect();
-        assert_eq!(spans.len(), 1, "First scope must cancel nested alternate prefixes");
+        assert_eq!(
+            spans.len(),
+            1,
+            "First scope must cancel nested alternate prefixes"
+        );
         assert_eq!(spans[0].id, Some("first"));
     }
 
@@ -2483,11 +2485,12 @@ mod tests {
 
         let articles: Vec<_> = store.get("article").unwrap().collect();
         assert_eq!(articles.len(), 1);
-        let ps: Vec<_> = articles[0]
-            .get(&store, "div > p")
-            .unwrap()
-            .collect();
-        assert_eq!(ps.len(), 1, "then first('div > p') must select once per parent");
+        let ps: Vec<_> = articles[0].get(&store, "div > p").unwrap().collect();
+        assert_eq!(
+            ps.len(),
+            1,
+            "then first('div > p') must select once per parent"
+        );
         assert_eq!(ps[0].id, Some("first"));
     }
 
@@ -2700,10 +2703,7 @@ mod tests {
 
         let articles: Vec<_> = store.get("article").unwrap().collect();
         assert_eq!(articles.len(), 1);
-        let hits: Vec<_> = articles[0]
-            .get(&store, "main div > p")
-            .unwrap()
-            .collect();
+        let hits: Vec<_> = articles[0].get(&store, "main div > p").unwrap().collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, Some("hit"));
     }
