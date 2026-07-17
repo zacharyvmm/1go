@@ -13,6 +13,42 @@ pub const SENTINEL_SCOPE: super::DepthSize = super::DepthSize::MAX;
 /// depths never reach [`DepthSize::MAX`], same invariant as [`SENTINEL_SCOPE`].
 const NO_UNWIND: super::DepthSize = super::DepthSize::MAX;
 
+const FLAG_BLOCKED: u8 = 1 << 0;
+const FLAG_COMPLETE: u8 = 1 << 1;
+
+#[inline]
+const fn flags_is_active(flags: u8) -> bool {
+    flags & (FLAG_BLOCKED | FLAG_COMPLETE) == 0
+}
+
+#[inline]
+const fn flags_is_blocked(flags: u8) -> bool {
+    flags & FLAG_BLOCKED != 0 && flags & FLAG_COMPLETE == 0
+}
+
+#[inline]
+const fn flags_is_complete(flags: u8) -> bool {
+    flags & FLAG_COMPLETE != 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorActivity {
+    Active,
+    Blocked,
+    Complete,
+}
+
+impl CursorActivity {
+    #[inline]
+    const fn to_flags(self) -> u8 {
+        match self {
+            Self::Active => 0,
+            Self::Blocked => FLAG_BLOCKED,
+            Self::Complete => FLAG_COMPLETE,
+        }
+    }
+}
+
 #[inline]
 const fn optional_unwind_depth(raw: super::DepthSize) -> Option<super::DepthSize> {
     if raw == NO_UNWIND { None } else { Some(raw) }
@@ -30,12 +66,11 @@ pub enum CursorMode {
         /// The matched element whose close should update this cursor.
         /// [`NO_UNWIND`] when no close callback is pending.
         unwind_depth: super::DepthSize,
-        /// Prevents a completed cursor from matching again until close handling
-        /// either reactivates it or steps it back.
-        end: bool,
+        /// Activity and mode flags; see [`FLAG_BLOCKED`] and [`FLAG_COMPLETE`].
+        flags: u8,
     },
     Anchored {
-        end: bool,
+        flags: u8,
     },
 }
 
@@ -71,7 +106,7 @@ impl ScopedCursor {
             mode: CursorMode::Moving {
                 match_base_depth,
                 unwind_depth: NO_UNWIND,
-                end: false,
+                flags: CursorActivity::Active.to_flags(),
             },
         }
     }
@@ -90,7 +125,7 @@ impl ScopedCursor {
             mode: CursorMode::Moving {
                 match_base_depth,
                 unwind_depth: NO_UNWIND,
-                end: false,
+                flags: CursorActivity::Active.to_flags(),
             },
         }
     }
@@ -103,7 +138,7 @@ impl ScopedCursor {
             mode: CursorMode::Moving {
                 match_base_depth: 0,
                 unwind_depth: NO_UNWIND,
-                end: false,
+                flags: CursorActivity::Active.to_flags(),
             },
         }
     }
@@ -118,7 +153,9 @@ impl ScopedCursor {
             scope_depth,
             parent,
             position,
-            mode: CursorMode::Anchored { end: false },
+            mode: CursorMode::Anchored {
+                flags: CursorActivity::Active.to_flags(),
+            },
         }
     }
 
@@ -150,11 +187,59 @@ impl ScopedCursor {
         }
     }
 
-    pub fn end(&self) -> bool {
+    fn activity_flags(&self) -> u8 {
         match &self.mode {
-            CursorMode::Moving { end, .. } => *end,
-            CursorMode::Anchored { end } => *end,
+            CursorMode::Moving { flags, .. } | CursorMode::Anchored { flags } => *flags,
         }
+    }
+
+    fn set_activity_flags(&mut self, flags: u8) {
+        match &mut self.mode {
+            CursorMode::Moving { flags: f, .. } | CursorMode::Anchored { flags: f } => *f = flags,
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_moving_invariants(&self) {
+        if let CursorMode::Moving {
+            flags,
+            unwind_depth,
+            ..
+        } = &self.mode
+        {
+            if flags_is_blocked(*flags) {
+                debug_assert!(
+                    *unwind_depth != NO_UNWIND,
+                    "blocked moving cursor must have pending unwind depth"
+                );
+            } else if flags_is_active(*flags) {
+                debug_assert!(
+                    *unwind_depth == NO_UNWIND,
+                    "active moving cursor must not have pending unwind depth"
+                );
+            }
+            debug_assert!(
+                !(*flags & FLAG_BLOCKED != 0 && *flags & FLAG_COMPLETE != 0),
+                "cursor cannot be both blocked and complete"
+            );
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        flags_is_active(self.activity_flags())
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        flags_is_blocked(self.activity_flags())
+    }
+
+    pub fn is_complete(&self) -> bool {
+        flags_is_complete(self.activity_flags())
+    }
+
+    /// Whether matching should skip this cursor (blocked or complete).
+    pub fn end(&self) -> bool {
+        !self.is_active()
     }
 
     #[cfg(test)]
@@ -166,7 +251,7 @@ impl ScopedCursor {
             mode: CursorMode::Moving {
                 match_base_depth: at_depth,
                 unwind_depth: NO_UNWIND,
-                end: false,
+                flags: CursorActivity::Active.to_flags(),
             },
         }
     }
@@ -176,7 +261,9 @@ impl ScopedCursor {
             scope_depth: depth,
             parent: self.parent,
             position: self.position,
-            mode: CursorMode::Anchored { end: false },
+            mode: CursorMode::Anchored {
+                flags: CursorActivity::Active.to_flags(),
+            },
         }
     }
 
@@ -186,23 +273,38 @@ impl ScopedCursor {
             depth != NO_UNWIND,
             "element depth must not use the NO_UNWIND sentinel"
         );
+        debug_assert!(
+            !self.is_complete(),
+            "cannot block a permanently complete cursor"
+        );
         if let CursorMode::Moving {
-            end, unwind_depth, ..
+            flags,
+            unwind_depth,
+            ..
         } = &mut self.mode
         {
-            *end = true;
+            *flags = CursorActivity::Blocked.to_flags();
             *unwind_depth = depth;
+            self.debug_assert_moving_invariants();
         }
     }
 
     /// Resume matching after the blocked element closes.
     pub fn reactivate_after_close(&mut self) {
+        debug_assert!(
+            !self.is_complete(),
+            "cannot reactivate a permanently complete cursor"
+        );
+        debug_assert!(self.is_blocked(), "reactivate requires blocked cursor");
         if let CursorMode::Moving {
-            end, unwind_depth, ..
+            flags,
+            unwind_depth,
+            ..
         } = &mut self.mode
         {
-            *end = false;
+            *flags = CursorActivity::Active.to_flags();
             *unwind_depth = NO_UNWIND;
+            self.debug_assert_moving_invariants();
         }
     }
 
@@ -210,17 +312,56 @@ impl ScopedCursor {
     /// without reactivating matching.
     pub fn complete_after_close(&mut self) {
         if let CursorMode::Moving {
-            end, unwind_depth, ..
+            flags,
+            unwind_depth,
+            ..
         } = &mut self.mode
         {
-            *end = true;
+            *flags = CursorActivity::Complete.to_flags();
             *unwind_depth = NO_UNWIND;
+            self.debug_assert_moving_invariants();
+        }
+    }
+
+    /// Mark matching complete while optionally waiting for the selected element
+    /// to close.
+    pub fn complete_until_close(&mut self, depth: super::DepthSize) {
+        debug_assert!(
+            depth != NO_UNWIND,
+            "element depth must not use the NO_UNWIND sentinel"
+        );
+        debug_assert!(self.is_active(), "complete_until_close requires active cursor");
+        if let CursorMode::Moving {
+            flags,
+            unwind_depth,
+            ..
+        } = &mut self.mode
+        {
+            *flags = CursorActivity::Complete.to_flags();
+            *unwind_depth = depth;
+            self.debug_assert_moving_invariants();
         }
     }
 
     /// Mark this cursor complete (e.g. after a `First` terminal match).
     pub fn mark_complete(&mut self) {
-        self.set_end(true);
+        let keep_unwind = self.unwind_depth().is_some();
+        match &mut self.mode {
+            CursorMode::Moving {
+                flags,
+                unwind_depth,
+                ..
+            } => {
+                *flags = CursorActivity::Complete.to_flags();
+                if !keep_unwind {
+                    *unwind_depth = NO_UNWIND;
+                }
+                self.debug_assert_moving_invariants();
+            }
+            CursorMode::Anchored { flags } => {
+                *flags = CursorActivity::Complete.to_flags();
+            }
+        }
     }
 }
 
@@ -231,7 +372,7 @@ impl<'query> ScopedCursor {
         depth: super::DepthSize,
         element: &XHtmlElement<'html>,
     ) -> bool {
-        if self.end() {
+        if !self.is_active() {
             return false;
         }
         let fsm = tree.get_transition(self.position.state);
@@ -248,13 +389,6 @@ impl<'query> ScopedCursor {
 
     pub fn set_parent(&mut self, value: ElementId) {
         self.parent = value;
-    }
-
-    pub fn set_end(&mut self, end: bool) {
-        match &mut self.mode {
-            CursorMode::Moving { end: e, .. } => *e = end,
-            CursorMode::Anchored { end: e } => *e = end,
-        }
     }
 }
 
@@ -333,21 +467,80 @@ mod tests {
         assert!(matched);
     }
 
-    #[test]
-    fn test_moving_cursor_set_end() {
-        let mut cursor = root_cursor();
-        assert!(!cursor.end());
-
-        cursor.set_end(true);
-        assert!(cursor.end());
-
-        cursor.set_end(false);
-        assert!(!cursor.end());
+    fn moving_cursor() -> ScopedCursor {
+        ScopedCursor::new_moving_with_last(
+            5,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            2,
+        )
     }
 
     #[test]
-    fn test_anchored_cursor_set_end() {
-        let mut cursor = ScopedCursor::new_anchored(
+    fn active_block_until_close_becomes_blocked() {
+        let mut cursor = moving_cursor();
+        assert!(cursor.is_active());
+        assert!(!cursor.is_blocked());
+        assert!(!cursor.is_complete());
+
+        cursor.block_until_close(4);
+
+        assert!(!cursor.is_active());
+        assert!(cursor.is_blocked());
+        assert!(!cursor.is_complete());
+        assert!(cursor.end());
+        assert_eq!(cursor.unwind_depth(), Some(4));
+    }
+
+    #[test]
+    fn blocked_reactivate_after_close_becomes_active() {
+        let mut cursor = moving_cursor();
+        cursor.block_until_close(4);
+
+        cursor.reactivate_after_close();
+
+        assert!(cursor.is_active());
+        assert!(!cursor.is_blocked());
+        assert!(!cursor.is_complete());
+        assert!(!cursor.end());
+        assert_eq!(cursor.unwind_depth(), None);
+    }
+
+    #[test]
+    fn active_complete_until_close_becomes_complete_with_unwind() {
+        let mut cursor = moving_cursor();
+
+        cursor.complete_until_close(4);
+
+        assert!(!cursor.is_active());
+        assert!(!cursor.is_blocked());
+        assert!(cursor.is_complete());
+        assert_eq!(cursor.unwind_depth(), Some(4));
+    }
+
+    #[test]
+    fn complete_with_unwind_clears_unwind_after_close() {
+        let mut cursor = moving_cursor();
+        cursor.complete_until_close(4);
+        assert_eq!(cursor.unwind_depth(), Some(4));
+
+        cursor.complete_after_close();
+
+        assert!(cursor.is_complete());
+        assert_eq!(cursor.unwind_depth(), None);
+    }
+
+    #[test]
+    fn mark_complete_on_moving_and_anchored() {
+        let mut moving = moving_cursor();
+        moving.mark_complete();
+        assert!(moving.is_complete());
+        assert!(!moving.is_blocked());
+
+        let mut anchored = ScopedCursor::new_anchored(
             0,
             NULL_PARENT,
             Position {
@@ -355,9 +548,37 @@ mod tests {
                 state: TransitionId(0),
             },
         );
-        assert!(!cursor.end());
-        cursor.set_end(true);
-        assert!(cursor.end());
+        anchored.mark_complete();
+        assert!(anchored.is_complete());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "cannot reactivate a permanently complete cursor")]
+    fn complete_reactivate_panics_in_debug() {
+        let mut cursor = moving_cursor();
+        cursor.mark_complete();
+        cursor.reactivate_after_close();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "active moving cursor must not have pending unwind depth")]
+    fn active_with_pending_unwind_panics_in_debug() {
+        let mut cursor = moving_cursor();
+        if let CursorMode::Moving { unwind_depth, .. } = &mut cursor.mode {
+            *unwind_depth = 4;
+        }
+        cursor.debug_assert_moving_invariants();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "blocked moving cursor must have pending unwind depth")]
+    fn blocked_without_pending_unwind_panics_in_debug() {
+        let mut cursor = moving_cursor();
+        cursor.set_activity_flags(super::CursorActivity::Blocked.to_flags());
+        cursor.debug_assert_moving_invariants();
     }
 
     #[test]
@@ -499,11 +720,13 @@ mod tests {
             2,
         );
         cursor.block_until_close(4);
+        assert!(cursor.is_blocked());
         assert!(cursor.end());
         assert_eq!(cursor.unwind_depth(), Some(4));
         assert_eq!(cursor.match_base_depth(), 2);
 
         cursor.reactivate_after_close();
+        assert!(cursor.is_active());
         assert!(!cursor.end());
         assert_eq!(cursor.unwind_depth(), None);
         assert_eq!(cursor.match_base_depth(), 2);
@@ -525,12 +748,12 @@ mod tests {
         match &cursor.mode {
             CursorMode::Moving {
                 match_base_depth,
-                end,
+                flags,
                 ..
             } => {
                 assert_eq!(*match_base_depth, 2);
                 assert_eq!(cursor.unwind_depth(), None);
-                assert!(!end);
+                assert!(super::flags_is_active(*flags));
             }
             _ => panic!("expected Moving"),
         }
@@ -548,10 +771,11 @@ mod tests {
             2,
         );
         cursor.block_until_close(4);
-        assert!(cursor.end());
+        assert!(cursor.is_blocked());
         assert_eq!(cursor.unwind_depth(), Some(4));
 
         cursor.complete_after_close();
+        assert!(cursor.is_complete());
         assert!(cursor.end());
         assert_eq!(cursor.unwind_depth(), None);
         assert_eq!(cursor.match_base_depth(), 2);
@@ -559,7 +783,7 @@ mod tests {
 
     #[test]
     fn scoped_cursor_size_is_stable() {
-        // Moving { match_base_depth: u16, unwind_depth: u16, end: bool } uses
+        // Moving { match_base_depth: u16, unwind_depth: u16, flags: u8 } uses
         // NO_UNWIND sentinel instead of Option<u16> niche encoding.
         let cursor_size = std::mem::size_of::<ScopedCursor>();
         let mode_size = std::mem::size_of::<CursorMode>();
@@ -568,7 +792,8 @@ mod tests {
             cursor_size <= 32,
             "ScopedCursor={cursor_size} CursorMode={mode_size} Position={position_size} exceeds 32-byte budget"
         );
-        assert!(mode_size > 0);
+        assert_eq!(cursor_size, 32, "ScopedCursor should remain exactly 32 bytes");
+        assert_eq!(mode_size, 6, "CursorMode should remain exactly 6 bytes");
         assert!(position_size > 0);
     }
 }
