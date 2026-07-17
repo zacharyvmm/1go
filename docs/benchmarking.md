@@ -51,27 +51,47 @@ just bench-compare HEAD~1    # Compare against a specific revision
 
 `just bench-compare` (backed by `scripts/bench-compare.sh`):
 
-1. Resolves the baseline revision (default: `origin/main`).
-2. Creates a temporary detached Git worktree for the baseline revision.
-3. Compiles the benchmark binary for both baseline and current tree in **separate**
-   `CARGO_TARGET_DIR` directories.
-4. Runs the baseline benchmarks and saves Criterion baseline data.
-5. Copies only Criterion's measurement data to the current target directory.
-6. Runs the current benchmarks against the saved baseline.
-7. Copies the final Criterion report (with percentage-change estimates) to
-   `target/bench-compare/latest/`.
-8. Writes metadata (`metadata.txt`) recording both revisions, toolchain info,
-   and whether the working tree was dirty.
-9. Cleans up the temporary worktree and directories.
+1. Resolves the baseline and current revisions.
+2. Captures the current source state: a binary-safe diff of tracked changes
+   plus a list of non-ignored untracked files.
+3. Creates a temporary detached Git worktree for the baseline revision.
+4. Creates a second temporary detached worktree for the current revision,
+   applies tracked dirty changes, and copies untracked files into it —
+   producing an **immutable snapshot** of the current tree.
+5. Computes a deterministic source fingerprint (SHA-256 of a sorted manifest
+   of every file in the snapshot) and records it in metadata.
+6. Compiles the benchmark binary for both baseline and current snapshot in
+   **separate** `CARGO_TARGET_DIR` directories.
+7. Runs the baseline benchmarks and saves Criterion baseline data.
+8. Copies only Criterion's measurement data to the current target directory.
+9. Runs the current benchmarks against the saved baseline — from the
+   snapshot, not the live repository.
+10. Copies the final Criterion report (with percentage-change estimates) to
+    `target/bench-compare/latest/`.
+11. Writes metadata (`metadata.txt`) recording both revisions, toolchain info,
+    the source fingerprint, separate lockfile hashes, and whether the working
+    tree was dirty.
+12. Cleans up the temporary worktrees and directories, including proper
+    rollback or removal of stale backup directories.
 
 **Key properties**:
 
+- Both baseline and current measurements run in detached temporary worktrees.
+- Dirty tracked changes are applied to the current snapshot; non-ignored
+  untracked files are copied into the snapshot.
+- Edits made to the live repository **after** snapshot capture are not part of
+  the measurement. The published source fingerprint identifies the snapshot.
 - Your current branch is never switched. No `git checkout` or `git switch`.
-- Uncommitted changes are included in the current measurements.
 - A dirty working tree is reported but does not prevent the comparison.
 - Build artifacts for baseline and current are fully isolated (separate
   `CARGO_TARGET_DIR` paths).
 - Only Criterion measurement data is shared between the two runs.
+- The report records separate base and current `Cargo.lock` SHA-256 hashes.
+- Harness changes under `benches/regression` remain rejected unless
+  explicitly overridden with `ALLOW_BENCH_HARNESS_DIFF=1`.
+- `target/bench-compare/latest` contains local dirty-state metadata
+  including `source-manifest.txt`, `tracked-diff.patch`, and
+  `untracked-files.txt`.
 
 ### First-merge limitation
 
