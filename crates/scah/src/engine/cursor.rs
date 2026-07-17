@@ -212,11 +212,7 @@ impl ScopedCursor {
 
     #[cfg(debug_assertions)]
     fn debug_assert_moving_invariants(&self) {
-        if let CursorMode::Moving {
-            flags,
-            unwind_depth: _,
-            ..
-        } = &self.mode
+        if let CursorMode::Moving { flags, .. } = &self.mode
         {
             if flags_is_blocked(*flags) {
                 debug_assert!(
@@ -359,6 +355,25 @@ impl ScopedCursor {
             *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND;
             self.debug_assert_moving_invariants();
         }
+    }
+
+    /// Permanently cancel this cursor with no pending close unwind.
+    /// Used for peer First-scope cursors that did not own the selected element.
+    pub fn cancel_complete(&mut self) {
+        match &mut self.mode {
+            CursorMode::Moving {
+                flags,
+                unwind_depth,
+                ..
+            } => {
+                *flags = CursorActivity::Complete.to_flags();
+                *unwind_depth = 0;
+            }
+            CursorMode::Anchored { flags } => {
+                *flags = CursorActivity::Complete.to_flags();
+            }
+        }
+        self.debug_assert_moving_invariants();
     }
 
     /// Mark this cursor complete (e.g. after a `First` terminal match).
@@ -551,6 +566,32 @@ mod tests {
 
         assert!(cursor.is_complete());
         assert_eq!(cursor.unwind_depth(), None);
+    }
+
+    #[test]
+    fn cancel_complete_on_active_blocked_and_anchored() {
+        let mut active = moving_cursor();
+        active.cancel_complete();
+        assert!(active.is_complete());
+        assert_eq!(active.unwind_depth(), None);
+
+        let mut blocked = moving_cursor();
+        blocked.block_until_close(4);
+        blocked.cancel_complete();
+        assert!(blocked.is_complete());
+        assert_eq!(blocked.unwind_depth(), None);
+
+        let mut anchored = ScopedCursor::new_anchored(
+            0,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+        );
+        anchored.cancel_complete();
+        assert!(anchored.is_complete());
+        assert_eq!(anchored.unwind_depth(), None);
     }
 
     #[test]

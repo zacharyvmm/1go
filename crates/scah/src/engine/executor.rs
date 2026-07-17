@@ -19,7 +19,7 @@ enum SpawnOutcome {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SelectedResult {
     selected_depth: super::DepthSize,
-    selected_parent: ElementId,
+    selected_element_id: ElementId,
     selected_section: QuerySectionId,
 }
 
@@ -73,18 +73,73 @@ where
         }
     }
 
+    fn claim_first_scope(
+        &mut self,
+        section: QuerySectionId,
+        output_parent: ElementId,
+        selected_cursor_index: usize,
+        selected_depth: super::DepthSize,
+        selected_element_id: ElementId,
+    ) {
+        debug_assert!(
+            matches!(
+                self.query.get_section_selection_kind(section),
+                SelectionKind::First
+            ),
+            "claim_first_scope requires SelectionKind::First"
+        );
+        #[cfg(any(debug_assertions, test))]
+        {
+            let already_claimed = self.cursors.iter().any(|c| {
+                c.position.selection == section
+                    && c.parent == output_parent
+                    && c.is_complete()
+            }) && self.cursors.iter().any(|c| {
+                c.position.selection == section
+                    && c.parent == output_parent
+                    && c.is_complete()
+                    && c.unwind_depth().is_some()
+            });
+            debug_assert!(
+                !already_claimed,
+                "First scope claimed twice for section+output_parent"
+            );
+        }
+
+        for (index, cursor) in self.cursors.iter_mut().enumerate() {
+            if cursor.position.selection != section || cursor.parent != output_parent {
+                continue;
+            }
+            if index == selected_cursor_index {
+                if cursor.is_moving() {
+                    cursor.complete_until_close(selected_depth);
+                } else {
+                    cursor.mark_complete();
+                }
+            } else {
+                cursor.cancel_complete();
+            }
+        }
+
+        self.note_first_terminal_match(selected_depth, selected_element_id, section);
+    }
+
     fn note_first_terminal_match(
         &mut self,
         depth: super::DepthSize,
-        selected_parent: ElementId,
+        selected_element_id: ElementId,
         selected_section: QuerySectionId,
     ) {
         if self.query.exit_at_section_end() != Some(selected_section) {
             return;
         }
+        if !matches!(self.first_match, FirstMatchState::Searching) {
+            debug_assert!(false, "FirstMatchState must not be overwritten");
+            return;
+        }
         self.first_match = FirstMatchState::Matched(SelectedResult {
             selected_depth: depth,
-            selected_parent,
+            selected_element_id,
             selected_section,
         });
     }
@@ -117,7 +172,7 @@ where
                 return true;
             }
             if cursor.position.selection == selected.selected_section
-                && cursor.parent != selected.selected_parent
+                && cursor.parent != selected.selected_element_id
             {
                 // Prefix cursors for compound First selectors (e.g. article
                 // in `article p`) are irrelevant once the terminal match is fixed.
@@ -303,6 +358,25 @@ where
         #[cfg(not(any(debug_assertions, test)))]
         let _ = create_reason;
 
+        #[cfg(any(debug_assertions, test))]
+        {
+            let section = candidate.position.selection;
+            if matches!(
+                self.query.get_section_selection_kind(section),
+                SelectionKind::First
+            ) {
+                let scope_claimed = self.cursors.iter().any(|c| {
+                    c.position.selection == section
+                        && c.parent == candidate.parent
+                        && c.is_complete()
+                });
+                debug_assert!(
+                    !scope_claimed,
+                    "must not admit live First cursor into already-claimed scope"
+                );
+            }
+        }
+
         self.cursors.push(candidate);
         SpawnOutcome::Inserted
     }
@@ -426,27 +500,23 @@ where
                     // are not dominated by an still-active source cursor.
                     if !terminal_all {
                         if terminal_first {
-                            self.cursors[i].complete_until_close(depth);
                             if let Some(element_id) = saved_element {
-                                self.note_first_terminal_match(
+                                self.claim_first_scope(
+                                    position.selection,
+                                    original_parent,
+                                    i,
                                     depth,
                                     element_id,
-                                    position.selection,
                                 );
+                            } else {
+                                self.cursors[i].complete_until_close(depth);
                             }
                         } else if is_descendant || is_save_point {
                             self.cursors[i].block_until_close(depth);
                         }
                     }
 
-                    if self_closing {
-                        if terminal_all {
-                            continue;
-                        }
-                        continue;
-                    }
-
-                    if terminal_all {
+                    if self_closing || terminal_all {
                         continue;
                     }
 
@@ -502,11 +572,12 @@ where
                             let element_id = hit.element_id;
                             save_hits.push(hit);
                             if is_first {
-                                self.cursors[i].mark_complete();
-                                self.note_first_terminal_match(
+                                self.claim_first_scope(
+                                    position.selection,
+                                    save_parent,
+                                    i,
                                     depth,
                                     element_id,
-                                    position.selection,
                                 );
                             }
                         }
@@ -547,8 +618,13 @@ where
                         let element_id = hit.element_id;
                         save_hits.push(hit);
                         if is_first {
-                            self.cursors[i].mark_complete();
-                            self.note_first_terminal_match(depth, element_id, position.selection);
+                            self.claim_first_scope(
+                                position.selection,
+                                save_parent,
+                                i,
+                                depth,
+                                element_id,
+                            );
                         }
                         base.parent
                     } else {
