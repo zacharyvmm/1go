@@ -67,6 +67,45 @@ bench-python-whatwg:
     cd crates/bindings/scah-python && source .venv/bin/activate && uv run --all-extras pytest benches/test_spec.py --benchmark-columns=min,mean,max --benchmark-sort=mean --benchmark-warmup-iterations 5 --benchmark-json benches/whatwg.json && python3 ./benches/utils/figure.py ./benches/whatwg.json -o ./benches/images/whatwg.png && rm ./benches/whatwg.json
 bench-python-nested:
     cd crates/bindings/scah-python && source .venv/bin/activate && uv run --all-extras pytest benches/test_structural.py --benchmark-columns=min,mean,max --benchmark-sort=mean --benchmark-warmup-iterations 5 --benchmark-json benches/nested.json && python3 ./benches/utils/figure.py ./benches/nested.json -o ./benches/images/nested.png && rm ./benches/nested.json
+
+# ── Regression benchmarks (SCaH-only, no competitor deps) ──────────────────
+bench-regression:
+    cargo bench \
+        -p scah-regression-benches \
+        --bench core_regression
+
+bench-regression-quick:
+    SCAH_BENCH_PROFILE=quick \
+        cargo bench \
+        -p scah-regression-benches \
+        --bench core_regression
+
+# ── Instruction-count benchmarks (Linux only, requires Valgrind + gungraun-runner) ──
+bench-instructions:
+    cargo bench \
+        -p scah-regression-benches \
+        --bench instruction_counts \
+        --features linux-instruction-benches
+
+check-bench-instructions:
+    cargo bench \
+        -p scah-regression-benches \
+        --bench instruction_counts \
+        --features linux-instruction-benches \
+        --no-run
+
+bench-compare base="origin/main":
+    BASE_REF="{{base}}" \
+        ./scripts/bench-compare.sh
+
+bench-compare-quick base="origin/main":
+    BASE_REF="{{base}}" \
+        SCAH_BENCH_PROFILE=quick \
+        ./scripts/bench-compare.sh
+
+# bench-comparison is the explicit name for the competitor-library benchmarks.
+# `just bench` is preserved as a backward-compatible alias.
+bench-comparison: bench
 generate-graph-data:
     cargo criterion -p scah-benches --message-format=json >> criterion.json
 generate-graphs:

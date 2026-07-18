@@ -1697,6 +1697,15 @@ name = "scah-reader"
 version = "0.0.21"
 
 [[package]]
+name = "scah-regression-benches"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "gungraun",
+ "scah",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

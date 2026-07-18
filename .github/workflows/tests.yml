@@ -32,6 +32,82 @@ jobs:
         run: cargo test --workspace --exclude scah-benches
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
+      - name: Smoke-test regression benchmarks
+        run: cargo bench -p scah-regression-benches --bench core_regression -- --test
+      - name: Compile instruction benchmarks (Linux, feature-gated)
+        run: >
+          cargo bench
+          -p scah-regression-benches
+          --bench instruction_counts
+          --features linux-instruction-benches
+          --no-run
+
+      - name: Check benchmark comparison script syntax
+        run: bash -n scripts/bench-compare.sh
+      - name: Check Python helper syntax
+        run: |
+          python3 -m py_compile scripts/source-fingerprint.py
+          python3 -m py_compile scripts/capture-untracked.py
+          python3 -m py_compile scripts/copy-criterion-baseline.py
+          python3 -m py_compile scripts/validate-criterion-comparison.py
+          python3 -m py_compile scripts/criterion-baseline-manifest.py
+          python3 -m py_compile scripts/scan-special-files.py
+          python3 -m py_compile scripts/tests/bench-compare-test.py
+
+      - name: Test benchmark comparison workflow
+        run: |
+          set -o pipefail
+          python3 scripts/tests/bench-compare-test.py 2>&1 |
+            tee bench-compare-test.log
+      - name: Upload benchmark workflow test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-compare-test-${{ runner.os }}
+          path: bench-compare-test.log
+
+  benchmark-portability:
+    name: Benchmark Package Portability
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Check regression benchmark package
+        run: >
+          cargo check
+          -p scah-regression-benches
+          --all-targets
+          --all-features
+      - name: Check benchmark comparison script syntax
+        run: bash -n scripts/bench-compare.sh
+      - name: Check Python helper syntax
+        run: |
+          python3 -m py_compile scripts/source-fingerprint.py
+          python3 -m py_compile scripts/capture-untracked.py
+          python3 -m py_compile scripts/copy-criterion-baseline.py
+          python3 -m py_compile scripts/validate-criterion-comparison.py
+          python3 -m py_compile scripts/criterion-baseline-manifest.py
+          python3 -m py_compile scripts/scan-special-files.py
+          python3 -m py_compile scripts/tests/bench-compare-test.py
+      - name: Test benchmark comparison workflow
+        run: |
+          set -o pipefail
+          python3 scripts/tests/bench-compare-test.py 2>&1 |
+            tee bench-compare-test.log
+      - name: Upload benchmark workflow test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-compare-test-${{ runner.os }}
+          path: bench-compare-test.log
 
   python:
     name: Python Binding Tests
