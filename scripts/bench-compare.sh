@@ -40,6 +40,50 @@ sha256_hash() {
     fi
 }
 
+metadata_value() {
+    local key="$1"
+    local file="$2"
+
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+# ── Test-only synchronization hooks ─────────────────────────────────────────
+
+block_before_capture_retry_for_test() {
+    local hook="${SCAH_BENCH_TEST_BLOCK_BEFORE_CAPTURE_RETRY:-}"
+
+    if [ -z "$hook" ]; then
+        return
+    fi
+
+    printf '%s\n' "$attempt" > "$hook.started"
+    rm -f "$hook.released"
+
+    while [ ! -e "$hook.released" ]; do
+        sleep 0.05
+    done
+
+    rm -f "$hook.released"
+}
+
+block_after_metadata_for_test() {
+    local hook="${SCAH_BENCH_TEST_BLOCK_AFTER_METADATA:-}"
+
+    if [ -z "$hook" ]; then
+        return
+    fi
+
+    printf '%s\n' "$REPORT_STAGING" > "$hook.staging"
+    printf '%s\n' "1" > "$hook.started"
+    rm -f "$hook.released"
+
+    while [ ! -e "$hook.released" ]; do
+        sleep 0.05
+    done
+
+    rm -f "$hook.released"
+}
+
 # ── Resolve revisions ───────────────────────────────────────────────────────
 
 resolve_revisions() {
@@ -56,7 +100,7 @@ resolve_revisions() {
 capture_source_state() {
     local max_attempts=3
     local attempt=1
-    local special_exhausted=0
+    local last_failure_reason=""
 
     while [ "$attempt" -le "$max_attempts" ]; do
         SPECIAL_SCAN_BEFORE="$TEMP_ROOT/special-scan-before.txt"
@@ -157,46 +201,51 @@ capture_source_state() {
         # ── Coherence check ───────────────────────────────────────────────
 
         local coherent=1
+        local attempt_failure_reason=""
 
         if ! cmp -s "$TRACKED_DIFF" "$tracked_diff_verify"; then
             coherent=0
+            attempt_failure_reason="tracked-diff-changed"
         fi
 
         if ! cmp -s "$UNTRACKED_LIST" "$untracked_list_verify"; then
             coherent=0
+            attempt_failure_reason="untracked-inventory-changed"
         fi
 
-        if [ -s "$UNTRACKED_CAPTURE_MANIFEST" ] || [ -s "$UNTRACKED_LIVE_VERIFY_MANIFEST" ]; then
-            if ! cmp -s "$UNTRACKED_CAPTURE_MANIFEST" "$UNTRACKED_LIVE_VERIFY_MANIFEST"; then
-                coherent=0
-            fi
+        if ! cmp -s "$UNTRACKED_CAPTURE_MANIFEST" "$UNTRACKED_LIVE_VERIFY_MANIFEST"; then
+            coherent=0
+            attempt_failure_reason="untracked-manifest-changed"
         fi
 
         if [ "$special_after_rc" != 0 ]; then
             coherent=0
+            attempt_failure_reason="special-file-appeared"
             echo "  unsupported special file appeared during source capture (attempt $attempt/$max_attempts)" >&2
         fi
 
         if ! cmp -s "$SPECIAL_SCAN_BEFORE" "$SPECIAL_SCAN_AFTER"; then
             coherent=0
+            if [ -z "$attempt_failure_reason" ]; then
+                attempt_failure_reason="special-manifest-changed"
+            fi
         fi
 
         if [ "$coherent" = 1 ]; then
             break  # Capture is coherent.
         fi
 
-        if [ "$special_after_rc" != 0 ]; then
-            special_exhausted=1
-        fi
+        last_failure_reason="$attempt_failure_reason"
 
         echo "  working tree changed during snapshot capture (attempt $attempt/$max_attempts)"
         attempt=$((attempt + 1))
 
         if [ "$attempt" -gt "$max_attempts" ]; then
-            if [ "$special_exhausted" = 1 ]; then
-                echo "error: unsupported special file appeared during source capture" >&2
-                if [ -s "$SPECIAL_SCAN_AFTER" ]; then
-                    python3 - "$SPECIAL_SCAN_AFTER" <<'PY'
+            case "$last_failure_reason" in
+                special-file-appeared|special-manifest-changed)
+                    echo "error: unsupported special file appeared during source capture" >&2
+                    if [ -s "$SPECIAL_SCAN_AFTER" ]; then
+                        python3 - "$SPECIAL_SCAN_AFTER" <<'PY'
 import os
 import sys
 
@@ -208,13 +257,30 @@ for index in range(0, len(parts) - 1, 2):
     print(f"  type: {entry_type}", file=sys.stderr)
     print(f"  path: {rel_path}", file=sys.stderr)
 PY
-                fi
-                echo "  attempt: $max_attempts/$max_attempts" >&2
-            else
-                echo "error: working tree changed during snapshot capture" >&2
-                echo "  untracked content, type, mode, or symlink target changed" >&2
-                echo "  attempts: $max_attempts" >&2
-            fi
+                    fi
+                    echo "  attempt: $max_attempts/$max_attempts" >&2
+                    ;;
+                tracked-diff-changed)
+                    echo "error: working tree changed during snapshot capture" >&2
+                    echo "  reason: tracked diff changed" >&2
+                    echo "  attempts: $max_attempts" >&2
+                    ;;
+                untracked-inventory-changed)
+                    echo "error: working tree changed during snapshot capture" >&2
+                    echo "  reason: untracked path inventory changed" >&2
+                    echo "  attempts: $max_attempts" >&2
+                    ;;
+                untracked-manifest-changed)
+                    echo "error: working tree changed during snapshot capture" >&2
+                    echo "  reason: untracked content, type, mode, or symlink target changed" >&2
+                    echo "  attempts: $max_attempts" >&2
+                    ;;
+                *)
+                    echo "error: working tree changed during snapshot capture" >&2
+                    echo "  reason: ${last_failure_reason:-unknown}" >&2
+                    echo "  attempts: $max_attempts" >&2
+                    ;;
+            esac
             exit 1
         fi
 
@@ -228,6 +294,9 @@ PY
         rm -f "$untracked_list_verify"
         rm -f "$SPECIAL_SCAN_BEFORE"
         rm -f "$SPECIAL_SCAN_AFTER"
+
+        # Let tests remove transient specials before the next endpoint-A scan.
+        block_before_capture_retry_for_test
     done
 
     # Determine dirty state.
@@ -257,66 +326,57 @@ PY
     fi
 }
 
-# ── Harness-integrity check ─────────────────────────────────────────────────
+# ── Harness-integrity check (isolated worktrees only) ───────────────────────
 
 check_harness_integrity() {
-    # Detects committed, dirty tracked, and untracked changes under the
-    # benchmark harness path. Must run before any benchmark execution.
+    # Compare deterministic fingerprints of benches/regression in the
+    # baseline and reconstructed current worktrees. Must run after both
+    # worktrees exist and must not consult the live repository.
 
-    TRACKED_HARNESS_DIFF="$(
-        git -C "$ROOT" diff \
-            --name-only \
-            "$BASE_SHA" \
-            -- "$BENCH_HARNESS_PATH"
+    echo
+    echo "Verifying benchmark harness equivalence..."
+
+    BASE_HARNESS_MANIFEST="$TEMP_ROOT/base-harness-manifest.bin"
+    CURRENT_HARNESS_MANIFEST="$TEMP_ROOT/current-harness-manifest.bin"
+
+    BASE_HARNESS_FINGERPRINT="$(
+        run_source_fingerprint \
+            "$BASE_WORKTREE/$BENCH_HARNESS_PATH" \
+            "$BASE_HARNESS_MANIFEST" \
+            "baseline benchmark harness"
     )"
 
-    UNTRACKED_HARNESS_FILES="$(
-        git -C "$ROOT" ls-files \
-            --others \
-            --exclude-standard \
-            -- "$BENCH_HARNESS_PATH"
+    CURRENT_HARNESS_FINGERPRINT="$(
+        run_source_fingerprint \
+            "$CURRENT_WORKTREE/$BENCH_HARNESS_PATH" \
+            "$CURRENT_HARNESS_MANIFEST" \
+            "current benchmark harness"
     )"
 
-    if [ -n "$TRACKED_HARNESS_DIFF" ] ||
-       [ -n "$UNTRACKED_HARNESS_FILES" ]; then
-        HARNESS_DIFF_PRESENT=1
-    else
+    if [ "$BASE_HARNESS_FINGERPRINT" = "$CURRENT_HARNESS_FINGERPRINT" ]; then
         HARNESS_DIFF_PRESENT=0
+        return
     fi
 
-    if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
-        echo >&2
-        echo "error: regression benchmark harness differs from the baseline revision" >&2
-        echo >&2
+    HARNESS_DIFF_PRESENT=1
 
-        if [ -n "$TRACKED_HARNESS_DIFF" ]; then
-            echo "Tracked benchmark differences:" >&2
-            printf '%s\n' "$TRACKED_HARNESS_DIFF" |
-                sed 's/^/  /' >&2
-        fi
+    echo >&2
+    echo "error: regression benchmark harness differs from the baseline snapshot" >&2
+    echo "  baseline harness fingerprint: $BASE_HARNESS_FINGERPRINT" >&2
+    echo "  current harness fingerprint:  $CURRENT_HARNESS_FINGERPRINT" >&2
 
-        if [ -n "$UNTRACKED_HARNESS_FILES" ]; then
-            echo "Untracked benchmark files:" >&2
-            printf '%s\n' "$UNTRACKED_HARNESS_FILES" |
-                sed 's/^/  /' >&2
-        fi
-
+    if [ "$ALLOW_BENCH_HARNESS_DIFF" != "1" ]; then
         echo >&2
         echo "Criterion can compare only equivalent workloads." >&2
-        echo "Merge benchmark-harness changes separately before benchmarking production changes." >&2
-
-        if [ "$ALLOW_BENCH_HARNESS_DIFF" != "1" ]; then
-            echo >&2
-            echo "For benchmark-infrastructure development only, override with:" >&2
-            echo >&2
-            echo "  ALLOW_BENCH_HARNESS_DIFF=1 just bench-compare <base>" >&2
-            exit 1
-        fi
-
+        echo "For benchmark-infrastructure development only, override with:" >&2
         echo >&2
-        echo "WARNING: ALLOW_BENCH_HARNESS_DIFF=1 is set." >&2
-        echo "The resulting performance comparison may compare different workloads." >&2
+        echo "  ALLOW_BENCH_HARNESS_DIFF=1 just bench-compare <base>" >&2
+        exit 1
     fi
+
+    echo >&2
+    echo "WARNING: ALLOW_BENCH_HARNESS_DIFF=1 is set." >&2
+    echo "The resulting performance comparison may compare different workloads." >&2
 }
 
 # ── Lock helpers ─────────────────────────────────────────────────────────────
@@ -714,6 +774,19 @@ build_metadata() {
     CARGO_VERSION="$(cargo --version 2>/dev/null || echo "unknown")"
     HOST_TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' || echo "unknown")"
 
+    local harness_snapshots_match=true
+    local harness_diff_present=false
+    local harness_diff_allowed=false
+
+    if [ "${HARNESS_DIFF_PRESENT:-0}" = "1" ]; then
+        harness_snapshots_match=false
+        harness_diff_present=true
+    fi
+
+    if [ "$ALLOW_BENCH_HARNESS_DIFF" = "1" ]; then
+        harness_diff_allowed=true
+    fi
+
     cat > "$REPORT_STAGING/metadata.txt" <<EOF
 base_ref=$BASE_REF
 base_sha=$BASE_SHA
@@ -738,8 +811,11 @@ profile=$PROFILE
 rustc=$RUSTC_VERSION
 cargo=$CARGO_VERSION
 host=$HOST_TRIPLE
-benchmark_harness_diff_present=$HARNESS_DIFF_PRESENT
-benchmark_harness_diff_allowed=$ALLOW_BENCH_HARNESS_DIFF
+baseline_harness_fingerprint=${BASE_HARNESS_FINGERPRINT:-}
+current_harness_fingerprint=${CURRENT_HARNESS_FINGERPRINT:-}
+benchmark_harness_snapshots_match=$harness_snapshots_match
+benchmark_harness_diff_present=$harness_diff_present
+benchmark_harness_diff_allowed=$harness_diff_allowed
 criterion_baseline_manifest_sha256_before=${BASELINE_MANIFEST_SHA256_BEFORE:-}
 criterion_baseline_manifest_sha256_after=${BASELINE_MANIFEST_SHA256_AFTER:-}
 criterion_baseline_measurement_manifests_match=${BASELINE_INTEGRITY_OK:-false}
@@ -791,18 +867,37 @@ EOF
             > "$REPORT_STAGING/criterion-baseline-manifest.sha256"
     fi
 
-    if [ "$HARNESS_DIFF_PRESENT" = 1 ]; then
-        {
-            if [ -n "$TRACKED_HARNESS_DIFF" ]; then
-                echo "[tracked]"
-                printf '%s\n' "$TRACKED_HARNESS_DIFF"
-            fi
+    if [ -n "${BASE_HARNESS_FINGERPRINT:-}" ] &&
+       [ -n "${CURRENT_HARNESS_FINGERPRINT:-}" ]; then
+        local harness_match=true
+        local harness_override=false
 
-            if [ -n "$UNTRACKED_HARNESS_FILES" ]; then
-                echo "[untracked]"
-                printf '%s\n' "$UNTRACKED_HARNESS_FILES"
+        if [ "${HARNESS_DIFF_PRESENT:-0}" = "1" ]; then
+            harness_match=false
+        fi
+
+        if [ "$ALLOW_BENCH_HARNESS_DIFF" = "1" ]; then
+            harness_override=true
+        fi
+
+        cat > "$REPORT_STAGING/harness-integrity.txt" <<EOF
+baseline_fingerprint=$BASE_HARNESS_FINGERPRINT
+current_fingerprint=$CURRENT_HARNESS_FINGERPRINT
+match=$harness_match
+override_allowed=$harness_override
+EOF
+
+        if [ "${HARNESS_DIFF_PRESENT:-0}" = "1" ] &&
+           [ "$ALLOW_BENCH_HARNESS_DIFF" = "1" ]; then
+            if [ -f "$BASE_HARNESS_MANIFEST" ]; then
+                cp "$BASE_HARNESS_MANIFEST" \
+                    "$REPORT_STAGING/base-harness-manifest.bin"
             fi
-        } > "$REPORT_STAGING/harness-diff.txt"
+            if [ -f "$CURRENT_HARNESS_MANIFEST" ]; then
+                cp "$CURRENT_HARNESS_MANIFEST" \
+                    "$REPORT_STAGING/current-harness-manifest.bin"
+            fi
+        fi
     fi
 }
 
@@ -858,6 +953,51 @@ validate_staged_report() {
     if ! grep -q '^criterion_baseline_measurement_manifests_match=true$' \
         "$REPORT_STAGING/metadata.txt"; then
         echo "error: Criterion baseline manifest match metadata missing or false" >&2
+        exit 1
+    fi
+
+    if ! grep -q '^untracked_capture_reconstruction_verified=true$' \
+        "$REPORT_STAGING/metadata.txt"; then
+        echo "error: untracked reconstruction verification metadata missing or false" >&2
+        exit 1
+    fi
+
+    local capture_hash
+    capture_hash="$(
+        metadata_value \
+            "untracked_capture_manifest_sha256" \
+            "$REPORT_STAGING/metadata.txt"
+    )"
+
+    local reconstructed_hash
+    reconstructed_hash="$(
+        metadata_value \
+            "untracked_reconstructed_manifest_sha256" \
+            "$REPORT_STAGING/metadata.txt"
+    )"
+
+    if [ -z "$capture_hash" ] || [ -z "$reconstructed_hash" ]; then
+        echo "error: untracked capture/reconstructed manifest hashes missing" >&2
+        exit 1
+    fi
+
+    if [ "$capture_hash" != "$reconstructed_hash" ]; then
+        echo "error: untracked capture and reconstructed manifest hashes differ" >&2
+        exit 1
+    fi
+
+    if [ ! -f "$REPORT_STAGING/untracked-capture-manifest.jsonl" ]; then
+        echo "error: untracked capture manifest was not published" >&2
+        exit 1
+    fi
+
+    local published_capture_hash
+    published_capture_hash="$(
+        sha256_hash "$REPORT_STAGING/untracked-capture-manifest.jsonl"
+    )"
+
+    if [ "$capture_hash" != "$published_capture_hash" ]; then
+        echo "error: published untracked capture manifest hash mismatch" >&2
         exit 1
     fi
 }
@@ -990,19 +1130,6 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    # Capture source state before any Cargo invocation.
-    capture_source_state
-
-    # Harness-integrity check.
-    check_harness_integrity
-
-    # Dirty working tree notice.
-    if [ "$HEAD_DIRTY" = "true" ]; then
-        echo "  working tree: dirty; current measurements include local changes"
-    else
-        echo "  working tree: clean"
-    fi
-
     # ── Acquire benchmark lock ───────────────────────────────────────────
 
     echo
@@ -1012,10 +1139,23 @@ main() {
         exit 1
     fi
 
+    # Capture source state before any Cargo invocation.
+    capture_source_state
+
+    # Dirty working tree notice.
+    if [ "$HEAD_DIRTY" = "true" ]; then
+        echo "  working tree: dirty; current measurements include local changes"
+    else
+        echo "  working tree: clean"
+    fi
+
     # ── Build worktrees ─────────────────────────────────────────────────
 
     create_base_worktree
     create_current_snapshot
+
+    # Harness equivalence from the isolated snapshots Cargo will execute.
+    check_harness_integrity
 
     # ── Manifest paths ──────────────────────────────────────────────────
 
@@ -1132,6 +1272,7 @@ main() {
     # ── Build and publish report ─────────────────────────────────────────
 
     build_metadata
+    block_after_metadata_for_test
     validate_staged_report
     publish_report
 

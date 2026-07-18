@@ -48,6 +48,7 @@ FINGERPRINT_PY = os.path.join(REPO_ROOT, "scripts", "source-fingerprint.py")
 
 PASS = 0
 FAIL = 0
+FAILURES = []
 
 
 def _pass(msg):
@@ -59,6 +60,7 @@ def _pass(msg):
 def _fail(msg):
     global FAIL
     FAIL += 1
+    FAILURES.append(msg)
     print(f"  FAIL: {msg}", file=sys.stderr)
 
 
@@ -3306,54 +3308,71 @@ def test_capture_race_fifo_after_capture_one_time_success(tmp):
     repo = os.path.join(test_dir, "repo")
     create_test_repo(repo)
     write_file(repo, "generated.rs", "v1\n")
+    setup_prior_report(repo, content="prior-before-fifo-retry")
 
-    block = os.path.join(test_dir, "capture-block")
+    capture_block = os.path.join(test_dir, "capture-block")
+    retry_block = os.path.join(test_dir, "retry-block")
     stub_dir = os.path.join(test_dir, "stub")
     cargo_log = os.path.join(test_dir, "cargo.log")
     make_stub_cargo(stub_dir, cargo_log)
     fifo_path = os.path.join(repo, "late.fifo")
-    stderr_path = block + ".stderr"
 
     def mutate():
         if not os.path.exists(fifo_path):
             os.mkfifo(fifo_path)
 
     stop_event = threading.Event()
-
-    def remove_fifo_after_detection():
-        deadline = time.time() + 120
-        while not stop_event.is_set() and time.time() < deadline:
-            if os.path.isfile(stderr_path):
-                with open(stderr_path) as fh:
-                    text = fh.read()
-                if "unsupported special file appeared during source capture" in text:
-                    try:
-                        os.unlink(fifo_path)
-                    except FileNotFoundError:
-                        pass
-                    return
-            time.sleep(0.05)
-
     releaser = threading.Thread(
         target=capture_hook_releaser,
-        args=(block, stop_event, mutate, False),
+        args=(capture_block, stop_event, mutate, False),
         daemon=True,
     )
-    cleanup = threading.Thread(target=remove_fifo_after_detection, daemon=True)
     releaser.start()
-    cleanup.start()
 
-    proc, f_out, f_err, _, _ = run_capture_hook_bg(
-        repo,
-        stub_dir,
-        block,
-        "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
+    env = bench_compare_env(stub_dir)
+    env["SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE"] = capture_block
+    env["SCAH_BENCH_TEST_BLOCK_BEFORE_CAPTURE_RETRY"] = retry_block
+    stdout_path = capture_block + ".stdout"
+    stderr_path = capture_block + ".stderr"
+    f_out = open(stdout_path, "w")
+    f_err = open(stderr_path, "w")
+    proc = subprocess.Popen(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        stdout=f_out,
+        stderr=f_err,
+        preexec_fn=os.setsid,
     )
+
+    if not wait_for_capture_hook_start(retry_block, timeout=60.0):
+        stop_event.set()
+        proc.kill()
+        proc.wait()
+        f_out.close()
+        f_err.close()
+        releaser.join(timeout=5)
+        _fail("retry hook did not start after FIFO rejection")
+        return
+    _pass("retry hook blocked after rejected capture attempt")
+
+    if stat_mod.S_ISFIFO(os.lstat(fifo_path).st_mode):
+        _pass("FIFO present at retry barrier")
+    else:
+        _fail(f"FIFO present at retry barrier: missing or not a FIFO: {fifo_path}")
+        stop_event.set()
+        release_capture_hook(retry_block)
+        proc.wait(timeout=30)
+        f_out.close()
+        f_err.close()
+        releaser.join(timeout=5)
+        return
+    os.unlink(fifo_path)
+    release_capture_hook(retry_block)
 
     proc.wait(timeout=120)
     stop_event.set()
     releaser.join(timeout=5)
-    cleanup.join(timeout=5)
     f_out.close()
     f_err.close()
 
@@ -3361,12 +3380,22 @@ def test_capture_race_fifo_after_capture_one_time_success(tmp):
         stderr = fh.read()
 
     assert_eq("one-time FIFO race succeeds after retry", 0, proc.returncode)
-    if "unsupported special file appeared during source capture" in stderr:
-        _pass("stderr mentions transient FIFO during capture")
-    else:
-        _pass("capture succeeded without persistent FIFO")
+    assert_text_contains(
+        stderr,
+        "unsupported special file appeared during source capture",
+        "stderr mentions endpoint-B special-file diagnostic",
+    )
     assert_cargo_ran(cargo_log, "Cargo ran after FIFO removed before retry")
+    assert_file_absent(
+        os.path.join(repo, "target/bench-compare/latest/report-marker.txt"),
+        "prior report marker replaced by successful report",
+    )
+    assert_file_exists(
+        os.path.join(repo, "target/bench-compare/latest/report/index.html"),
+        "successful report published after retry",
+    )
     assert_lock_absent(repo, "lock released after one-time FIFO race success")
+    assert_no_staging_or_backup(repo)
 
     if os.path.exists(fifo_path):
         os.unlink(fifo_path)
@@ -4003,6 +4032,638 @@ def test_criterion_success_publishes_baseline_artifacts(tmp):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Snapshot-based harness integrity (A–F)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_harness_dirty_rejected_after_live_revert(tmp):
+    print()
+    print("=== Harness A: accepted dirty harness rejected after live revert ===")
+    test_dir = os.path.join(tmp, "harness-a")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    setup_prior_report(repo)
+
+    harness_file = os.path.join(
+        repo, "benches", "regression", "core_regression.rs"
+    )
+    with open(harness_file, "a") as fh:
+        fh.write("\n// dirty harness mutation\n")
+
+    block = os.path.join(test_dir, "capture-accepted-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED",
+        extra_env={"ALLOW_BENCH_HARNESS_DIFF": "0"},
+    )
+
+    if not wait_for_capture_hook_start(block):
+        proc.kill()
+        proc.wait()
+        f_out.close()
+        f_err.close()
+        _fail("capture-accepted hook did not start (harness A)")
+        return
+    _pass("capture accepted with dirty harness")
+
+    subprocess.run(
+        ["git", "-C", repo, "checkout", "--", "benches/regression/core_regression.rs"],
+        check=True,
+        capture_output=True,
+    )
+    release_capture_hook(block)
+    proc.wait(timeout=120)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_ne("harness A exit nonzero", 0, proc.returncode)
+    assert_text_contains(
+        stderr,
+        "regression benchmark harness differs from the baseline snapshot",
+        "harness A reports snapshot harness mismatch",
+    )
+    assert_text_contains(
+        stderr,
+        "ALLOW_BENCH_HARNESS_DIFF=1",
+        "harness A shows override hint",
+    )
+    assert_cargo_not_run(cargo_log, "Cargo not invoked (harness A)")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock released (harness A)")
+    assert_no_staging_or_backup(repo)
+
+
+def test_harness_post_capture_live_mutation_ignored(tmp):
+    print()
+    print("=== Harness B: post-capture live harness mutation ignored ===")
+    test_dir = os.path.join(tmp, "harness-b")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+
+    harness_rel = "benches/regression/core_regression.rs"
+    with open(os.path.join(repo, harness_rel)) as fh:
+        original = fh.read()
+
+    block = os.path.join(test_dir, "capture-accepted-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+        repo,
+        stub_dir,
+        block,
+        "SCAH_BENCH_TEST_BLOCK_AFTER_CAPTURE_ACCEPTED",
+        extra_env={
+            "ALLOW_BENCH_HARNESS_DIFF": "0",
+            "SCAH_BENCH_TEST_READ_FILE": harness_rel,
+        },
+    )
+
+    if not wait_for_capture_hook_start(block):
+        proc.kill()
+        proc.wait()
+        f_out.close()
+        f_err.close()
+        _fail("capture-accepted hook did not start (harness B)")
+        return
+    _pass("capture accepted with equivalent harness")
+
+    with open(os.path.join(repo, harness_rel), "a") as fh:
+        fh.write("\n// live post-capture mutation\n")
+
+    release_capture_hook(block)
+    proc.wait(timeout=120)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_eq("harness B succeeds", 0, proc.returncode)
+    if proc.returncode != 0:
+        print(stderr, file=sys.stderr)
+    assert_cargo_ran(cargo_log, "Cargo ran (harness B)")
+    assert_eq(
+        "isolated worktree uses pre-mutation harness",
+        original.rstrip("\n"),
+        (file_content_from_snapshot_cargo(cargo_log, repo) or "").rstrip("\n"),
+    )
+    meta = read_metadata(repo)
+    assert_eq(
+        "harness snapshots match metadata",
+        "true",
+        meta.get("benchmark_harness_snapshots_match", ""),
+    )
+    assert_lock_absent(repo, "lock released (harness B)")
+
+
+def test_harness_untracked_file_rejected(tmp):
+    print()
+    print("=== Harness C: untracked harness file rejected ===")
+    test_dir = os.path.join(tmp, "harness-c")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    setup_prior_report(repo)
+    write_file(repo, "benches/regression/extra_bench.rs", "// untracked harness\n")
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env={"ALLOW_BENCH_HARNESS_DIFF": "0"},
+        timeout=60,
+    )
+
+    assert_ne("harness C exit nonzero", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        "regression benchmark harness differs from the baseline snapshot",
+        "harness C reports snapshot mismatch",
+    )
+    assert_cargo_not_run(cargo_log, "Cargo not invoked (harness C)")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock released (harness C)")
+    assert_no_staging_or_backup(repo)
+
+
+def test_harness_override_permits_difference(tmp):
+    print()
+    print("=== Harness D: override permits snapshot harness difference ===")
+    test_dir = os.path.join(tmp, "harness-d")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "benches/regression/extra_bench.rs", "// untracked harness\n")
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env={"ALLOW_BENCH_HARNESS_DIFF": "1"},
+        timeout=60,
+    )
+
+    assert_eq("harness D succeeds with override", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        "ALLOW_BENCH_HARNESS_DIFF=1 is set",
+        "harness D emits override warning",
+    )
+    assert_cargo_ran(cargo_log, "Cargo ran with harness override")
+    meta = read_metadata(repo)
+    assert_eq(
+        "harness D snapshots mismatch recorded",
+        "false",
+        meta.get("benchmark_harness_snapshots_match", ""),
+    )
+    assert_eq(
+        "harness D override recorded",
+        "true",
+        meta.get("benchmark_harness_diff_allowed", ""),
+    )
+    assert_file_exists(
+        os.path.join(repo, "target/bench-compare/latest/harness-integrity.txt"),
+        "harness integrity artifact published",
+    )
+    assert_lock_absent(repo, "lock released (harness D)")
+
+
+def test_harness_mode_only_difference_rejected(tmp):
+    print()
+    print("=== Harness E: mode-only harness difference rejected ===")
+    test_dir = os.path.join(tmp, "harness-e")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    setup_prior_report(repo)
+
+    subprocess.run(
+        ["git", "-C", repo, "config", "core.filemode", "true"],
+        check=True,
+    )
+    helper = os.path.join(repo, "benches", "regression", "helper.sh")
+    with open(helper, "w") as fh:
+        fh.write("#!/bin/sh\necho helper\n")
+    os.chmod(helper, 0o644)
+    subprocess.run(["git", "-C", repo, "add", "benches/regression/helper.sh"], check=True)
+    subprocess.run(
+        ["git", "-C", repo, "commit", "-q", "-m", "add helper"],
+        check=True,
+    )
+
+    # Advance baseline: create another commit so HEAD~1 still has the helper.
+    write_file(repo, "other2.rs", "// bump\n")
+    subprocess.run(["git", "-C", repo, "add", "other2.rs"], check=True)
+    subprocess.run(
+        ["git", "-C", repo, "commit", "-q", "-m", "bump"],
+        check=True,
+    )
+
+    os.chmod(helper, 0o755)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env={"ALLOW_BENCH_HARNESS_DIFF": "0"},
+        timeout=60,
+    )
+
+    assert_ne("harness E exit nonzero", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        "regression benchmark harness differs from the baseline snapshot",
+        "harness E detects mode-only difference",
+    )
+    assert_cargo_not_run(cargo_log, "Cargo not invoked (harness E)")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock released (harness E)")
+
+
+def test_harness_symlink_target_difference_rejected(tmp):
+    print()
+    print("=== Harness F: symlink-target harness difference rejected ===")
+    if not hasattr(os, "symlink"):
+        _pass("symlink creation not supported — skipping")
+        return
+
+    test_dir = os.path.join(tmp, "harness-f")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    setup_prior_report(repo)
+
+    target_a = os.path.join(repo, "benches", "regression", "target_a.txt")
+    target_b = os.path.join(repo, "benches", "regression", "target_b.txt")
+    with open(target_a, "w") as fh:
+        fh.write("same-bytes\n")
+    with open(target_b, "w") as fh:
+        fh.write("same-bytes\n")
+    link = os.path.join(repo, "benches", "regression", "alias")
+    os.symlink("target_a.txt", link)
+    subprocess.run(
+        ["git", "-C", repo, "add", "benches/regression"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", repo, "commit", "-q", "-m", "add harness symlink"],
+        check=True,
+    )
+    write_file(repo, "bump.rs", "// bump\n")
+    subprocess.run(["git", "-C", repo, "add", "bump.rs"], check=True)
+    subprocess.run(
+        ["git", "-C", repo, "commit", "-q", "-m", "bump"],
+        check=True,
+    )
+
+    os.unlink(link)
+    os.symlink("target_b.txt", link)
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(
+        repo,
+        stub_dir,
+        extra_env={"ALLOW_BENCH_HARNESS_DIFF": "0"},
+        timeout=60,
+    )
+
+    assert_ne("harness F exit nonzero", 0, result.returncode)
+    assert_text_contains(
+        result.stderr,
+        "regression benchmark harness differs from the baseline snapshot",
+        "harness F detects symlink target difference",
+    )
+    assert_cargo_not_run(cargo_log, "Cargo not invoked (harness F)")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock released (harness F)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Mixed capture-failure classification
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_capture_mixed_failure_reports_last_reason(tmp):
+    print()
+    print("=== Capture failure: last attempt reason wins over prior FIFO ===")
+    if not _fifo_supported():
+        _pass("FIFO creation not supported on this platform — skipping")
+        return
+
+    test_dir = os.path.join(tmp, "mixed-failure")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "generated.rs", "v1\n")
+    setup_prior_report(repo)
+
+    capture_block = os.path.join(test_dir, "capture-block")
+    retry_block = os.path.join(test_dir, "retry-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+    fifo_path = os.path.join(repo, "late.fifo")
+
+    def mutate():
+        with open(capture_block + ".started") as fh:
+            attempt = int(fh.read().strip())
+        if attempt == 1:
+            if not os.path.exists(fifo_path):
+                os.mkfifo(fifo_path)
+        else:
+            write_file(repo, "generated.rs", f"mutated-attempt-{attempt}\n")
+
+    stop_event = threading.Event()
+    releaser = threading.Thread(
+        target=capture_hook_releaser,
+        args=(capture_block, stop_event, mutate, True),
+        daemon=True,
+    )
+    releaser.start()
+
+    def retry_releaser():
+        started = retry_block + ".started"
+        released = retry_block + ".released"
+        last_marker = None
+        while not stop_event.is_set():
+            if os.path.exists(started):
+                with open(started, "rb") as fh:
+                    marker = fh.read()
+                if marker != last_marker or not os.path.exists(released):
+                    if marker != last_marker:
+                        last_marker = marker
+                        if os.path.exists(fifo_path):
+                            try:
+                                os.unlink(fifo_path)
+                            except FileNotFoundError:
+                                pass
+                    if not os.path.exists(released):
+                        release_capture_hook(retry_block)
+            time.sleep(0.05)
+
+    retry_thread = threading.Thread(target=retry_releaser, daemon=True)
+    retry_thread.start()
+
+    env = bench_compare_env(stub_dir)
+    env["SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE"] = capture_block
+    env["SCAH_BENCH_TEST_BLOCK_BEFORE_CAPTURE_RETRY"] = retry_block
+    stdout_path = capture_block + ".stdout"
+    stderr_path = capture_block + ".stderr"
+    f_out = open(stdout_path, "w")
+    f_err = open(stderr_path, "w")
+    proc = subprocess.Popen(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        stdout=f_out,
+        stderr=f_err,
+        preexec_fn=os.setsid,
+    )
+
+    proc.wait(timeout=120)
+    stop_event.set()
+    releaser.join(timeout=5)
+    retry_thread.join(timeout=5)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_ne("mixed failure exit nonzero", 0, proc.returncode)
+    assert_text_contains(
+        stderr,
+        "error: working tree changed during snapshot capture",
+        "final error is working-tree mutation",
+    )
+    assert_text_contains(
+        stderr,
+        "untracked content, type, mode, or symlink target changed",
+        "final reason is untracked manifest change",
+    )
+    if "error: unsupported special file appeared during source capture" in stderr:
+        # Mid-attempt diagnostics may mention the FIFO; the final error must not.
+        final_error_idx = stderr.rfind(
+            "error: unsupported special file appeared during source capture"
+        )
+        working_tree_idx = stderr.rfind(
+            "error: working tree changed during snapshot capture"
+        )
+        if final_error_idx > working_tree_idx:
+            _fail("final error incorrectly reports special-file exhaustion")
+        else:
+            _pass("prior FIFO diagnostic does not taint final failure reason")
+    else:
+        _pass("no sticky special-file exhaustion diagnostic")
+    assert_cargo_not_run(cargo_log, "Cargo not invoked for mixed failure")
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, "lock released after mixed failure")
+    assert_no_staging_or_backup(repo)
+
+    if os.path.exists(fifo_path):
+        os.unlink(fifo_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Staged-report reconstruction integrity validation
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _corrupt_staged_report(tmp, test_id, corrupt_fn, err_fragment):
+    test_dir = os.path.join(tmp, f"staged-{test_id}")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "extra.txt", "content\n")
+    setup_prior_report(repo)
+
+    block = os.path.join(test_dir, "metadata-block")
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    env = bench_compare_env(stub_dir)
+    env["SCAH_BENCH_TEST_BLOCK_AFTER_METADATA"] = block
+    stdout_path = block + ".stdout"
+    stderr_path = block + ".stderr"
+    f_out = open(stdout_path, "w")
+    f_err = open(stderr_path, "w")
+    proc = subprocess.Popen(
+        [BENCH_COMPARE],
+        cwd=repo,
+        env=env,
+        stdout=f_out,
+        stderr=f_err,
+        preexec_fn=os.setsid,
+    )
+
+    if not wait_for_capture_hook_start(block, timeout=60.0):
+        proc.kill()
+        proc.wait()
+        f_out.close()
+        f_err.close()
+        _fail(f"metadata hook did not start ({test_id})")
+        return
+
+    with open(block + ".staging") as fh:
+        staging = fh.read().strip()
+    corrupt_fn(staging)
+    release_capture_hook(block)
+
+    proc.wait(timeout=120)
+    f_out.close()
+    f_err.close()
+
+    with open(stderr_path) as fh:
+        stderr = fh.read()
+
+    assert_ne(f"staged corruption {test_id} exit nonzero", 0, proc.returncode)
+    assert_text_contains(
+        stderr,
+        err_fragment,
+        f"staged corruption {test_id} error fragment",
+    )
+    assert_prior_report_preserved(repo)
+    assert_lock_absent(repo, f"lock released ({test_id})")
+    assert_no_staging_or_backup(repo)
+
+
+def test_staged_report_verification_flag_false(tmp):
+    print()
+    print("=== Staged report: reconstruction verified=false rejected ===")
+
+    def corrupt(staging):
+        meta = os.path.join(staging, "metadata.txt")
+        with open(meta) as fh:
+            text = fh.read()
+        text = text.replace(
+            "untracked_capture_reconstruction_verified=true",
+            "untracked_capture_reconstruction_verified=false",
+        )
+        with open(meta, "w") as fh:
+            fh.write(text)
+
+    _corrupt_staged_report(
+        tmp,
+        "flag-false",
+        corrupt,
+        "untracked reconstruction verification metadata missing or false",
+    )
+
+
+def test_staged_report_hash_mismatch(tmp):
+    print()
+    print("=== Staged report: capture/reconstructed hash mismatch rejected ===")
+
+    def corrupt(staging):
+        meta = os.path.join(staging, "metadata.txt")
+        with open(meta) as fh:
+            lines = fh.readlines()
+        with open(meta, "w") as fh:
+            for line in lines:
+                if line.startswith("untracked_reconstructed_manifest_sha256="):
+                    fh.write(
+                        "untracked_reconstructed_manifest_sha256="
+                        + ("0" * 64)
+                        + "\n"
+                    )
+                else:
+                    fh.write(line)
+
+    _corrupt_staged_report(
+        tmp,
+        "hash-mismatch",
+        corrupt,
+        "untracked capture and reconstructed manifest hashes differ",
+    )
+
+
+def test_staged_report_published_manifest_tampered(tmp):
+    print()
+    print("=== Staged report: published capture manifest tampering rejected ===")
+
+    def corrupt(staging):
+        path = os.path.join(staging, "untracked-capture-manifest.jsonl")
+        with open(path, "a") as fh:
+            fh.write('{"tampered":true}\n')
+
+    _corrupt_staged_report(
+        tmp,
+        "manifest-tampered",
+        corrupt,
+        "published untracked capture manifest hash mismatch",
+    )
+
+
+def test_staged_report_published_manifest_missing(tmp):
+    print()
+    print("=== Staged report: missing capture manifest rejected ===")
+
+    def corrupt(staging):
+        path = os.path.join(staging, "untracked-capture-manifest.jsonl")
+        if os.path.exists(path):
+            os.unlink(path)
+
+    _corrupt_staged_report(
+        tmp,
+        "manifest-missing",
+        corrupt,
+        "untracked capture manifest was not published",
+    )
+
+
+def test_staged_report_valid_success_publishes(tmp):
+    print()
+    print("=== Staged report: valid successful report still publishes ===")
+    test_dir = os.path.join(tmp, "staged-valid")
+    repo = os.path.join(test_dir, "repo")
+    create_test_repo(repo)
+    write_file(repo, "extra.txt", "content\n")
+
+    stub_dir = os.path.join(test_dir, "stub")
+    cargo_log = os.path.join(test_dir, "cargo.log")
+    make_stub_cargo(stub_dir, cargo_log)
+
+    result = run_bench_compare(repo, stub_dir, timeout=60)
+    assert_eq("valid staged report succeeds", 0, result.returncode)
+    assert_cargo_ran(cargo_log, "Cargo ran for valid staged report")
+    meta = read_metadata(repo)
+    assert_eq(
+        "reconstruction verified true",
+        "true",
+        meta.get("untracked_capture_reconstruction_verified", ""),
+    )
+    capture_hash = meta.get("untracked_capture_manifest_sha256", "")
+    reconstructed_hash = meta.get("untracked_reconstructed_manifest_sha256", "")
+    assert_ne("capture hash non-empty", "", capture_hash)
+    assert_eq("capture and reconstructed hashes equal", capture_hash, reconstructed_hash)
+    manifest = os.path.join(
+        repo, "target/bench-compare/latest/untracked-capture-manifest.jsonl"
+    )
+    assert_file_exists(manifest, "untracked capture manifest published")
+    assert_eq(
+        "published manifest hash matches metadata",
+        capture_hash,
+        sha256_file(manifest),
+    )
+    assert_lock_absent(repo, "lock released after valid publish")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -4083,6 +4744,24 @@ def main():
         test_criterion_baseline_file_added(tmp)
         test_criterion_baseline_symlink_inserted(tmp)
         test_criterion_success_publishes_baseline_artifacts(tmp)
+
+        # Snapshot-based harness integrity.
+        test_harness_dirty_rejected_after_live_revert(tmp)
+        test_harness_post_capture_live_mutation_ignored(tmp)
+        test_harness_untracked_file_rejected(tmp)
+        test_harness_override_permits_difference(tmp)
+        test_harness_mode_only_difference_rejected(tmp)
+        test_harness_symlink_target_difference_rejected(tmp)
+
+        # Capture failure classification.
+        test_capture_mixed_failure_reports_last_reason(tmp)
+
+        # Staged-report reconstruction integrity.
+        test_staged_report_verification_flag_false(tmp)
+        test_staged_report_hash_mismatch(tmp)
+        test_staged_report_published_manifest_tampered(tmp)
+        test_staged_report_published_manifest_missing(tmp)
+        test_staged_report_valid_success_publishes(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -4090,6 +4769,11 @@ def main():
     print("=" * 44)
     print(f"Results: {PASS} passed, {FAIL} failed")
     print("=" * 44)
+
+    if FAILURES:
+        print("\nFailed assertions:", file=sys.stderr)
+        for failure in FAILURES:
+            print(f"  - {failure}", file=sys.stderr)
 
     if FAIL > 0:
         sys.exit(1)
