@@ -52,7 +52,9 @@ just bench-compare HEAD~1    # Compare against a specific revision
 `just bench-compare` (backed by `scripts/bench-compare.sh` and Python helpers):
 
 1. Resolves the baseline and current revisions.
-2. Captures the current source state in a **verified retry loop** (up to three
+2. Acquires a repository-scoped comparison lock derived from the common Git
+   directory (shared across linked worktrees).
+3. Captures the current source state in a **verified retry loop** (up to three
    attempts): records a binary-safe tracked diff and an untracked path inventory,
    stages non-ignored untracked entries into a capture directory
    (`scripts/capture-untracked.py`), and scans for unsupported special files
@@ -64,48 +66,52 @@ just bench-compare HEAD~1    # Compare against a specific revision
    agree. This is not a fully atomic filesystem snapshot — the workflow verifies
    stable endpoint state and retries when endpoint observations differ. It does
    not detect mutations that appear and disappear entirely between observations.
-3. Creates a temporary detached Git worktree for the baseline revision.
-4. Creates a second temporary detached worktree for the current revision,
+4. Creates a temporary detached Git worktree for the baseline revision.
+5. Creates a second temporary detached worktree for the current revision,
    applies tracked dirty changes, and restores untracked entries from the staged
    capture via Python (`scripts/capture-untracked.py restore`) — never reading
    bytes from the live repository. Independently inspects the reconstructed
    entries; their path/type/mode/content manifest must exactly equal the
    accepted capture manifest before benchmarking begins.
-5. Validates that no symlink in either snapshot escapes the snapshot root
+6. Compares deterministic fingerprints of `benches/regression` in the baseline
+   and reconstructed current worktrees. The live repository is not consulted for
+   harness equivalence after capture acceptance. Harness differences abort unless
+   `ALLOW_BENCH_HARNESS_DIFF=1` is set.
+7. Validates that no symlink in either snapshot escapes the snapshot root
    (rejects absolute targets, `../` escapes, and chained escapes).
-6. Fingerprints both snapshots before any Cargo invocation
+8. Fingerprints both snapshots before any Cargo invocation
    (`scripts/source-fingerprint.py`). The fingerprint depends only on relative
    source paths, file types, modes, file contents, and symlink targets — it
    does not depend on clone or temporary-directory location. `.git`
    administration metadata is excluded.
-7. Hashes both `Cargo.lock` files before any Cargo invocation.
-8. Compiles the benchmark binary for both baseline and current snapshot in
-   **separate** `CARGO_TARGET_DIR` directories.
-9. Fingerprints both snapshots after compilation to detect persistent mutation.
-10. Runs the baseline benchmarks and saves Criterion baseline data.
-11. Copies only exact saved-baseline measurement directories named in a
+9. Hashes both `Cargo.lock` files before any Cargo invocation.
+10. Compiles the benchmark binary for both baseline and current snapshot in
+    **separate** `CARGO_TARGET_DIR` directories.
+11. Fingerprints both snapshots after compilation to detect persistent mutation.
+12. Runs the baseline benchmarks and saves Criterion baseline data.
+13. Copies only exact saved-baseline measurement directories named in a
     Criterion inventory (`scripts/copy-criterion-baseline.py`), excluding
     `report/`, `new/`, and `change/`. Records a deterministic
     path/type/mode/content manifest of the copied baseline measurements before
     the current run (`scripts/criterion-baseline-manifest.py`).
-12. Runs the current benchmarks against the saved baseline — from the snapshot,
+14. Runs the current benchmarks against the saved baseline — from the snapshot,
     not the live repository. Validates that every copied baseline benchmark
     produced fresh `new/` measurement data and `change/` comparison estimates
     (`scripts/validate-criterion-comparison.py`).
-13. Re-generates the baseline measurement manifest after the current run.
+15. Re-generates the baseline measurement manifest after the current run.
     Publication is aborted if the before/after manifests differ — copied
     baseline data must remain unchanged.
-14. Fingerprints both snapshots after measurement to detect persistent mutation.
-15. Re-fingerprints both snapshots and re-hashes both lockfiles **after** all
+16. Fingerprints both snapshots after measurement to detect persistent mutation.
+17. Re-fingerprints both snapshots and re-hashes both lockfiles **after** all
     Cargo commands complete.
-16. Verifies that all before/after values are identical. If any snapshot or
+18. Verifies that all before/after values are identical. If any snapshot or
     lockfile changed during compilation or measurement, publication is aborted
     with a diagnostic identifying the phase and affected resource.
-17. Stages the Criterion report, metadata, source manifest, untracked capture
-    manifest, and baseline integrity artifacts. Validates that all required
-    artifacts are present.
-18. Atomically publishes the report to `target/bench-compare/latest/`.
-19. Cleans up the temporary worktrees, capture directories, and the
+19. Stages the Criterion report, metadata, source manifest, untracked capture
+    manifest, and baseline integrity artifacts. Validates reconstruction
+    verification metadata and that all required artifacts are present.
+20. Atomically publishes the report to `target/bench-compare/latest/`.
+21. Cleans up the temporary worktrees, capture directories, and the
     repository-common lock.
 
 Helper scripts:
@@ -152,16 +158,18 @@ Helper scripts:
 - Symlinks that escape the snapshot root (absolute targets, `../` escapes,
   chained escapes) are rejected before any Cargo invocation. Safe internal
   symlinks and broken internal symlinks are permitted.
-- Harness changes under `benches/regression` remain rejected unless
-  explicitly overridden with `ALLOW_BENCH_HARNESS_DIFF=1`.
+- Harness equivalence is decided from deterministic fingerprints of
+  `benches/regression` in the isolated baseline and current worktrees — not
+  from live-repository Git queries after capture acceptance. Differences remain
+  rejected unless explicitly overridden with `ALLOW_BENCH_HARNESS_DIFF=1`.
 - Linked worktrees of the same repository share one comparison lock derived
   from the common Git directory.
 - `target/bench-compare/latest` contains local dirty-state and integrity
   metadata including `current-source-manifest.bin`,
   `current-source-manifest.sha256`, `tracked-diff.patch`,
   `untracked-files.txt`, `untracked-capture-manifest.jsonl`,
-  `criterion-baseline-inventory.jsonl`, `criterion-baseline-manifest.bin`, and
-  `criterion-baseline-manifest.sha256`.
+  `harness-integrity.txt`, `criterion-baseline-inventory.jsonl`,
+  `criterion-baseline-manifest.bin`, and `criterion-baseline-manifest.sha256`.
 - The previous successful report remains available after an integrity
   verification failure. No new report is published on failure.
 - The source fingerprint uses a NUL-delimited binary manifest format that
@@ -213,13 +221,18 @@ just bench-compare <commit>
 
 ### Harness-integrity check
 
-bench-compare refuses to run when `benches/regression` differs from the selected
-baseline. Criterion benchmark IDs are meaningful only when both revisions use
-the same workload.
+After both isolated worktrees exist, bench-compare fingerprints
+`benches/regression` in the baseline worktree and the reconstructed current
+worktree. It refuses to continue when those fingerprints differ. Criterion
+benchmark IDs are meaningful only when both snapshots use the same workload.
+
+This decision uses only the isolated snapshots Cargo will execute. Live edits
+to the repository after capture acceptance cannot change the harness verdict.
 
 For benchmark-infrastructure development only, this check can be bypassed with
 `ALLOW_BENCH_HARNESS_DIFF=1`. Results produced with that override may not be
-valid performance comparisons.
+valid performance comparisons. Metadata records both harness fingerprints,
+whether the snapshots matched, and whether the override was enabled.
 
 ## Best practices
 

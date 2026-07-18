@@ -55,7 +55,16 @@ jobs:
           python3 -m py_compile scripts/tests/bench-compare-test.py
 
       - name: Test benchmark comparison workflow
-        run: python3 scripts/tests/bench-compare-test.py
+        run: |
+          set -o pipefail
+          python3 scripts/tests/bench-compare-test.py 2>&1 |
+            tee bench-compare-test.log
+      - name: Upload benchmark workflow test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-compare-test-${{ runner.os }}
+          path: bench-compare-test.log
 
   benchmark-portability:
     name: Benchmark Package Portability
@@ -89,7 +98,16 @@ jobs:
           python3 -m py_compile scripts/scan-special-files.py
           python3 -m py_compile scripts/tests/bench-compare-test.py
       - name: Test benchmark comparison workflow
-        run: python3 scripts/tests/bench-compare-test.py
+        run: |
+          set -o pipefail
+          python3 scripts/tests/bench-compare-test.py 2>&1 |
+            tee bench-compare-test.log
+      - name: Upload benchmark workflow test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-compare-test-${{ runner.os }}
+          path: bench-compare-test.log
 
   python:
     name: Python Binding Tests
