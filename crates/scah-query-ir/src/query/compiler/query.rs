@@ -72,6 +72,11 @@ pub trait QuerySpec<'query> {
         &self.queries()[section_index.index()]
     }
 
+    fn section_transition_count(&self, section: QuerySectionId) -> usize {
+        let range = &self.get_selection(section).range;
+        range.end.index() - range.start.index()
+    }
+
     fn is_descendant(&self, state: TransitionId) -> bool {
         self.get_transition(state).guard == Combinator::Descendant
     }

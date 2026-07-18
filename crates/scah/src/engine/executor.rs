@@ -122,6 +122,56 @@ where
         self.note_first_terminal_match(selected_depth, selected_element_id, section);
     }
 
+    #[cfg(any(debug_assertions, test))]
+    fn debug_assert_no_first_scope_peer(
+        &self,
+        section: QuerySectionId,
+        output_parent: ElementId,
+        selected_cursor_index: usize,
+    ) {
+        debug_assert!(
+            self.cursors
+                .iter()
+                .enumerate()
+                .find(|(index, cursor)| {
+                    *index != selected_cursor_index
+                        && cursor.position.selection == section
+                        && cursor.parent == output_parent
+                        && cursor.is_active()
+                })
+                .is_none(),
+            "single-transition First scope unexpectedly has an active peer"
+        );
+    }
+
+    fn complete_terminal_first(
+        &mut self,
+        cursor_index: usize,
+        section: QuerySectionId,
+        output_parent: ElementId,
+        selected_depth: super::DepthSize,
+        selected_element_id: ElementId,
+    ) {
+        if self.query.section_transition_count(section) == 1 {
+            if self.cursors[cursor_index].is_moving() {
+                self.cursors[cursor_index].complete_until_close(selected_depth);
+            } else {
+                self.cursors[cursor_index].mark_complete();
+            }
+            self.note_first_terminal_match(selected_depth, selected_element_id, section);
+            #[cfg(any(debug_assertions, test))]
+            self.debug_assert_no_first_scope_peer(section, output_parent, cursor_index);
+        } else {
+            self.claim_first_scope(
+                section,
+                output_parent,
+                cursor_index,
+                selected_depth,
+                selected_element_id,
+            );
+        }
+    }
+
     fn note_first_terminal_match(
         &mut self,
         depth: super::DepthSize,
@@ -565,10 +615,10 @@ where
                     if !terminal_all {
                         if terminal_first {
                             if let Some(element_id) = saved_element {
-                                self.claim_first_scope(
+                                self.complete_terminal_first(
+                                    i,
                                     position.selection,
                                     original_parent,
-                                    i,
                                     depth,
                                     element_id,
                                 );
@@ -636,10 +686,10 @@ where
                             let element_id = hit.element_id;
                             save_hits.push(hit);
                             if is_first {
-                                self.claim_first_scope(
+                                self.complete_terminal_first(
+                                    i,
                                     position.selection,
                                     save_parent,
-                                    i,
                                     depth,
                                     element_id,
                                 );
@@ -682,10 +732,10 @@ where
                         let element_id = hit.element_id;
                         save_hits.push(hit);
                         if is_first {
-                            self.claim_first_scope(
+                            self.complete_terminal_first(
+                                i,
                                 position.selection,
                                 save_parent,
-                                i,
                                 depth,
                                 element_id,
                             );
@@ -708,16 +758,7 @@ where
         if self.query.exit_at_section_end().is_none() {
             return false;
         }
-        if !self.first_child_obligations_complete() {
-            return false;
-        }
-        match self.first_match {
-            FirstMatchState::Complete(_) => true,
-            // Terminal `first()` without `.then()` still exits while unwind is
-            // pending so the match close can drop the runner.
-            FirstMatchState::Matched(_) => self.query.queries().len() == 1,
-            FirstMatchState::Searching => false,
-        }
+        matches!(self.first_match, FirstMatchState::Complete(_))
     }
 
     pub fn back(
@@ -1581,8 +1622,16 @@ mod tests {
         );
 
         assert!(
-            selection.early_exit(),
-            "early_exit should be true after First match completes"
+            !selection.early_exit(),
+            "early_exit must be false while selected element is only Matched"
+        );
+        assert!(
+            selection.cursors[0].is_complete(),
+            "selected cursor should be Complete awaiting close"
+        );
+        assert!(
+            selection.cursors[0].unwind_depth().is_some(),
+            "selected cursor should retain unwind depth until close"
         );
 
         store.text_content.set_start(4);
@@ -1600,6 +1649,14 @@ mod tests {
         );
 
         assert!(reactivated, "back() should return true on first close");
+        assert!(
+            selection.early_exit(),
+            "early_exit should be true after selected element closes"
+        );
+        assert!(
+            selection.cursors[0].unwind_depth().is_none(),
+            "selected cursor should clear unwind after close"
+        );
     }
 
     #[test]
@@ -1968,14 +2025,19 @@ mod tests {
         );
 
         // Early exit for flat first() is covered by the single global result above;
-        // verify first('div') still triggers early_exit on the executor directly.
+        // verify first('div') triggers early_exit only after selected close.
         let div_only = Query::first("div", Save::all()).unwrap().build();
         let mut selection = QueryExecutor::new(&div_only);
         let mut store3 = Store::default();
         selection.next(0, &elem("div"), &doc_pos(0), &mut store3, &mut Vec::new());
         assert!(
+            !selection.early_exit(),
+            "first('div') must not early-exit before selected close"
+        );
+        selection.back(0, "div", &doc_pos(0), &mut store3);
+        assert!(
             selection.early_exit(),
-            "first('div') must set early_exit after terminal match"
+            "first('div') must early-exit after selected close"
         );
     }
 
@@ -2814,5 +2876,116 @@ mod tests {
             None,
             "reactivated retained prefix must not retain unwind depth"
         );
+    }
+
+    #[test]
+    fn first_single_transition_direct_child_selects_once() {
+        let html = r#"
+            <article>
+                <h1 id="first"></h1>
+                <h1 id="second"></h1>
+            </article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("> h1", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 1);
+        let titles: Vec<_> = articles[0].get(&store, "> h1").unwrap().collect();
+        assert_eq!(titles.len(), 1);
+        assert_eq!(titles[0].id, Some("first"));
+    }
+
+    #[test]
+    fn first_lifecycle_matched_then_complete_after_close() {
+        let query = Query::first("div", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        assert!(matches!(selection.first_match, FirstMatchState::Matched(_)));
+        assert!(!selection.early_exit());
+        assert!(selection.cursors[0].is_complete());
+        assert_eq!(selection.cursors[0].unwind_depth(), Some(0));
+
+        store.text_content.set_start(0);
+        store.text_content.push(&Reader::new("<div>text</div>"), 4);
+        selection.back(0, "div", &doc_pos(0), &mut store);
+        assert!(matches!(
+            selection.first_match,
+            FirstMatchState::Complete(_)
+        ));
+        assert!(selection.early_exit());
+        assert!(selection.cursors[0].is_complete());
+        assert_eq!(selection.cursors[0].unwind_depth(), None);
+
+        let hits: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn first_lifecycle_finalizes_content_through_parser() {
+        let html = "<div>text</div><span>tail</span>";
+        let query = Query::first("div", Save::all()).unwrap().build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let hits: Vec<_> = store.get("div").unwrap().collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].inner_html, Some("text"));
+        assert_eq!(hits[0].text_content(&store), Some("text"));
+    }
+
+    #[test]
+    fn first_void_lifecycle_matched_then_complete_at_synthetic_close() {
+        let query = Query::first("br", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(
+            0,
+            &elem("br"),
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+                self_closing: true,
+            },
+            &mut store,
+            &mut save_hits,
+        );
+        assert!(matches!(selection.first_match, FirstMatchState::Matched(_)));
+        assert!(!selection.early_exit());
+        assert!(selection.cursors[0].is_complete());
+        assert_eq!(selection.cursors[0].unwind_depth(), Some(0));
+
+        selection.back(
+            0,
+            "br",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 0,
+                self_closing: true,
+            },
+            &mut store,
+        );
+        assert!(matches!(
+            selection.first_match,
+            FirstMatchState::Complete(_)
+        ));
+        assert!(selection.early_exit());
+        assert!(selection.cursors[0].is_complete());
+        assert_eq!(selection.cursors[0].unwind_depth(), None);
     }
 }

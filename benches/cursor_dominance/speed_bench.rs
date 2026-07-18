@@ -1,12 +1,13 @@
 //! Adversarial nested-selector workloads for cursor dominance admission.
 //!
-//! Measures parse/query throughput and peak live cursor counts on synthetic
+//! Measures parse/query throughput and peak cursor statistics on synthetic
 //! HTML at depths 8, 32, 128, and 512.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use scah::Query;
 use scah::Save;
 use scah::bench_internals::parse_with_cursor_stats;
+use scah::parse;
 use std::hint::black_box;
 
 const DEPTHS: &[u16] = &[8, 32, 128, 512];
@@ -73,21 +74,36 @@ fn bench_case<F>(
                 let query = build_query(selector);
                 b.iter(|| {
                     let queries = &[query.clone()];
-                    let (store, _max) = parse_with_cursor_stats(black_box(html), queries).unwrap();
+                    let store = parse(black_box(html), queries).unwrap();
                     black_box(store.get(selector).unwrap().count());
                 });
             },
         );
 
         group.bench_with_input(
-            BenchmarkId::new("max_cursors", depth),
+            BenchmarkId::new("peak_resident_cursor_slots", depth),
+            &(html.clone(), selector),
+            |b, (html, selector)| {
+                let query = build_query(selector);
+                b.iter(|| {
+                    let queries = &[query.clone()];
+                    let (_store, stats) =
+                        parse_with_cursor_stats(black_box(html), queries).unwrap();
+                    black_box(stats.peak_resident_cursor_slots);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("peak_active_obligations", depth),
             &(html, selector),
             |b, (html, selector)| {
                 let query = build_query(selector);
                 b.iter(|| {
                     let queries = &[query.clone()];
-                    let (_store, max) = parse_with_cursor_stats(black_box(html), queries).unwrap();
-                    black_box(max);
+                    let (_store, stats) =
+                        parse_with_cursor_stats(black_box(html), queries).unwrap();
+                    black_box(stats.peak_active_obligations);
                 });
             },
         );

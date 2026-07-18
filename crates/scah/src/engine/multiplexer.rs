@@ -23,10 +23,24 @@ pub(crate) struct SaveHit {
 //type Runner<'query, Q> = SmallVec<[QueryExecutor<'query, Q>; 1]>;
 type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
 
+#[cfg(feature = "bench-internals")]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CursorStats {
+    peak_resident_cursor_slots: usize,
+    peak_active_obligations: usize,
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorStatsSnapshot {
+    pub peak_resident_cursor_slots: usize,
+    pub peak_active_obligations: usize,
+}
+
 pub struct QueryMultiplexer<'query, Q> {
     runners: Runner<'query, Q>,
     #[cfg(feature = "bench-internals")]
-    max_live_cursors: std::cell::Cell<usize>,
+    cursor_stats: Option<CursorStats>,
 }
 
 impl<'html, 'query: 'html, Q> QueryMultiplexer<'query, Q>
@@ -41,22 +55,60 @@ where
                 .map(|query| QueryExecutor::new(query))
                 .collect::<Runner<'query, Q>>(),
             #[cfg(feature = "bench-internals")]
-            max_live_cursors: std::cell::Cell::new(0),
+            cursor_stats: None,
         }
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn track_live_cursors(&self) {
-        let total: usize = self.runners.iter().map(|runner| runner.cursors.len()).sum();
-        let current = self.max_live_cursors.get();
-        if total > current {
-            self.max_live_cursors.set(total);
+    pub(crate) fn new_with_cursor_stats(queries: &'query [Q]) -> Self {
+        Self {
+            #[allow(clippy::redundant_closure)]
+            runners: queries
+                .iter()
+                .map(|query| QueryExecutor::new(query))
+                .collect::<Runner<'query, Q>>(),
+            cursor_stats: Some(CursorStats::default()),
         }
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn max_live_cursors(&self) -> usize {
-        self.max_live_cursors.get()
+    #[allow(dead_code)]
+    pub(crate) fn cursor_stats_enabled(&self) -> bool {
+        self.cursor_stats.is_some()
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[inline]
+    fn track_cursor_stats(&mut self) {
+        let Some(stats) = self.cursor_stats.as_mut() else {
+            return;
+        };
+
+        let resident = self.runners.iter().map(|runner| runner.cursors.len()).sum();
+
+        let active = self
+            .runners
+            .iter()
+            .flat_map(|runner| runner.cursors.iter())
+            .filter(|cursor| cursor.is_active())
+            .count();
+
+        stats.peak_resident_cursor_slots = stats.peak_resident_cursor_slots.max(resident);
+        stats.peak_active_obligations = stats.peak_active_obligations.max(active);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn cursor_stats_snapshot(&self) -> CursorStatsSnapshot {
+        let stats = self.cursor_stats.unwrap_or_default();
+        CursorStatsSnapshot {
+            peak_resident_cursor_slots: stats.peak_resident_cursor_slots,
+            peak_active_obligations: stats.peak_active_obligations,
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn sample_cursor_stats(&mut self) {
+        self.track_cursor_stats();
     }
 
     pub(crate) fn requires_text_content(&self) -> bool {
@@ -78,7 +130,7 @@ where
             session.next(runner_index, xhtml_element, position, store, save_hits);
         }
         #[cfg(feature = "bench-internals")]
-        self.track_live_cursors();
+        self.track_cursor_stats();
         if len == store.elements.len() {
             xhtml_element.remove_attributes(&mut store.attributes);
         }
@@ -106,7 +158,7 @@ where
         }
 
         #[cfg(feature = "bench-internals")]
-        self.track_live_cursors();
+        self.track_cursor_stats();
 
         self.runners.is_empty()
     }
