@@ -2903,6 +2903,141 @@ mod tests {
     }
 
     #[test]
+    fn first_single_transition_direct_child_scopes_independent_per_parent() {
+        let html = r#"
+            <article id="a">
+                <h1 id="a-first"></h1>
+                <h1 id="a-second"></h1>
+            </article>
+            <article id="b">
+                <h1 id="b-first"></h1>
+                <h1 id="b-second"></h1>
+            </article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("> h1", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 2);
+
+        let article_a = articles
+            .iter()
+            .find(|a| a.id == Some("a"))
+            .expect("article a");
+        let article_b = articles
+            .iter()
+            .find(|a| a.id == Some("b"))
+            .expect("article b");
+
+        let a_titles: Vec<_> = article_a.get(&store, "> h1").unwrap().collect();
+        assert_eq!(a_titles.len(), 1);
+        assert_eq!(a_titles[0].id, Some("a-first"));
+
+        let b_titles: Vec<_> = article_b.get(&store, "> h1").unwrap().collect();
+        assert_eq!(b_titles.len(), 1);
+        assert_eq!(b_titles[0].id, Some("b-first"));
+    }
+
+    #[test]
+    fn first_single_transition_preserves_sibling_all_section_across_parents() {
+        let html = r#"
+            <article id="a">
+                <h1 id="a-first"></h1>
+                <h1 id="a-second"></h1>
+                <p id="a-p1"></p>
+                <p id="a-p2"></p>
+            </article>
+            <article id="b">
+                <h1 id="b-first"></h1>
+                <h1 id="b-second"></h1>
+                <p id="b-p1"></p>
+                <p id="b-p2"></p>
+            </article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| {
+                Ok([
+                    article.first("> h1", Save::all())?,
+                    article.all("> p", Save::all())?,
+                ])
+            })
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 2);
+
+        for (article_id, expected_h1, expected_ps) in [
+            ("a", "a-first", ["a-p1", "a-p2"]),
+            ("b", "b-first", ["b-p1", "b-p2"]),
+        ] {
+            let article = articles
+                .iter()
+                .find(|a| a.id == Some(article_id))
+                .unwrap_or_else(|| panic!("article {article_id}"));
+
+            let titles: Vec<_> = article.get(&store, "> h1").unwrap().collect();
+            assert_eq!(
+                titles.len(),
+                1,
+                "article {article_id}: single-transition First must select one h1"
+            );
+            assert_eq!(titles[0].id, Some(expected_h1));
+
+            let paragraphs: Vec<_> = article.get(&store, "> p").unwrap().collect();
+            assert_eq!(
+                paragraphs.len(),
+                2,
+                "article {article_id}: First fast path must not cancel sibling All"
+            );
+            assert_eq!(paragraphs[0].id, Some(expected_ps[0]));
+            assert_eq!(paragraphs[1].id, Some(expected_ps[1]));
+        }
+    }
+
+    #[test]
+    fn first_single_transition_void_direct_child_scopes_independent_per_parent() {
+        let html = r#"
+            <article id="a"><br><br></article>
+            <article id="b"><br><br></article>
+        "#;
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("> br", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [query];
+        let store = parse(html, &queries);
+
+        let articles: Vec<_> = store.get("article").unwrap().collect();
+        assert_eq!(articles.len(), 2);
+
+        for article_id in ["a", "b"] {
+            let article = articles
+                .iter()
+                .find(|a| a.id == Some(article_id))
+                .unwrap_or_else(|| panic!("article {article_id}"));
+            let breaks: Vec<_> = article.get(&store, "> br").unwrap().collect();
+            assert_eq!(
+                breaks.len(),
+                1,
+                "article {article_id}: void direct-child First must select one br"
+            );
+        }
+    }
+
+    #[test]
     fn first_lifecycle_matched_then_complete_after_close() {
         let query = Query::first("div", Save::all()).unwrap().build();
         let query = &query;
