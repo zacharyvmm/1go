@@ -30,10 +30,14 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude scah-benches --exclude scah-cursor-benches -- -D warnings
       - name: Test
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
+      - name: Test cursor instrumentation
+        run: cargo test -p scah --features bench-internals
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
-      - name: Check cursor stats report
-        run: cargo build -p scah-cursor-benches --release --bin cursor_stats_report
+      - name: Check cursor-dominance benchmark
+        run: cargo bench -p scah-benches --bench speed_bench_cursor_dominance -- --test
+      - name: Run cursor stats report
+        run: cargo run -p scah-cursor-benches --release --bin cursor_stats_report
 
   python:
     name: Python Binding Tests
