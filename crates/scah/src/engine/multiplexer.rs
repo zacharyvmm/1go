@@ -47,13 +47,17 @@ impl<'html, 'query: 'html, Q> QueryMultiplexer<'query, Q>
 where
     Q: QuerySpec<'query>,
 {
+    fn build_runners(queries: &'query [Q]) -> Runner<'query, Q> {
+        #[allow(clippy::redundant_closure)]
+        queries
+            .iter()
+            .map(|query| QueryExecutor::new(query))
+            .collect()
+    }
+
     pub fn new(queries: &'query [Q]) -> Self {
         Self {
-            #[allow(clippy::redundant_closure)]
-            runners: queries
-                .iter()
-                .map(|query| QueryExecutor::new(query))
-                .collect::<Runner<'query, Q>>(),
+            runners: Self::build_runners(queries),
             #[cfg(feature = "bench-internals")]
             cursor_stats: None,
         }
@@ -62,11 +66,7 @@ where
     #[cfg(feature = "bench-internals")]
     pub(crate) fn new_with_cursor_stats(queries: &'query [Q]) -> Self {
         Self {
-            #[allow(clippy::redundant_closure)]
-            runners: queries
-                .iter()
-                .map(|query| QueryExecutor::new(query))
-                .collect::<Runner<'query, Q>>(),
+            runners: Self::build_runners(queries),
             cursor_stats: Some(CursorStats::default()),
         }
     }
@@ -77,6 +77,10 @@ where
         self.cursor_stats.is_some()
     }
 
+    /// Sample resident slot and active-obligation counts.
+    ///
+    /// Peaks include the initial root cursors (via an explicit sample before
+    /// parsing) and the state after every open and close/pruning event.
     #[cfg(feature = "bench-internals")]
     #[inline]
     fn track_cursor_stats(&mut self) {

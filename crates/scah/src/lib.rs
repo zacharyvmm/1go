@@ -123,19 +123,33 @@ pub use scah_query_ir::{
 pub use scah_reader::Reader;
 pub use store::{CapacityOptions, Element, ElementId, Store};
 
-/// Internal parser details exposed only so benchmarks can measure production
-/// code instead of maintaining a duplicate implementation.
-#[cfg(feature = "bench-internals")]
+/// Internal parser details exposed so benchmarks can measure production code
+/// instead of maintaining a duplicate implementation.
+///
+/// Tag classification helpers are always available. Cursor-statistics APIs
+/// require the `bench-internals` feature and must only be used from the
+/// instrumented `scah-cursor-benches` package — never from production speed
+/// benchmarks (`scah-benches`).
 #[doc(hidden)]
 pub mod bench_internals {
-    pub use crate::engine::cursor::ScopedCursor;
-    pub use crate::engine::multiplexer::CursorStatsSnapshot;
-    use crate::engine::multiplexer::QueryMultiplexer;
     pub use crate::html::tag::{ScopeKind, TagFlags};
+
+    #[cfg(feature = "bench-internals")]
+    pub use crate::engine::cursor::ScopedCursor;
+    #[cfg(feature = "bench-internals")]
+    pub use crate::engine::multiplexer::CursorStatsSnapshot;
+    #[cfg(feature = "bench-internals")]
+    use crate::engine::multiplexer::QueryMultiplexer;
+    #[cfg(feature = "bench-internals")]
     use crate::store::Store;
+    #[cfg(feature = "bench-internals")]
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
 
     /// Parse HTML while recording peak cursor statistics across all query runners.
+    ///
+    /// Statistics are sampled for the initial root cursors, after every open
+    /// event, and after every close/pruning event.
+    #[cfg(feature = "bench-internals")]
     pub fn parse_with_cursor_stats<'a: 'query, 'html: 'query, 'query: 'html, Q>(
         html: &'html str,
         queries: &'a [Q],
@@ -402,7 +416,7 @@ mod tests {
 
         let query = Query::all("div", Save::none()).unwrap().build();
         let queries = [query];
-        let mut selectors = QueryMultiplexer::new(&queries);
+        let selectors = QueryMultiplexer::new(&queries);
         assert!(!selectors.cursor_stats_enabled());
 
         let html = "<div><span></span></div>";

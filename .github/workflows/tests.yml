@@ -27,11 +27,13 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --exclude scah-benches -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude scah-benches --exclude scah-cursor-benches -- -D warnings
       - name: Test
-        run: cargo test --workspace --exclude scah-benches
+        run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
+      - name: Check cursor stats report
+        run: cargo build -p scah-cursor-benches --release --bin cursor_stats_report
 
   python:
     name: Python Binding Tests
