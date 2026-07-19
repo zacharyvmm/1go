@@ -79,7 +79,6 @@ where
         output_parent: ElementId,
         selected_cursor_index: usize,
         selected_depth: super::DepthSize,
-        selected_element_id: ElementId,
     ) {
         debug_assert!(
             matches!(
@@ -88,87 +87,44 @@ where
             ),
             "claim_first_scope requires SelectionKind::First"
         );
-        #[cfg(any(debug_assertions, test))]
-        {
-            let already_claimed = self.cursors.iter().any(|c| {
-                c.position.selection == section && c.parent == output_parent && c.is_complete()
-            }) && self.cursors.iter().any(|c| {
-                c.position.selection == section
-                    && c.parent == output_parent
-                    && c.is_complete()
-                    && c.unwind_depth().is_some()
-            });
-            debug_assert!(
-                !already_claimed,
-                "First scope claimed twice for section+output_parent"
-            );
-        }
+
+        debug_assert_eq!(
+            self.cursors[selected_cursor_index].position.selection,
+            section,
+            "selected cursor must belong to claimed First section"
+        );
+        debug_assert_eq!(
+            self.cursors[selected_cursor_index].parent,
+            output_parent,
+            "selected cursor parent must match First output parent"
+        );
+        debug_assert!(
+            self.cursors[selected_cursor_index].is_moving(),
+            "First winner must be a moving cursor"
+        );
+        debug_assert!(
+            self.cursors[selected_cursor_index].is_active(),
+            "First winner must be active before claim"
+        );
+
+        debug_assert!(
+            !self.cursors.iter().any(|cursor| {
+                cursor.position.selection == section
+                    && cursor.parent == output_parent
+                    && cursor.is_first_winner()
+            }),
+            "First scope claimed twice for section+output_parent"
+        );
 
         for (index, cursor) in self.cursors.iter_mut().enumerate() {
             if cursor.position.selection != section || cursor.parent != output_parent {
                 continue;
             }
             if index == selected_cursor_index {
-                if cursor.is_moving() {
-                    cursor.complete_until_close(selected_depth);
-                } else {
-                    cursor.mark_complete();
-                }
+                cursor.select_first_until_close(selected_depth);
             } else {
                 cursor.cancel_complete();
             }
-        }
-
-        self.note_first_terminal_match(selected_depth, selected_element_id, section);
-    }
-
-    #[cfg(any(debug_assertions, test))]
-    fn debug_assert_no_first_scope_peer(
-        &self,
-        section: QuerySectionId,
-        output_parent: ElementId,
-        selected_cursor_index: usize,
-    ) {
-        debug_assert!(
-            self.cursors
-                .iter()
-                .enumerate()
-                .find(|(index, cursor)| {
-                    *index != selected_cursor_index
-                        && cursor.position.selection == section
-                        && cursor.parent == output_parent
-                        && cursor.is_active()
-                })
-                .is_none(),
-            "single-transition First scope unexpectedly has an active peer"
-        );
-    }
-
-    fn complete_terminal_first(
-        &mut self,
-        cursor_index: usize,
-        section: QuerySectionId,
-        output_parent: ElementId,
-        selected_depth: super::DepthSize,
-        selected_element_id: ElementId,
-    ) {
-        if self.query.section_transition_count(section) == 1 {
-            if self.cursors[cursor_index].is_moving() {
-                self.cursors[cursor_index].complete_until_close(selected_depth);
-            } else {
-                self.cursors[cursor_index].mark_complete();
-            }
-            self.note_first_terminal_match(selected_depth, selected_element_id, section);
-            #[cfg(any(debug_assertions, test))]
-            self.debug_assert_no_first_scope_peer(section, output_parent, cursor_index);
-        } else {
-            self.claim_first_scope(
-                section,
-                output_parent,
-                cursor_index,
-                selected_depth,
-                selected_element_id,
-            );
         }
     }
 
@@ -365,7 +321,7 @@ where
                 let scope_claimed = self.cursors.iter().any(|c| {
                     c.position.selection == section
                         && c.parent == candidate.parent
-                        && c.is_complete()
+                        && c.is_first_winner()
                 });
                 debug_assert!(
                     !scope_claimed,
@@ -569,7 +525,7 @@ where
                 super::cursor::CursorMode::Moving { .. } => {
                     // `save_element` advances the parent for children; restore it
                     // afterward so this cursor can still match later siblings.
-                    let original_parent = self.cursors[i].parent;
+                    let output_parent = self.cursors[i].parent;
                     let needs_anchor = self.query.needs_descendant_anchor(position);
                     let anchor_candidate =
                         needs_anchor.then(|| self.cursors[i].anchor_clone(depth));
@@ -602,12 +558,12 @@ where
                             &mut self.cursors[i],
                         );
                         let sp = self.cursors[i].parent;
-                        self.cursors[i].parent = original_parent;
+                        self.cursors[i].parent = output_parent;
                         let saved = hit.element_id;
                         save_hits.push(hit);
                         (sp, Some(saved))
                     } else {
-                        (original_parent, None)
+                        (output_parent, None)
                     };
 
                     // Set lifecycle before cursor admission so spawned anchors
@@ -615,15 +571,19 @@ where
                     if !terminal_all {
                         if terminal_first {
                             if let Some(element_id) = saved_element {
-                                self.complete_terminal_first(
-                                    i,
+                                self.claim_first_scope(
                                     position.selection,
-                                    original_parent,
+                                    output_parent,
+                                    i,
+                                    depth,
+                                );
+                                self.note_first_terminal_match(
                                     depth,
                                     element_id,
+                                    position.selection,
                                 );
                             } else {
-                                self.cursors[i].complete_until_close(depth);
+                                self.cursors[i].select_first_until_close(depth);
                             }
                         } else if is_descendant || is_save_point {
                             self.cursors[i].block_until_close(depth);
@@ -634,7 +594,11 @@ where
                         continue;
                     }
 
-                    if let Some(anchor) = anchor_candidate {
+                    // Terminal First never needs a descendant anchor; the winner
+                    // already owns the selected close boundary.
+                    if !terminal_first
+                        && let Some(anchor) = anchor_candidate
+                    {
                         let _ = self.try_push_cursor(
                             anchor,
                             runner_index,
@@ -652,6 +616,128 @@ where
                 super::cursor::CursorMode::Anchored { .. } => {
                     if self_closing {
                         if is_save_point {
+                            let output_parent = self.cursors[i].parent;
+                            #[cfg(any(debug_assertions, test))]
+                            {
+                                debug_assert!(
+                                    !emitted_this_step.iter().any(|(parent, section)| {
+                                        *parent == output_parent && *section == position.selection
+                                    }),
+                                    "duplicate cursor emission for one physical element: \
+                                     element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                    element.name,
+                                    depth,
+                                    output_parent,
+                                    position.selection,
+                                    position.state,
+                                    i,
+                                    self.cursors,
+                                );
+                                emitted_this_step.push((output_parent, position.selection));
+                            }
+                            if is_first {
+                                let position = self.cursors[i].position;
+                                let mut winner = ScopedCursor::new_moving(
+                                    depth,
+                                    output_parent,
+                                    position,
+                                );
+                                let hit = Self::save_element(
+                                    runner_index,
+                                    self.query,
+                                    store,
+                                    element.clone(),
+                                    &mut winner,
+                                );
+                                let element_id = hit.element_id;
+                                save_hits.push(hit);
+                                winner.parent = output_parent;
+                                self.cursors[i] = winner;
+                                self.claim_first_scope(
+                                    position.selection,
+                                    output_parent,
+                                    i,
+                                    depth,
+                                );
+                                self.note_first_terminal_match(
+                                    depth,
+                                    element_id,
+                                    position.selection,
+                                );
+                            } else {
+                                let mut base = ScopedCursor::new_moving(
+                                    depth,
+                                    output_parent,
+                                    self.cursors[i].position,
+                                );
+                                let hit = Self::save_element(
+                                    runner_index,
+                                    self.query,
+                                    store,
+                                    element.clone(),
+                                    &mut base,
+                                );
+                                save_hits.push(hit);
+                            }
+                        }
+                        continue;
+                    }
+
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+
+                    if is_save_point && is_first {
+                        let position = self.cursors[i].position;
+                        let output_parent = self.cursors[i].parent;
+                        #[cfg(any(debug_assertions, test))]
+                        {
+                            debug_assert!(
+                                !emitted_this_step.iter().any(|(parent, section)| {
+                                    *parent == output_parent && *section == position.selection
+                                }),
+                                "duplicate cursor emission for one physical element: \
+                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                element.name,
+                                depth,
+                                output_parent,
+                                position.selection,
+                                position.state,
+                                i,
+                                self.cursors,
+                            );
+                            emitted_this_step.push((output_parent, position.selection));
+                        }
+                        let mut winner =
+                            ScopedCursor::new_moving(depth, output_parent, position);
+                        let hit = Self::save_element(
+                            runner_index,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut winner,
+                        );
+                        let selected_element_id = hit.element_id;
+                        save_hits.push(hit);
+                        winner.parent = output_parent;
+                        self.cursors[i] = winner;
+                        self.claim_first_scope(
+                            position.selection,
+                            output_parent,
+                            i,
+                            depth,
+                        );
+                        self.note_first_terminal_match(
+                            depth,
+                            selected_element_id,
+                            position.selection,
+                        );
+
+                        for pos in &spawned_positions {
+                            let continuation =
+                                ScopedCursor::new_moving(depth, selected_element_id, *pos);
+                            let _ = self.try_push_cursor(continuation, runner_index, store, None);
+                        }
+                    } else {
+                        let saved_parent = if is_save_point {
                             let save_parent = self.cursors[i].parent;
                             #[cfg(any(debug_assertions, test))]
                             {
@@ -683,71 +769,17 @@ where
                                 element.clone(),
                                 &mut base,
                             );
-                            let element_id = hit.element_id;
                             save_hits.push(hit);
-                            if is_first {
-                                self.complete_terminal_first(
-                                    i,
-                                    position.selection,
-                                    save_parent,
-                                    depth,
-                                    element_id,
-                                );
-                            }
-                        }
-                        continue;
-                    }
+                            base.parent
+                        } else {
+                            self.cursors[i].parent
+                        };
 
-                    spawned_positions = self.cursors[i].next_positions(self.query);
-
-                    let saved_parent = if is_save_point {
-                        let save_parent = self.cursors[i].parent;
-                        #[cfg(any(debug_assertions, test))]
-                        {
-                            debug_assert!(
-                                !emitted_this_step.iter().any(|(parent, section)| {
-                                    *parent == save_parent && *section == position.selection
-                                }),
-                                "duplicate cursor emission for one physical element: \
-                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
-                                element.name,
-                                depth,
-                                save_parent,
-                                position.selection,
-                                position.state,
-                                i,
-                                self.cursors,
-                            );
-                            emitted_this_step.push((save_parent, position.selection));
+                        for pos in &spawned_positions {
+                            let continuation =
+                                ScopedCursor::new_moving(depth, saved_parent, *pos);
+                            let _ = self.try_push_cursor(continuation, runner_index, store, None);
                         }
-                        let mut base =
-                            ScopedCursor::new_moving(depth, save_parent, self.cursors[i].position);
-                        let hit = Self::save_element(
-                            runner_index,
-                            self.query,
-                            store,
-                            element.clone(),
-                            &mut base,
-                        );
-                        let element_id = hit.element_id;
-                        save_hits.push(hit);
-                        if is_first {
-                            self.complete_terminal_first(
-                                i,
-                                position.selection,
-                                save_parent,
-                                depth,
-                                element_id,
-                            );
-                        }
-                        base.parent
-                    } else {
-                        self.cursors[i].parent
-                    };
-
-                    for pos in &spawned_positions {
-                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
-                        let _ = self.try_push_cursor(continuation, runner_index, store, None);
                     }
                 }
             }
