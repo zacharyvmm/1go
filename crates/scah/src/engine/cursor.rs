@@ -12,6 +12,7 @@ pub const SENTINEL_SCOPE: super::DepthSize = super::DepthSize::MAX;
 const FLAG_BLOCKED: u8 = 1 << 0;
 const FLAG_COMPLETE: u8 = 1 << 1;
 const FLAG_HAS_UNWIND: u8 = 1 << 2;
+const FLAG_FIRST_WINNER: u8 = 1 << 3;
 
 #[inline]
 const fn flags_is_active(flags: u8) -> bool {
@@ -31,6 +32,11 @@ const fn flags_is_complete(flags: u8) -> bool {
 #[inline]
 const fn flags_has_unwind(flags: u8) -> bool {
     flags & FLAG_HAS_UNWIND != 0
+}
+
+#[inline]
+const fn flags_is_first_winner(flags: u8) -> bool {
+    flags & FLAG_FIRST_WINNER != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +78,7 @@ pub enum CursorMode {
         /// Depth whose close should update this cursor when [`FLAG_HAS_UNWIND`] is set.
         unwind_depth: super::DepthSize,
         /// Activity, unwind-presence, and mode flags; see [`FLAG_BLOCKED`],
-        /// [`FLAG_COMPLETE`], and [`FLAG_HAS_UNWIND`].
+        /// [`FLAG_COMPLETE`], [`FLAG_HAS_UNWIND`], and [`FLAG_FIRST_WINNER`].
         flags: u8,
     },
     Anchored {
@@ -212,22 +218,44 @@ impl ScopedCursor {
 
     #[cfg(debug_assertions)]
     fn debug_assert_moving_invariants(&self) {
-        if let CursorMode::Moving { flags, .. } = &self.mode {
-            if flags_is_blocked(*flags) {
+        match &self.mode {
+            CursorMode::Moving { flags, .. } => {
+                if flags_is_blocked(*flags) {
+                    debug_assert!(
+                        flags_has_unwind(*flags),
+                        "blocked moving cursor must have pending unwind depth"
+                    );
+                    debug_assert!(
+                        !flags_is_first_winner(*flags),
+                        "blocked cursor cannot be a First winner"
+                    );
+                } else if flags_is_active(*flags) {
+                    debug_assert!(
+                        !flags_has_unwind(*flags),
+                        "active moving cursor must not have pending unwind depth"
+                    );
+                    debug_assert!(
+                        !flags_is_first_winner(*flags),
+                        "active cursor cannot be a First winner"
+                    );
+                }
                 debug_assert!(
-                    flags_has_unwind(*flags),
-                    "blocked moving cursor must have pending unwind depth"
+                    !(*flags & FLAG_BLOCKED != 0 && *flags & FLAG_COMPLETE != 0),
+                    "cursor cannot be both blocked and complete"
                 );
-            } else if flags_is_active(*flags) {
+                if flags_is_first_winner(*flags) {
+                    debug_assert!(
+                        flags_is_complete(*flags),
+                        "FIRST_WINNER implies COMPLETE"
+                    );
+                }
+            }
+            CursorMode::Anchored { flags } => {
                 debug_assert!(
-                    !flags_has_unwind(*flags),
-                    "active moving cursor must not have pending unwind depth"
+                    !flags_is_first_winner(*flags),
+                    "anchored cursor cannot be a First winner"
                 );
             }
-            debug_assert!(
-                !(*flags & FLAG_BLOCKED != 0 && *flags & FLAG_COMPLETE != 0),
-                "cursor cannot be both blocked and complete"
-            );
         }
     }
 
@@ -245,6 +273,12 @@ impl ScopedCursor {
 
     pub fn is_complete(&self) -> bool {
         flags_is_complete(self.activity_flags())
+    }
+
+    /// Whether this cursor owns a terminal `First` selection for its scope.
+    #[inline]
+    pub fn is_first_winner(&self) -> bool {
+        flags_is_first_winner(self.activity_flags())
     }
 
     /// Whether matching should skip this cursor (blocked or complete).
@@ -319,7 +353,7 @@ impl ScopedCursor {
     }
 
     /// Keep the cursor complete after its awaited close; clear pending unwind
-    /// without reactivating matching.
+    /// without reactivating matching. Preserves [`FLAG_FIRST_WINNER`].
     pub fn complete_after_close(&mut self) {
         if let CursorMode::Moving {
             flags,
@@ -327,7 +361,8 @@ impl ScopedCursor {
             ..
         } = &mut self.mode
         {
-            *flags = CursorActivity::Complete.to_flags();
+            let retained = *flags & FLAG_FIRST_WINNER;
+            *flags = retained | CursorActivity::Complete.to_flags();
             *unwind_depth = 0;
             self.debug_assert_moving_invariants();
         }
@@ -352,6 +387,32 @@ impl ScopedCursor {
         {
             *unwind_depth = depth;
             *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND;
+            self.debug_assert_moving_invariants();
+        }
+    }
+
+    /// Claim a terminal `First` selection until the selected element closes.
+    ///
+    /// The cursor must be a moving, active cursor. After this transition it is
+    /// complete, carries unwind depth `depth`, and is marked as the First winner.
+    pub fn select_first_until_close(&mut self, depth: super::DepthSize) {
+        debug_assert!(
+            depth <= super::MAX_ELEMENT_DEPTH,
+            "element depth must not exceed MAX_ELEMENT_DEPTH"
+        );
+        debug_assert!(self.is_moving(), "select_first_until_close requires moving cursor");
+        debug_assert!(
+            self.is_active(),
+            "select_first_until_close requires active cursor"
+        );
+        if let CursorMode::Moving {
+            flags,
+            unwind_depth,
+            ..
+        } = &mut self.mode
+        {
+            *unwind_depth = depth;
+            *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND | FLAG_FIRST_WINNER;
             self.debug_assert_moving_invariants();
         }
     }
@@ -564,6 +625,46 @@ mod tests {
         cursor.complete_after_close();
 
         assert!(cursor.is_complete());
+        assert_eq!(cursor.unwind_depth(), None);
+    }
+
+    #[test]
+    fn select_first_until_close_marks_moving_winner() {
+        let mut cursor = moving_cursor();
+
+        cursor.select_first_until_close(4);
+
+        assert!(cursor.is_moving());
+        assert!(cursor.is_first_winner());
+        assert!(cursor.is_complete());
+        assert!(!cursor.is_active());
+        assert!(!cursor.is_blocked());
+        assert_eq!(cursor.unwind_depth(), Some(4));
+    }
+
+    #[test]
+    fn first_winner_preserves_flag_after_close() {
+        let mut cursor = moving_cursor();
+        cursor.select_first_until_close(4);
+
+        cursor.complete_after_close();
+
+        assert!(cursor.is_moving());
+        assert!(cursor.is_first_winner());
+        assert!(cursor.is_complete());
+        assert_eq!(cursor.unwind_depth(), None);
+    }
+
+    #[test]
+    fn cancel_complete_clears_first_winner() {
+        let mut cursor = moving_cursor();
+        cursor.select_first_until_close(4);
+        assert!(cursor.is_first_winner());
+
+        cursor.cancel_complete();
+
+        assert!(cursor.is_complete());
+        assert!(!cursor.is_first_winner());
         assert_eq!(cursor.unwind_depth(), None);
     }
 
