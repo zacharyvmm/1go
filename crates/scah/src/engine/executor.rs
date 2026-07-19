@@ -16,33 +16,6 @@ enum SpawnOutcome {
     Dominated,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct SelectedResult {
-    selected_depth: super::DepthSize,
-    selected_element_id: ElementId,
-    selected_section: QuerySectionId,
-}
-
-/// Tracks `.first()` selected-element completion for early exit.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-enum FirstMatchState {
-    #[default]
-    Searching,
-    /// Terminal First save-point matched; awaiting selected element close.
-    Matched(SelectedResult),
-    /// Selected element closed and `.then()` child scopes are complete.
-    Complete(SelectedResult),
-}
-
-impl FirstMatchState {
-    fn selected(&self) -> Option<SelectedResult> {
-        match self {
-            Self::Matched(s) | Self::Complete(s) => Some(*s),
-            Self::Searching => None,
-        }
-    }
-}
-
 /// NFA execution engine for streaming StAX events.
 ///
 /// Cursor 0 is the sentinel root. It is never depth-pruned; query progress is
@@ -51,7 +24,6 @@ impl FirstMatchState {
 pub struct QueryExecutor<'a, Q> {
     pub(crate) query: &'a Q,
     pub(crate) cursors: Vec<ScopedCursor>,
-    first_match: FirstMatchState,
 }
 
 impl<'a, 'html, 'query: 'html, Q> QueryExecutor<'a, Q>
@@ -69,7 +41,6 @@ where
         Self {
             query,
             cursors: vec![root],
-            first_match: FirstMatchState::Searching,
         }
     }
 
@@ -125,76 +96,6 @@ where
             } else {
                 cursor.cancel_complete();
             }
-        }
-    }
-
-    fn note_first_terminal_match(
-        &mut self,
-        depth: super::DepthSize,
-        selected_element_id: ElementId,
-        selected_section: QuerySectionId,
-    ) {
-        if self.query.exit_at_section_end() != Some(selected_section) {
-            return;
-        }
-        if !matches!(self.first_match, FirstMatchState::Searching) {
-            debug_assert!(false, "FirstMatchState must not be overwritten");
-            return;
-        }
-        self.first_match = FirstMatchState::Matched(SelectedResult {
-            selected_depth: depth,
-            selected_element_id,
-            selected_section,
-        });
-    }
-
-    fn is_then_child_section(
-        &self,
-        section: QuerySectionId,
-        first_section: QuerySectionId,
-    ) -> bool {
-        let mut current = section;
-        loop {
-            let parent = self.query.get_selection(current).parent;
-            match parent {
-                None => return false,
-                Some(p) if p == first_section => return true,
-                Some(p) => current = p,
-            }
-        }
-    }
-
-    fn first_child_obligations_complete(&self) -> bool {
-        let Some(selected) = self.first_match.selected() else {
-            return false;
-        };
-        if self.query.queries().len() == 1 {
-            return true;
-        }
-        self.cursors.iter().all(|cursor| {
-            if cursor.scope_depth == SENTINEL_SCOPE {
-                return true;
-            }
-            if cursor.position.selection == selected.selected_section
-                && cursor.parent != selected.selected_element_id
-            {
-                // Prefix cursors for compound First selectors (e.g. article
-                // in `article p`) are irrelevant once the terminal match is fixed.
-                return true;
-            }
-            if !self.is_then_child_section(cursor.position.selection, selected.selected_section) {
-                return true;
-            }
-            cursor.scope_depth >= selected.selected_depth && cursor.end()
-        })
-    }
-
-    fn try_complete_first_match(&mut self, close_depth: super::DepthSize) {
-        if let FirstMatchState::Matched(selected) = self.first_match
-            && close_depth == selected.selected_depth
-            && self.first_child_obligations_complete()
-        {
-            self.first_match = FirstMatchState::Complete(selected);
         }
     }
 
@@ -570,17 +471,12 @@ where
                     // are not dominated by an still-active source cursor.
                     if !terminal_all {
                         if terminal_first {
-                            if let Some(element_id) = saved_element {
+                            if saved_element.is_some() {
                                 self.claim_first_scope(
                                     position.selection,
                                     output_parent,
                                     i,
                                     depth,
-                                );
-                                self.note_first_terminal_match(
-                                    depth,
-                                    element_id,
-                                    position.selection,
                                 );
                             } else {
                                 self.cursors[i].select_first_until_close(depth);
@@ -649,7 +545,6 @@ where
                                     element.clone(),
                                     &mut winner,
                                 );
-                                let element_id = hit.element_id;
                                 save_hits.push(hit);
                                 winner.parent = output_parent;
                                 self.cursors[i] = winner;
@@ -658,11 +553,6 @@ where
                                     output_parent,
                                     i,
                                     depth,
-                                );
-                                self.note_first_terminal_match(
-                                    depth,
-                                    element_id,
-                                    position.selection,
                                 );
                             } else {
                                 let mut base = ScopedCursor::new_moving(
@@ -725,11 +615,6 @@ where
                             i,
                             depth,
                         );
-                        self.note_first_terminal_match(
-                            depth,
-                            selected_element_id,
-                            position.selection,
-                        );
 
                         for pos in &spawned_positions {
                             let continuation =
@@ -787,10 +672,18 @@ where
     }
 
     pub fn early_exit(&self) -> bool {
-        if self.query.exit_at_section_end().is_none() {
+        let Some(exit_section) = self.query.exit_at_section_end() else {
             return false;
-        }
-        matches!(self.first_match, FirstMatchState::Complete(_))
+        };
+
+        let closed_winner = self.cursors.iter().any(|cursor| {
+            cursor.position.selection == exit_section
+                && cursor.is_first_winner()
+                && cursor.is_complete()
+                && cursor.unwind_depth().is_none()
+        });
+
+        closed_winner && self.cursors.iter().all(|cursor| cursor.is_complete())
     }
 
     pub fn back(
@@ -868,8 +761,6 @@ where
         {
             root.parent = parent;
         }
-
-        self.try_complete_first_match(close_depth);
 
         significant_close
     }
@@ -3078,21 +2969,18 @@ mod tests {
         let mut save_hits = Vec::new();
 
         selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
-        assert!(matches!(selection.first_match, FirstMatchState::Matched(_)));
-        assert!(!selection.early_exit());
+        assert!(selection.cursors[0].is_first_winner());
         assert!(selection.cursors[0].is_complete());
         assert_eq!(selection.cursors[0].unwind_depth(), Some(0));
+        assert!(!selection.early_exit());
 
         store.text_content.set_start(0);
         store.text_content.push(&Reader::new("<div>text</div>"), 4);
         selection.back(0, "div", &doc_pos(0), &mut store);
-        assert!(matches!(
-            selection.first_match,
-            FirstMatchState::Complete(_)
-        ));
-        assert!(selection.early_exit());
+        assert!(selection.cursors[0].is_first_winner());
         assert!(selection.cursors[0].is_complete());
         assert_eq!(selection.cursors[0].unwind_depth(), None);
+        assert!(selection.early_exit());
 
         let hits: Vec<_> = store.get("div").unwrap().collect();
         assert_eq!(hits.len(), 1);
@@ -3131,10 +3019,10 @@ mod tests {
             &mut store,
             &mut save_hits,
         );
-        assert!(matches!(selection.first_match, FirstMatchState::Matched(_)));
-        assert!(!selection.early_exit());
+        assert!(selection.cursors[0].is_first_winner());
         assert!(selection.cursors[0].is_complete());
         assert_eq!(selection.cursors[0].unwind_depth(), Some(0));
+        assert!(!selection.early_exit());
 
         selection.back(
             0,
@@ -3147,12 +3035,9 @@ mod tests {
             },
             &mut store,
         );
-        assert!(matches!(
-            selection.first_match,
-            FirstMatchState::Complete(_)
-        ));
-        assert!(selection.early_exit());
+        assert!(selection.cursors[0].is_first_winner());
         assert!(selection.cursors[0].is_complete());
         assert_eq!(selection.cursors[0].unwind_depth(), None);
+        assert!(selection.early_exit());
     }
 }
