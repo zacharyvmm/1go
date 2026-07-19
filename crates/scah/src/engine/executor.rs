@@ -60,13 +60,11 @@ where
         );
 
         debug_assert_eq!(
-            self.cursors[selected_cursor_index].position.selection,
-            section,
+            self.cursors[selected_cursor_index].position.selection, section,
             "selected cursor must belong to claimed First section"
         );
         debug_assert_eq!(
-            self.cursors[selected_cursor_index].parent,
-            output_parent,
+            self.cursors[selected_cursor_index].parent, output_parent,
             "selected cursor parent must match First output parent"
         );
         debug_assert!(
@@ -472,12 +470,7 @@ where
                     if !terminal_all {
                         if terminal_first {
                             if saved_element.is_some() {
-                                self.claim_first_scope(
-                                    position.selection,
-                                    output_parent,
-                                    i,
-                                    depth,
-                                );
+                                self.claim_first_scope(position.selection, output_parent, i, depth);
                             } else {
                                 self.cursors[i].select_first_until_close(depth);
                             }
@@ -492,9 +485,7 @@ where
 
                     // Terminal First never needs a descendant anchor; the winner
                     // already owns the selected close boundary.
-                    if !terminal_first
-                        && let Some(anchor) = anchor_candidate
-                    {
+                    if !terminal_first && let Some(anchor) = anchor_candidate {
                         let _ = self.try_push_cursor(
                             anchor,
                             runner_index,
@@ -533,11 +524,8 @@ where
                             }
                             if is_first {
                                 let position = self.cursors[i].position;
-                                let mut winner = ScopedCursor::new_moving(
-                                    depth,
-                                    output_parent,
-                                    position,
-                                );
+                                let mut winner =
+                                    ScopedCursor::new_moving(depth, output_parent, position);
                                 let hit = Self::save_element(
                                     runner_index,
                                     self.query,
@@ -548,12 +536,7 @@ where
                                 save_hits.push(hit);
                                 winner.parent = output_parent;
                                 self.cursors[i] = winner;
-                                self.claim_first_scope(
-                                    position.selection,
-                                    output_parent,
-                                    i,
-                                    depth,
-                                );
+                                self.claim_first_scope(position.selection, output_parent, i, depth);
                             } else {
                                 let mut base = ScopedCursor::new_moving(
                                     depth,
@@ -596,8 +579,7 @@ where
                             );
                             emitted_this_step.push((output_parent, position.selection));
                         }
-                        let mut winner =
-                            ScopedCursor::new_moving(depth, output_parent, position);
+                        let mut winner = ScopedCursor::new_moving(depth, output_parent, position);
                         let hit = Self::save_element(
                             runner_index,
                             self.query,
@@ -609,12 +591,7 @@ where
                         save_hits.push(hit);
                         winner.parent = output_parent;
                         self.cursors[i] = winner;
-                        self.claim_first_scope(
-                            position.selection,
-                            output_parent,
-                            i,
-                            depth,
-                        );
+                        self.claim_first_scope(position.selection, output_parent, i, depth);
 
                         for pos in &spawned_positions {
                             let continuation =
@@ -661,8 +638,7 @@ where
                         };
 
                         for pos in &spawned_positions {
-                            let continuation =
-                                ScopedCursor::new_moving(depth, saved_parent, *pos);
+                            let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
                             let _ = self.try_push_cursor(continuation, runner_index, store, None);
                         }
                     }
@@ -3039,5 +3015,131 @@ mod tests {
         assert!(selection.cursors[0].is_complete());
         assert_eq!(selection.cursors[0].unwind_depth(), None);
         assert!(selection.early_exit());
+    }
+
+    #[test]
+    fn anchored_terminal_first_promotes_to_moving_winner() {
+        let query = Query::first("p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        let position = Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(0),
+        };
+        let mut root = ScopedCursor::new_root(ElementId::default(), position);
+        root.mark_complete();
+        selection.cursors = vec![
+            root,
+            ScopedCursor::new_anchored(0, ElementId::default(), position),
+        ];
+
+        selection.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+        assert_eq!(save_hits.len(), 1);
+
+        let winner = selection
+            .cursors
+            .iter()
+            .find(|c| c.is_first_winner())
+            .expect("terminal First must produce a winner");
+        assert!(
+            winner.is_moving(),
+            "anchored First winner must be promoted to moving"
+        );
+        assert!(winner.is_complete());
+        assert_eq!(winner.unwind_depth(), Some(1));
+        assert!(
+            selection
+                .cursors
+                .iter()
+                .all(|c| !c.is_anchored() || c.is_complete()),
+            "anchored search obligation must end once First wins"
+        );
+
+        selection.back(0, "p", &doc_pos(1), &mut store);
+        let winner = selection
+            .cursors
+            .iter()
+            .find(|c| c.is_first_winner())
+            .expect("winner flag must survive selected close");
+        assert!(winner.is_moving());
+        assert!(winner.is_complete());
+        assert_eq!(winner.unwind_depth(), None);
+        assert!(selection.early_exit());
+    }
+
+    #[test]
+    fn first_failed_child_candidate_reactivates_prefix() {
+        let query = Query::first("div > p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        let blocked_idx = selection
+            .cursors
+            .iter()
+            .position(|c| c.is_moving() && c.is_blocked() && c.unwind_depth() == Some(0))
+            .expect("failed First prefix must block until </div>");
+        let before_position = selection.cursors[blocked_idx].position;
+
+        // Continuation for `p` dies without matching; prefix reactivates.
+        selection.back(0, "div", &doc_pos(0), &mut store);
+        let reactivated = selection
+            .cursors
+            .iter()
+            .find(|c| c.is_moving() && c.position == before_position)
+            .expect("prefix cursor retained at same transition");
+        assert!(reactivated.is_active());
+        assert!(!reactivated.is_first_winner());
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+        assert_eq!(save_hits.len(), 1);
+        let winner = selection
+            .cursors
+            .iter()
+            .find(|c| c.is_first_winner())
+            .expect("second candidate must win");
+        assert!(winner.is_moving());
+        assert!(winner.is_complete());
+        assert_eq!(winner.unwind_depth(), Some(1));
+    }
+
+    #[test]
+    fn first_lifecycle_has_no_executor_state_machine() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let executor = std::fs::read_to_string(format!("{root}/src/engine/executor.rs")).unwrap();
+        // Ignore this acceptance test's own needle assembly.
+        let executor_impl = executor
+            .split("fn first_lifecycle_has_no_executor_state_machine")
+            .next()
+            .unwrap_or(&executor);
+        let query_ir = std::fs::read_to_string(format!(
+            "{root}/../scah-query-ir/src/query/compiler/query.rs"
+        ))
+        .unwrap();
+
+        // Construct names so this test source does not contain the banned tokens.
+        let needles = [
+            ["First", "Match", "State"].concat(),
+            ["Selected", "Result"].concat(),
+            ["first", "_match:"].concat(),
+            ["note_first_", "terminal_match"].concat(),
+            ["try_complete_", "first_match"].concat(),
+            ["first_child_", "obligations_complete"].concat(),
+            ["is_then_", "child_section"].concat(),
+            ["section_", "transition_count"].concat(),
+            ["complete_", "terminal_first"].concat(),
+        ];
+        for needle in &needles {
+            assert!(
+                !executor_impl.contains(needle.as_str()) && !query_ir.contains(needle.as_str()),
+                "{needle} must not remain after cursor-native First migration"
+            );
+        }
     }
 }

@@ -244,10 +244,7 @@ impl ScopedCursor {
                     "cursor cannot be both blocked and complete"
                 );
                 if flags_is_first_winner(*flags) {
-                    debug_assert!(
-                        flags_is_complete(*flags),
-                        "FIRST_WINNER implies COMPLETE"
-                    );
+                    debug_assert!(flags_is_complete(*flags), "FIRST_WINNER implies COMPLETE");
                 }
             }
             CursorMode::Anchored { flags } => {
@@ -370,6 +367,7 @@ impl ScopedCursor {
 
     /// Mark matching complete while optionally waiting for the selected element
     /// to close.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn complete_until_close(&mut self, depth: super::DepthSize) {
         debug_assert!(
             depth <= super::MAX_ELEMENT_DEPTH,
@@ -400,7 +398,10 @@ impl ScopedCursor {
             depth <= super::MAX_ELEMENT_DEPTH,
             "element depth must not exceed MAX_ELEMENT_DEPTH"
         );
-        debug_assert!(self.is_moving(), "select_first_until_close requires moving cursor");
+        debug_assert!(
+            self.is_moving(),
+            "select_first_until_close requires moving cursor"
+        );
         debug_assert!(
             self.is_active(),
             "select_first_until_close requires active cursor"
@@ -436,7 +437,8 @@ impl ScopedCursor {
         self.debug_assert_moving_invariants();
     }
 
-    /// Mark this cursor complete (e.g. after a `First` terminal match).
+    /// Mark this cursor complete without claiming First-winner identity.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mark_complete(&mut self) {
         let keep_unwind = self.unwind_depth().is_some();
         match &mut self.mode {
