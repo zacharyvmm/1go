@@ -80,7 +80,7 @@ def test_multiple_root_queries():
     hits2 = store.get("span")
     assert hits2 is not None
     assert len(hits2) == 1
-    assert hits2[0].text_content == "B"
+    assert hits2[0].text == "B"
 
 
 # ── Query/store lifetime safety ────────────────────────────────────────────
@@ -112,3 +112,48 @@ def test_build_invalid_selector_raises_value_error():
 def test_query_builder_does_not_expose_try_build():
     builder = Query.all("a", Save.none())
     assert not hasattr(builder, "try_build")
+
+
+def test_raw_text_and_text_properties():
+    store = parse("<p>A&nbsp;&amp;&#x20;B</p>", [Query.all("p", Save.all()).build()])
+    p = store.get("p")[0]
+    assert p.raw_text == "A&nbsp;&amp;&#x20;B"
+    assert p.text == "A & B"
+    assert p["raw_text"] == "A&nbsp;&amp;&#x20;B"
+    assert p["text"] == "A & B"
+    assert p.keys() == [
+        "name",
+        "id",
+        "class",
+        "attributes",
+        "inner_html",
+        "raw_text",
+        "text",
+    ]
+
+
+def test_empty_versus_uncaptured_text():
+    empty = parse("<div></div>", [Query.all("div", Save.all()).build()]).get("div")[0]
+    assert empty.raw_text == ""
+    assert empty.text == ""
+
+    text_only = parse("<input>", [Query.all("input", Save.only_text()).build()]).get(
+        "input"
+    )[0]
+    assert text_only.text == ""
+    assert text_only.raw_text is None
+
+
+def test_save_helpers():
+    store = parse(
+        "<p>hi</p>",
+        [Query.all("p", Save.only_raw_text()).build()],
+    )
+    p = store.get("p")[0]
+    assert p.raw_text == "hi"
+    assert p.text is None
+
+    store = parse("<p>hi</p>", [Query.all("p", Save.only_text()).build()])
+    p = store.get("p")[0]
+    assert p.text == "hi"
+    assert p.raw_text is None

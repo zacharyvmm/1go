@@ -58,7 +58,7 @@ fn bench_nested_all(c: &mut Criterion) {
                 for product in store.get(PRODUCT_SELECTOR).unwrap() {
                     black_box(product.attribute(&store, "class"));
                     black_box(product.inner_html);
-                    black_box(product.text_content(&store));
+                    black_box(product.text(&store));
 
                     let title = product
                         .get(&store, PRODUCT_TITLE_SELECTOR)
@@ -66,7 +66,7 @@ fn bench_nested_all(c: &mut Criterion) {
                         .next()
                         .unwrap();
                     black_box(title.inner_html);
-                    black_box(title.text_content(&store));
+                    black_box(title.text(&store));
 
                     let rating = product
                         .get(&store, PRODUCT_RATING_SELECTOR)
@@ -74,7 +74,7 @@ fn bench_nested_all(c: &mut Criterion) {
                         .next()
                         .unwrap();
                     black_box(rating.inner_html);
-                    black_box(rating.text_content(&store));
+                    black_box(rating.text(&store));
 
                     let description = product
                         .get(&store, PRODUCT_DESCRIPTION_SELECTOR)
@@ -82,7 +82,7 @@ fn bench_nested_all(c: &mut Criterion) {
                         .next()
                         .unwrap();
                     black_box(description.inner_html);
-                    black_box(description.text_content(&store));
+                    black_box(description.text(&store));
                 }
             })
         });
@@ -273,7 +273,7 @@ fn bench_nested_first(c: &mut Criterion) {
                 let product = store.get(PRODUCT_SELECTOR).unwrap().next().unwrap();
                 black_box(product.attribute(&store, "class"));
                 black_box(product.inner_html);
-                black_box(product.text_content(&store));
+                black_box(product.text(&store));
 
                 let title = product
                     .get(&store, PRODUCT_TITLE_SELECTOR)
@@ -281,7 +281,7 @@ fn bench_nested_first(c: &mut Criterion) {
                     .next()
                     .unwrap();
                 black_box(title.inner_html);
-                black_box(title.text_content(&store));
+                black_box(title.text(&store));
 
                 let rating = product
                     .get(&store, PRODUCT_RATING_SELECTOR)
@@ -289,7 +289,7 @@ fn bench_nested_first(c: &mut Criterion) {
                     .next()
                     .unwrap();
                 black_box(rating.inner_html);
-                black_box(rating.text_content(&store));
+                black_box(rating.text(&store));
 
                 let description = product
                     .get(&store, PRODUCT_DESCRIPTION_SELECTOR)
@@ -297,7 +297,7 @@ fn bench_nested_first(c: &mut Criterion) {
                     .next()
                     .unwrap();
                 black_box(description.inner_html);
-                black_box(description.text_content(&store));
+                black_box(description.text(&store));
             })
         });
 

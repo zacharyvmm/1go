@@ -39,6 +39,12 @@ impl TagFlags {
     const RAW_STYLE: u32 = 1 << 16;
     const RAW_TEXTAREA: u32 = 1 << 17;
     const RAW_TITLE: u32 = 1 << 18;
+    const TEXT_BLOCK: u32 = 1 << 19;
+    const TEXT_BREAK: u32 = 1 << 20;
+    const TEXT_ROW: u32 = 1 << 21;
+    const TEXT_CELL: u32 = 1 << 22;
+    const TEXT_SUPPRESSED: u32 = 1 << 23;
+    const TEXT_PREFORMATTED: u32 = 1 << 24;
 
     pub(crate) const P_MASK: Self = Self(Self::P);
     pub(crate) const BUTTON_MASK: Self = Self(Self::BUTTON);
@@ -77,29 +83,39 @@ impl TagFlags {
     #[inline]
     fn classify_lowercase(name: &str) -> Self {
         let flags = match name {
-            "area" | "base" | "br" | "col" | "embed" | "img" | "input" | "link" | "meta"
-            | "param" | "source" | "track" | "wbr" => Self::VOID,
-            "hr" => Self::VOID | Self::CLOSES_P,
+            "area" | "base" | "col" | "embed" | "img" | "input" | "link" | "meta" | "param"
+            | "source" | "track" | "wbr" => Self::VOID,
+            "br" => Self::VOID | Self::TEXT_BREAK,
+            "hr" => Self::VOID | Self::CLOSES_P | Self::TEXT_BLOCK,
             "address" | "article" | "aside" | "blockquote" | "div" | "dl" | "fieldset"
-            | "footer" | "form" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header" | "main"
-            | "nav" | "pre" | "section" => Self::CLOSES_P,
-            "p" => Self::CLOSES_P | Self::P,
-            "ol" | "ul" => Self::CLOSES_P | Self::LIST_BARRIER,
-            "table" => Self::CLOSES_P | Self::DEFAULT_BARRIER | Self::TABLE_BARRIER,
+            | "footer" | "form" | "header" | "main" | "nav" | "section" => {
+                Self::CLOSES_P | Self::TEXT_BLOCK
+            }
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Self::CLOSES_P | Self::TEXT_BLOCK,
+            "p" => Self::CLOSES_P | Self::P | Self::TEXT_BLOCK,
+            "ol" | "ul" => Self::CLOSES_P | Self::LIST_BARRIER | Self::TEXT_BLOCK,
+            "table" => {
+                Self::CLOSES_P | Self::DEFAULT_BARRIER | Self::TABLE_BARRIER | Self::TEXT_BLOCK
+            }
             "button" => Self::BUTTON,
-            "li" => Self::LI,
-            "dt" | "dd" => Self::DT_DD,
+            "li" => Self::LI | Self::TEXT_BLOCK,
+            "dt" | "dd" => Self::DT_DD | Self::TEXT_BLOCK,
             "option" => Self::OPTION,
             "optgroup" => Self::OPTGROUP,
-            "tr" => Self::TR | Self::TABLE_SCOPE,
-            "td" | "th" => Self::CELL | Self::DEFAULT_BARRIER,
-            "thead" | "tbody" | "tfoot" | "caption" | "colgroup" => Self::TABLE_SCOPE,
+            "tr" => Self::TR | Self::TABLE_SCOPE | Self::TEXT_ROW | Self::TEXT_BLOCK,
+            "td" | "th" => Self::CELL | Self::DEFAULT_BARRIER | Self::TEXT_CELL,
+            "thead" | "tbody" | "tfoot" | "colgroup" => Self::TABLE_SCOPE | Self::TEXT_BLOCK,
+            "caption" => Self::TABLE_SCOPE | Self::TEXT_BLOCK,
             "applet" | "marquee" | "object" => Self::DEFAULT_BARRIER,
-            "html" | "template" => Self::HTML_TEMPLATE | Self::TABLE_BARRIER,
-            "script" => Self::RAW_SCRIPT,
-            "style" => Self::RAW_STYLE,
-            "textarea" => Self::RAW_TEXTAREA,
+            "html" => Self::HTML_TEMPLATE | Self::TABLE_BARRIER,
+            "template" => Self::HTML_TEMPLATE | Self::TABLE_BARRIER | Self::TEXT_SUPPRESSED,
+            "script" => Self::RAW_SCRIPT | Self::TEXT_SUPPRESSED,
+            "style" => Self::RAW_STYLE | Self::TEXT_SUPPRESSED,
+            "textarea" => Self::RAW_TEXTAREA | Self::TEXT_PREFORMATTED,
             "title" => Self::RAW_TITLE,
+            "pre" => Self::CLOSES_P | Self::TEXT_BLOCK | Self::TEXT_PREFORMATTED,
+            "body" | "details" | "dialog" | "figcaption" | "figure" | "hgroup" | "legend"
+            | "menu" | "summary" => Self::TEXT_BLOCK,
             _ => 0,
         };
         Self(flags)
@@ -160,6 +176,49 @@ impl TagFlags {
             Some("</textarea")
         } else if self.0 & Self::RAW_TITLE != 0 {
             Some("</title")
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn is_text_block(self) -> bool {
+        self.0 & Self::TEXT_BLOCK != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_text_break(self) -> bool {
+        self.0 & Self::TEXT_BREAK != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_text_row(self) -> bool {
+        self.0 & Self::TEXT_ROW != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_text_cell(self) -> bool {
+        self.0 & Self::TEXT_CELL != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_text_suppressed(self) -> bool {
+        self.0 & Self::TEXT_SUPPRESSED != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_text_preformatted(self) -> bool {
+        self.0 & Self::TEXT_PREFORMATTED != 0
+    }
+
+    /// Separator queued after this element's content in normalized text.
+    #[inline]
+    pub(crate) fn post_text_separator(self) -> Option<super::text_state::PendingSeparator> {
+        use super::text_state::PendingSeparator;
+        if self.is_text_break() || self.is_text_block() || self.is_text_row() {
+            Some(PendingSeparator::LineBreak)
+        } else if self.is_text_cell() {
+            Some(PendingSeparator::Tab)
         } else {
             None
         }

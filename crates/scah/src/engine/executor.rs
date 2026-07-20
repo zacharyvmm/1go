@@ -150,7 +150,8 @@ where
                 element_id: element_pointer,
                 parent_id: cursor.get_parent(),
                 save_inner_html: section.save.inner_html,
-                save_text_content: section.save.text_content,
+                save_raw_text: section.save.raw_text,
+                save_text: section.save.text,
             }
         );
         if !tree.is_last_save_point(cursor.get_position()) {
@@ -160,7 +161,8 @@ where
         SaveHit {
             element_id: element_pointer,
             save_inner_html: section.save.inner_html,
-            save_text_content: section.save.text_content,
+            save_raw_text: section.save.raw_text,
+            save_text: section.save.text,
         }
     }
 
@@ -753,7 +755,6 @@ mod tests {
     fn doc_pos(depth: u16) -> DocumentPosition {
         DocumentPosition {
             reader_position: 0,
-            text_content_position: 0,
             element_depth: depth,
             self_closing: false,
         }
@@ -803,7 +804,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -832,7 +832,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: false,
             },
@@ -868,7 +867,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -888,7 +886,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: false,
             },
@@ -928,7 +925,6 @@ mod tests {
             "section",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 2,
                 self_closing: false,
             },
@@ -966,25 +962,21 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
             &mut store,
             &mut Vec::new(),
         );
-        store.text_content.set_start(4);
 
         assert_eq!(selection.cursors[0].position.state, TransitionId(0));
         assert!(!selection.cursors[0].end());
 
-        store.text_content.push(&Reader::new("<div></div>"), 4);
         let _significant_close = selection.back(
             0,
             "div",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1010,7 +1002,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1244,7 +1235,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1279,7 +1269,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: false,
             },
@@ -1311,7 +1300,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: false,
             },
@@ -1396,7 +1384,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1466,7 +1453,6 @@ mod tests {
             "div",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1496,7 +1482,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1517,14 +1502,11 @@ mod tests {
             "selected cursor should retain unwind depth until close"
         );
 
-        store.text_content.set_start(4);
-        store.text_content.push(&Reader::new("<div></div>"), 4);
         let reactivated = selection.back(
             0,
             "div",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1569,7 +1551,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: false,
             },
@@ -1624,7 +1605,6 @@ mod tests {
             "div",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 2,
                 self_closing: false,
             },
@@ -1932,7 +1912,6 @@ mod tests {
             },
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 2,
                 self_closing: true,
             },
@@ -2150,7 +2129,6 @@ mod tests {
             &elem("br"),
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: true,
             },
@@ -2170,7 +2148,6 @@ mod tests {
             "br",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: true,
             },
@@ -2207,7 +2184,6 @@ mod tests {
             &elem("br"),
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: true,
             },
@@ -2228,7 +2204,6 @@ mod tests {
             "br",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: true,
             },
@@ -2255,7 +2230,6 @@ mod tests {
             &elem("br"),
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: true,
             },
@@ -2278,7 +2252,6 @@ mod tests {
             "br",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 1,
                 self_closing: true,
             },
@@ -2904,8 +2877,6 @@ mod tests {
         assert_eq!(selection.cursors[0].unwind_depth(), Some(0));
         assert!(!selection.early_exit());
 
-        store.text_content.set_start(0);
-        store.text_content.push(&Reader::new("<div>text</div>"), 4);
         selection.back(0, "div", &doc_pos(0), &mut store);
         assert!(selection.cursors[0].is_first_winner());
         assert!(selection.cursors[0].is_complete());
@@ -2926,7 +2897,7 @@ mod tests {
         let hits: Vec<_> = store.get("div").unwrap().collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].inner_html, Some("text"));
-        assert_eq!(hits[0].text_content(&store), Some("text"));
+        assert_eq!(hits[0].text(&store), Some("text"));
     }
 
     #[test]
@@ -2942,7 +2913,6 @@ mod tests {
             &elem("br"),
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: true,
             },
@@ -2959,7 +2929,6 @@ mod tests {
             "br",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 0,
                 self_closing: true,
             },
@@ -3241,7 +3210,6 @@ mod tests {
             &elem("br"),
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 2,
                 self_closing: true,
             },
@@ -3253,7 +3221,6 @@ mod tests {
             "br",
             &DocumentPosition {
                 reader_position: 0,
-                text_content_position: 0,
                 element_depth: 2,
                 self_closing: true,
             },

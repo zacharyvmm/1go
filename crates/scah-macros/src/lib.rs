@@ -97,7 +97,7 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
     let Expr::Call(call) = expr else {
         return Err(syn::Error::new_spanned(
             expr,
-            "expected Save::all(), Save::none(), Save::only_inner_html(), or Save::only_text_content()",
+            "expected Save::all(), Save::none(), Save::only_inner_html(), Save::only_raw_text(), or Save::only_text()",
         ));
     };
     if !call.args.is_empty() {
@@ -125,7 +125,8 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
             ["Save", "all"] => Ok(Save::all()),
             ["Save", "none"] => Ok(Save::none()),
             ["Save", "only_inner_html"] => Ok(Save::only_inner_html()),
-            ["Save", "only_text_content"] => Ok(Save::only_text_content()),
+            ["Save", "only_raw_text"] => Ok(Save::only_raw_text()),
+            ["Save", "only_text"] => Ok(Save::only_text()),
             _ => Err(syn::Error::new_spanned(
                 expr,
                 "unsupported save expression in query!",
@@ -280,8 +281,9 @@ fn query_section_tokens(section: &QuerySection<'_>) -> proc_macro2::TokenStream 
 
 fn save_tokens(save: Save) -> proc_macro2::TokenStream {
     let inner_html = save.inner_html;
-    let text_content = save.text_content;
-    quote! { ::scah::Save { inner_html: #inner_html, text_content: #text_content } }
+    let raw_text = save.raw_text;
+    let text = save.text;
+    quote! { ::scah::Save { inner_html: #inner_html, raw_text: #raw_text, text: #text } }
 }
 
 fn selection_kind_tokens(kind: SelectionKind) -> proc_macro2::TokenStream {

@@ -56,7 +56,7 @@ fn bench_comparison(c: &mut Criterion) {
 
                 black_box(&element.attributes(&store));
                 black_box(&element.inner_html);
-                black_box(&element.text_content(&store));
+                black_box(&element.text(&store));
             })
         });
 

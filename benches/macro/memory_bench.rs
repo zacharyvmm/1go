@@ -23,9 +23,9 @@ fn bench_runtime_all(html: String) {
         .expect("macro benchmark root selector should parse")
         .then(|article| {
             Ok([
-                article.first("h1", Save::only_text_content())?,
+                article.first("h1", Save::only_text())?,
                 article.all("> section > a[href]", Save::all())?,
-                article.first("> section > span", Save::only_text_content())?,
+                article.first("> section > span", Save::only_text())?,
             ])
         })
         .expect("macro benchmark child selectors should parse")
@@ -45,9 +45,9 @@ fn bench_runtime_all(html: String) {
 fn bench_macro_all(html: String) {
     let query = query! {
         all("main > article.post", Save::none()) => {
-            first("h1", Save::only_text_content()),
+            first("h1", Save::only_text()),
             all("> section > a[href]", Save::all()),
-            first("> section > span", Save::only_text_content()),
+            first("> section > span", Save::only_text()),
         }
     };
 
@@ -67,7 +67,7 @@ fn bench_runtime_first(html: String) {
         .expect("macro benchmark root selector should parse")
         .then(|article| {
             Ok([
-                article.first("h1", Save::only_text_content())?,
+                article.first("h1", Save::only_text())?,
                 article.first("> section > a[href]", Save::all())?,
             ])
         })
@@ -87,7 +87,7 @@ fn bench_runtime_first(html: String) {
 fn bench_macro_first(html: String) {
     let query = query! {
         first("main > article.post", Save::none()) => {
-            first("h1", Save::only_text_content()),
+            first("h1", Save::only_text()),
             first("> section > a[href]", Save::all()),
         }
     };

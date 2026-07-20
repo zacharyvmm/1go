@@ -39,7 +39,7 @@ let store = parse(html, queries).expect("parse succeeds");
 
 for a in store.get("a[href]").unwrap() {
     let href = a.attribute(&store, "href").unwrap();
-    let text = a.text_content(&store).unwrap_or_default();
+    let text = a.text(&store).unwrap_or_default();
     println!("{text}: {href}");
 }
 // Output:
@@ -99,7 +99,7 @@ let html = r#"
 
 let query = query! {
     all("article", Save::none()) => {
-        first("h1", Save::only_text_content()),
+        first("h1", Save::only_text()),
         all("a[href]", Save::all()),
     }
 };
@@ -118,12 +118,13 @@ Use the runtime builder when you have dynamic sources. Use `query!` when the sel
 
 Control what data is captured per selector:
 
-| Constructor | `inner_html` | `text_content` | Use case |
-|-------------|:---:|:---:|----------|
-| `Save::all()` | Yes | Yes | Full extraction |
-| `Save::only_inner_html()` | Yes | No | Raw markup only |
-| `Save::only_text_content()` | No | Yes | Lightweight text scraping |
-| `Save::none()` | No | No | Structure-only (attributes still saved) |
+| Constructor | `inner_html` | `raw_text` | `text` | Use case |
+|-------------|:---:|:---:|:---:|----------|
+| `Save::all()` | Yes | Yes | Yes | Full extraction |
+| `Save::only_inner_html()` | Yes | No | No | Raw markup only |
+| `Save::only_raw_text()` | No | Yes | No | Source-preserving text |
+| `Save::only_text()` | No | No | Yes | Normalized text scraping |
+| `Save::none()` | No | No | No | Structure-only (attributes still saved) |
 
 #### Supported CSS selector syntax
 
@@ -194,10 +195,10 @@ npm install scah@npm:@zacharymm/scah
 ```ts
 import { Query, parse } from 'scah';
 
-const query = Query.all('main > section', { innerHtml: true, textContent: true })
+const query = Query.all('main > section', { innerHtml: true, rawText: true, text: true })
   .then((p) => [
-    p.all('> a[href]', { innerHtml: true, textContent: true }),
-    p.all('div a', { innerHtml: true, textContent: true }),
+    p.all('> a[href]', { innerHtml: true, rawText: true, text: true }),
+    p.all('div a', { innerHtml: true, rawText: true, text: true }),
   ])
   .build();
 
@@ -216,3 +217,28 @@ const store = parse(html, [query]);
 
 ##### First Element Html BenchMark (select first `a`):
 ![First Element Html BenchMark](https://raw.githubusercontent.com/zacharyvmm/scah/main/crates/bindings/scah-node/benchmark/images/synthetic_first.png)
+
+## Text extraction
+
+Scah exposes two text modes (plus inner HTML):
+
+| Field | Meaning |
+| ----- | ------- |
+| `inner_html` / `innerHtml` | Raw markup between the element's tags |
+| `raw_text` / `rawText` | Source-preserving descendant text. Whitespace and entity spellings are retained; markup itself is omitted. |
+| `text` | Normalized, human-readable descendant text. Whitespace and structural boundaries are normalized, non-content elements are omitted, and HTML entities are decoded. This is **not** browser `innerText`. |
+
+`None` / `null` means the query did not request that representation. An empty string means it was requested but the element produced no text.
+
+### Migration from `text_content`
+
+| Before | After |
+| ------ | ----- |
+| `Save::only_text_content()` | `Save::only_text()` |
+| `Save { text_content: true, ... }` | `Save { text: true, ... }` |
+| `element.text_content(&store)` | `element.text(&store)` |
+| Python `element.text_content` | Python `element.text` |
+| Node `element.textContent` | Node `element.text` |
+| No raw equivalent | `raw_text` / `rawText` |
+
+Old `text_content` output was already a normalized join, so it maps conceptually to the new `text`, not `raw_text`.

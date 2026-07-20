@@ -1,20 +1,30 @@
 use crate::ParseError;
 use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
+use crate::html::text_state::TextElementFlags;
 use crate::store::ElementId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SavedElement {
     pub element_id: ElementId,
     pub inner_html_start: Option<usize>,
-    pub text_content_start: Option<usize>,
+    pub raw_text_start: Option<usize>,
+    pub text_start: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
     tag: TagFlags,
+    pub text_flags: TextElementFlags,
     pub saved: Vec<SavedElement>,
+}
+
+impl<'html> OpenElement<'html> {
+    #[inline]
+    pub fn tag(&self) -> TagFlags {
+        self.tag
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -41,13 +51,19 @@ impl<'html> OpenElementStack<'html> {
         len >= MAX_ELEMENT_DEPTH as usize
     }
 
-    pub fn push_classified(&mut self, name: &'html str, tag: TagFlags) -> Result<(), ParseError> {
+    pub fn push_classified(
+        &mut self,
+        name: &'html str,
+        tag: TagFlags,
+        text_flags: TextElementFlags,
+    ) -> Result<(), ParseError> {
         if Self::would_exceed_max_depth(self.entries.len()) {
             return Err(ParseError::MaximumDepthExceeded);
         }
         self.entries.push(OpenElement {
             name,
             tag,
+            text_flags,
             saved: Vec::new(),
         });
         Ok(())
@@ -55,20 +71,22 @@ impl<'html> OpenElementStack<'html> {
 
     #[cfg(test)]
     pub fn push(&mut self, name: &'html str) -> Result<(), ParseError> {
-        self.push_classified(name, TagFlags::classify(name))
+        self.push_classified(name, TagFlags::classify(name), TextElementFlags::empty())
     }
 
     pub fn attach_saved(
         &mut self,
         element_id: ElementId,
         inner_html_start: Option<usize>,
-        text_content_start: Option<usize>,
+        raw_text_start: Option<usize>,
+        text_start: Option<usize>,
     ) {
         if let Some(open_element) = self.entries.last_mut() {
             open_element.saved.push(SavedElement {
                 element_id,
                 inner_html_start,
-                text_content_start,
+                raw_text_start,
+                text_start,
             });
         }
     }

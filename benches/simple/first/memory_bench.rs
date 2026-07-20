@@ -46,7 +46,7 @@ fn bench_scah(html: String) {
 
     black_box(&element.attributes(&store));
     black_box(&element.inner_html);
-    black_box(&element.text_content(&store));
+    black_box(&element.text(&store));
 }
 
 use scraper::{Html, Selector};

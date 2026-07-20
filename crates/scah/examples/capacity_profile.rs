@@ -31,7 +31,7 @@ fn main() {
             "text-heavy",
             text_heavy_html,
             |s| Query::all("p", s),
-            Save::only_text_content()
+            Save::only_text()
         ),
         "tag-heavy" => run_mode!(
             sizes,

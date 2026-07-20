@@ -17,7 +17,8 @@ use super::{Attribute, Store};
 /// | Class | `element.class` |
 /// | ID | `element.id` |
 /// | Inner HTML | `element.inner_html` |
-/// | Text content | [`element.text_content(&store)`](Element::text_content) |
+/// | Text content | [`element.text(&store)`](Element::text) |
+/// | Raw text | [`element.raw_text(&store)`](Element::raw_text) |
 /// | All attributes | [`element.attributes(&store)`](Element::attributes) |
 /// | Single attribute | [`element.attribute(&store, "href")`](Element::attribute) |
 /// | Child query results | [`element.get(&store, "selector")`](Element::get) |
@@ -32,9 +33,12 @@ pub struct Element<'html> {
     /// The raw HTML between the element's opening and closing tags.
     /// Only populated when [`Save::inner_html`](crate::Save::inner_html) was `true`.
     pub inner_html: Option<&'html str>,
-    /// Internal range into the shared text-content buffer.
-    /// Use [`Element::text_content`] to get the actual `&str`.
-    pub text_content: Option<Range<usize>>,
+    /// Internal range into the shared raw-text buffer.
+    /// Use [`Element::raw_text`] to get the actual `&str`.
+    pub raw_text: Option<Range<usize>>,
+    /// Internal range into the shared normalized-text buffer.
+    /// Use [`Element::text`] to get the actual `&str`.
+    pub text: Option<Range<usize>>,
     /// Internal range into the attribute arena.
     /// Use [`Element::attributes`] or [`Element::attribute`] instead.
     pub attributes: Option<Range<u32>>,
@@ -113,13 +117,22 @@ impl<'html> Element<'html> {
                 .and_then(|kv| kv.value)
         })
     }
-    /// Get the element's concatenated text content.
+    /// Get the element's source-preserving descendant text.
+    ///
+    /// Only populated when [`Save::raw_text`](crate::Save::raw_text) was `true`.
+    pub fn raw_text(&self, dom: &'html Store) -> Option<&'html str> {
+        self.raw_text
+            .as_ref()
+            .map(|range| dom.text.raw_text.slice(range.clone()))
+    }
+
+    /// Get the element's normalized, human-readable descendant text.
     ///
     /// Returns the whitespace-trimmed, concatenated text nodes within
-    /// this element. Only populated when [`Save::text_content`](crate::Save::text_content) was `true`.
-    pub fn text_content(&self, dom: &'html Store) -> Option<&'html str> {
-        self.text_content
+    /// this element. Only populated when [`Save::text`](crate::Save::text) was `true`.
+    pub fn text(&self, dom: &'html Store) -> Option<&'html str> {
+        self.text
             .as_ref()
-            .map(|range| dom.text_content.slice(range.clone()))
+            .map(|range| dom.text.text.slice(range.clone()))
     }
 }

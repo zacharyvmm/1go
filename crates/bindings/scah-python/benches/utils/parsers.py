@@ -66,7 +66,7 @@ def _consume_scah(elements):
         out.append((
             element.attributes,
             element.inner_html,
-            element.text_content,
+            element.text,
         ))
     return out
 

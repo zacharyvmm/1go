@@ -20,9 +20,16 @@ impl PySave {
     }
 
     #[staticmethod]
-    pub fn only_text_content() -> Self {
+    pub fn only_raw_text() -> Self {
         Self {
-            save: Save::only_text_content(),
+            save: Save::only_raw_text(),
+        }
+    }
+
+    #[staticmethod]
+    pub fn only_text() -> Self {
+        Self {
+            save: Save::only_text(),
         }
     }
 
@@ -37,12 +44,13 @@ impl PySave {
     }
 
     #[new]
-    #[pyo3(signature = (inner_html=false, text_content=false))]
-    pub fn new(inner_html: bool, text_content: bool) -> Self {
+    #[pyo3(signature = (inner_html=false, raw_text=false, text=false))]
+    pub fn new(inner_html: bool, raw_text: bool, text: bool) -> Self {
         Self {
             save: Save {
                 inner_html,
-                text_content,
+                raw_text,
+                text,
             },
         }
     }

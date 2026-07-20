@@ -28,7 +28,7 @@ fn consume_scah_results(store: &scah::Store<'_, '_>) {
         for element in elements {
             black_box(&element.attributes(store));
             black_box(&element.inner_html);
-            black_box(&element.text_content(store));
+            black_box(&element.text(store));
         }
     }
 }
@@ -81,7 +81,7 @@ fn bench_comparison(c: &mut Criterion) {
             },
         );
 
-        let save_text_queries = &[Query::all(QUERY, Save::only_text_content())
+        let save_text_queries = &[Query::all(QUERY, Save::only_text())
             .expect("simple bench selector should parse")
             .build()];
         group.bench_with_input(
@@ -119,7 +119,7 @@ fn bench_comparison(c: &mut Criterion) {
                 for element in store.get(QUERY).unwrap() {
                     black_box(&element.attributes(&store));
                     black_box(&element.inner_html);
-                    black_box(&element.text_content(&store));
+                    black_box(&element.text(&store));
                 }
             })
         });

@@ -19,9 +19,9 @@ fn runtime_all_query<'a>() -> scah::Query<'a> {
         .expect("macro benchmark root selector should parse")
         .then(|article| {
             Ok([
-                article.first("h1", Save::only_text_content())?,
+                article.first("h1", Save::only_text())?,
                 article.all("> section > a[href]", Save::all())?,
-                article.first("> section > span", Save::only_text_content())?,
+                article.first("> section > span", Save::only_text())?,
             ])
         })
         .expect("macro benchmark child selectors should parse")
@@ -33,7 +33,7 @@ fn runtime_first_query<'a>() -> scah::Query<'a> {
         .expect("macro benchmark root selector should parse")
         .then(|article| {
             Ok([
-                article.first("h1", Save::only_text_content())?,
+                article.first("h1", Save::only_text())?,
                 article.first("> section > a[href]", Save::all())?,
             ])
         })
@@ -72,9 +72,9 @@ fn bench_macro_all(c: &mut Criterion) {
                 b.iter(|| {
                     let query = query! {
                         all("main > article.post", Save::none()) => {
-                            first("h1", Save::only_text_content()),
+                            first("h1", Save::only_text()),
                             all("> section > a[href]", Save::all()),
-                            first("> section > span", Save::only_text_content()),
+                            first("> section > span", Save::only_text()),
                         }
                     };
                     let queries = [query];
@@ -126,7 +126,7 @@ fn bench_macro_first(c: &mut Criterion) {
                 b.iter(|| {
                     let query = query! {
                         first("main > article.post", Save::none()) => {
-                            first("h1", Save::only_text_content()),
+                            first("h1", Save::only_text()),
                             first("> section > a[href]", Save::all()),
                         }
                     };

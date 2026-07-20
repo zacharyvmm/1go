@@ -2,8 +2,8 @@ use crate::Attribute;
 use crate::QuerySection;
 use std::ops::Range;
 
-mod text_content;
-pub(crate) use text_content::TextContent;
+mod text;
+pub(crate) use text::{TextStore, TextTape, trim_normalized_range};
 mod arena;
 mod attributes;
 mod element;
@@ -51,8 +51,8 @@ pub struct Store<'html, 'query> {
     pub attributes: Arena<Attribute<'html>, AttributeId>,
     /// Arena of query nodes that link selectors to their matched elements.
     pub queries: Arena<QueryNode<'query>, QueryId>,
-    /// Accumulated text-content buffer shared by all elements.
-    pub text_content: TextContent,
+    /// Accumulated raw-text and normalized-text buffers shared by all elements.
+    pub(crate) text: TextStore,
     #[cfg(any(debug_assertions, test))]
     pub trace: crate::debug::TraceStore<'html, 'query>,
 }
@@ -75,12 +75,19 @@ pub struct CapacityOptions {
     /// Default: 24.
     pub attribute_bytes_per_slot: usize,
 
-    /// Whether to reserve the text-content buffer using the full input
-    /// capacity.  Set to `false` when no query needs text content.
+    /// Whether to reserve the raw-text buffer using the full input capacity.
+    /// Set to `false` when no query needs raw text.
     ///
     /// Default: `true`, preserving the public [`Store::with_capacity`]
-    /// behaviour of reserving text-content storage.
-    pub reserve_text_content: bool,
+    /// behaviour of reserving raw-text storage.
+    pub reserve_raw_text: bool,
+
+    /// Whether to reserve the normalized-text buffer using the full input
+    /// capacity. Set to `false` when no query needs normalized text.
+    ///
+    /// Default: `true`, preserving the public [`Store::with_capacity`]
+    /// behaviour of reserving normalized-text storage.
+    pub reserve_text: bool,
 
     /// Maximum trace-log preallocation.  Only used behind
     /// `cfg(any(debug_assertions, test))`; harmless otherwise.
@@ -94,7 +101,8 @@ impl Default for CapacityOptions {
         Self {
             element_bytes_per_slot: 48,
             attribute_bytes_per_slot: 24,
-            reserve_text_content: true,
+            reserve_raw_text: true,
+            reserve_text: true,
             trace_capacity_limit: 4096,
         }
     }
@@ -105,7 +113,7 @@ impl<'html, 'query: 'html> Default for Store<'html, 'query> {
         Self {
             elements: Arena::new(),
             queries: Arena::new(),
-            text_content: TextContent::new(),
+            text: TextStore::new(),
             attributes: Arena::new(),
             #[cfg(any(debug_assertions, test))]
             trace: crate::debug::TraceStore::new(),
@@ -136,7 +144,8 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     /// |------------- |----------------------------------- |
     /// | elements     | `capacity / element_bytes_per_slot` |
     /// | attributes   | `capacity / attribute_bytes_per_slot`|
-    /// | text_content | `capacity` if `reserve_text_content` |
+    /// | raw_text     | `capacity` if `reserve_raw_text`     |
+    /// | text         | `capacity` if `reserve_text`         |
     /// | queries      | none (fixed small per-query alloc)   |
     ///
     /// Every divisor is clamped to at least 1 to avoid division by zero.
@@ -147,11 +156,14 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
         Self {
             elements: Arena::with_capacity(capacity / element_divisor),
             queries: Arena::new(),
-            text_content: if options.reserve_text_content {
-                TextContent::with_capacity(capacity)
-            } else {
-                TextContent::new()
-            },
+            text: TextStore::with_capacity(
+                if options.reserve_raw_text {
+                    capacity
+                } else {
+                    0
+                },
+                if options.reserve_text { capacity } else { 0 },
+            ),
             attributes: Arena::with_capacity(capacity / attribute_divisor),
             #[cfg(any(debug_assertions, test))]
             trace: crate::debug::TraceStore::with_capacity(
@@ -186,13 +198,13 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     /// use scah::{Query, Save, parse};
     ///
     /// let html = "<ul><li>A</li><li>B</li></ul>";
-    /// let queries = &[Query::all("li", Save::only_text_content())
+    /// let queries = &[Query::all("li", Save::only_text())
     ///     .expect("valid selector")
     ///     .build()];
     /// let store = parse(html, queries).expect("parse succeeds");
     ///
     /// for li in store.get("li").unwrap() {
-    ///     println!("{}", li.text_content(&store).unwrap_or_default());
+    ///     println!("{}", li.text(&store).unwrap_or_default());
     /// }
     /// ```
     pub fn get(&'html self, query: &str) -> Option<impl Iterator<Item = &'html Element<'html>>> {
@@ -322,7 +334,8 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
         &mut self,
         element_id: ElementId,
         inner_html: Option<&'html str>,
-        text_content: Option<Range<usize>>,
+        raw_text: Option<Range<usize>>,
+        text: Option<Range<usize>>,
     ) {
         assert!(!self.elements.is_empty());
         assert!(element_id.index() < self.elements.len());
@@ -332,11 +345,14 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
         #[cfg(any(debug_assertions, test))]
         let has_inner_html = inner_html.is_some();
         #[cfg(any(debug_assertions, test))]
-        let has_text_content = text_content.is_some();
+        let has_raw_text = raw_text.is_some();
+        #[cfg(any(debug_assertions, test))]
+        let has_text = text.is_some();
 
         let element = &mut self.elements[element_id];
         element.inner_html = inner_html;
-        element.text_content = text_content;
+        element.raw_text = raw_text;
+        element.text = text;
 
         crate::scah_trace!(
             self,
@@ -344,7 +360,8 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
                 element_id,
                 tag,
                 has_inner_html,
-                has_text_content,
+                has_raw_text,
+                has_text,
             }
         );
     }
@@ -361,37 +378,57 @@ mod tests {
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
-        assert_eq!(store.text_content.content.capacity(), 30_000);
+        assert_eq!(store.text.raw_text.capacity(), 30_000);
+        assert_eq!(store.text.text.capacity(), 30_000);
     }
 
     #[test]
-    fn with_capacity_options_can_skip_text_content_reservation() {
+    fn with_capacity_options_can_skip_text_reservation() {
         let store = Store::with_capacity_options(
             30_000,
             CapacityOptions {
-                reserve_text_content: false,
+                reserve_raw_text: false,
+                reserve_text: false,
                 ..CapacityOptions::default()
             },
         );
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
-        assert_eq!(store.text_content.content.capacity(), 0);
+        assert_eq!(store.text.raw_text.capacity(), 0);
+        assert_eq!(store.text.text.capacity(), 0);
     }
 
     #[test]
-    fn with_capacity_options_can_reserve_text_content() {
+    fn with_capacity_options_can_reserve_text_buffers() {
         let store = Store::with_capacity_options(
             30_000,
             CapacityOptions {
-                reserve_text_content: true,
+                reserve_raw_text: true,
+                reserve_text: true,
                 ..CapacityOptions::default()
             },
         );
 
         assert_eq!(store.elements.capacity(), 30_000 / 48);
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
-        assert_eq!(store.text_content.content.capacity(), 30_000);
+        assert_eq!(store.text.raw_text.capacity(), 30_000);
+        assert_eq!(store.text.text.capacity(), 30_000);
+    }
+
+    #[test]
+    fn with_capacity_options_can_reserve_raw_text_only() {
+        let store = Store::with_capacity_options(
+            30_000,
+            CapacityOptions {
+                reserve_raw_text: true,
+                reserve_text: false,
+                ..CapacityOptions::default()
+            },
+        );
+
+        assert_eq!(store.text.raw_text.capacity(), 30_000);
+        assert_eq!(store.text.text.capacity(), 0);
     }
 
     #[test]

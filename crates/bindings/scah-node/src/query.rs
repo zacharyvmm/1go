@@ -9,7 +9,8 @@ use napi_derive::napi;
 #[derive(Clone, Copy, Debug)]
 pub struct JsSave {
     pub inner_html: Option<bool>,
-    pub text_content: Option<bool>,
+    pub raw_text: Option<bool>,
+    pub text: Option<bool>,
 }
 
 #[napi]
@@ -18,15 +19,26 @@ impl JsSave {
     pub fn only_inner_html() -> Self {
         Self {
             inner_html: Some(true),
-            text_content: Some(false),
+            raw_text: Some(false),
+            text: Some(false),
         }
     }
 
     #[napi]
-    pub fn only_text_content() -> Self {
+    pub fn only_raw_text() -> Self {
         Self {
             inner_html: Some(false),
-            text_content: Some(true),
+            raw_text: Some(true),
+            text: Some(false),
+        }
+    }
+
+    #[napi]
+    pub fn only_text() -> Self {
+        Self {
+            inner_html: Some(false),
+            raw_text: Some(false),
+            text: Some(true),
         }
     }
 
@@ -34,7 +46,8 @@ impl JsSave {
     pub fn all() -> Self {
         Self {
             inner_html: Some(true),
-            text_content: Some(true),
+            raw_text: Some(true),
+            text: Some(true),
         }
     }
 
@@ -42,22 +55,25 @@ impl JsSave {
     pub fn none() -> Self {
         Self {
             inner_html: Some(false),
-            text_content: Some(false),
+            raw_text: Some(false),
+            text: Some(false),
         }
     }
 
     #[napi]
-    pub fn new(inner_html: Option<bool>, text_content: Option<bool>) -> Self {
+    pub fn new(inner_html: Option<bool>, raw_text: Option<bool>, text: Option<bool>) -> Self {
         Self {
             inner_html,
-            text_content,
+            raw_text,
+            text,
         }
     }
 
     fn to_save(self) -> Save {
         Save {
             inner_html: self.inner_html.unwrap_or(false),
-            text_content: self.text_content.unwrap_or(false),
+            raw_text: self.raw_text.unwrap_or(false),
+            text: self.text.unwrap_or(false),
         }
     }
 }

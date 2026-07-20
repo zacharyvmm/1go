@@ -2,11 +2,10 @@ use super::executor::QueryExecutor;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{QuerySpec, Reader};
+use crate::{QuerySpec, Reader, TextRequirements};
 
 pub(crate) struct DocumentPosition {
     pub reader_position: usize,
-    pub text_content_position: usize,
     pub element_depth: crate::engine::DepthSize,
     /// Precomputed by the parser once per open tag so the executor
     /// never calls `XHtmlElement::is_self_closing()` in its hot loop.
@@ -17,7 +16,8 @@ pub(crate) struct DocumentPosition {
 pub(crate) struct SaveHit {
     pub element_id: ElementId,
     pub save_inner_html: bool,
-    pub save_text_content: bool,
+    pub save_raw_text: bool,
+    pub save_text: bool,
 }
 
 type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
@@ -111,10 +111,14 @@ where
         self.track_cursor_stats();
     }
 
-    pub(crate) fn requires_text_content(&self) -> bool {
-        self.runners
-            .iter()
-            .any(|runner| runner.query().requires_text_content())
+    pub(crate) fn text_requirements(&self) -> TextRequirements {
+        let mut req = TextRequirements::default();
+        for runner in &self.runners {
+            let runner_req = runner.query().text_requirements();
+            req.raw_text |= runner_req.raw_text;
+            req.text |= runner_req.text;
+        }
+        req
     }
 
     pub(crate) fn next_into(

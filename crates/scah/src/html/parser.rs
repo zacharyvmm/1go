@@ -1,6 +1,7 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
+use super::text_state::{ParserTextState, PendingSeparator, TextElementFlags};
 use crate::ParseError;
 use crate::QuerySpec;
 use crate::Reader;
@@ -10,7 +11,7 @@ use crate::debug::ImpliedCloseReason;
 use crate::debug::TraceEvent;
 use crate::engine::MAX_ELEMENT_DEPTH;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
-use crate::store::Store;
+use crate::store::{Store, trim_normalized_range};
 
 #[derive(Default)]
 struct ParserTempState<'html> {
@@ -26,7 +27,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
     temp_state: ParserTempState<'html>,
-    capture_text_content: bool,
+    text_state: ParserTextState,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
     parse_error: Option<ParseError>,
@@ -43,24 +44,43 @@ fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
     )
 }
 
+#[inline]
+fn element_has_hidden(element: &XHtmlElement<'_>) -> bool {
+    element
+        .attributes
+        .iter()
+        .any(|attr| attr.key.eq_ignore_ascii_case("hidden"))
+}
+
+#[inline]
+fn text_flags_for(tag: TagFlags, has_hidden: bool) -> TextElementFlags {
+    let mut flags = TextElementFlags::empty();
+    if tag.is_text_suppressed() || has_hidden {
+        flags.insert(TextElementFlags::SUPPRESSED);
+    }
+    if tag.is_text_preformatted() {
+        flags.insert(TextElementFlags::PREFORMATTED);
+    }
+    flags
+}
+
 impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
 where
     Q: QuerySpec<'query>,
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
-        let capture_text_content = selectors.requires_text_content();
+        let requirements = selectors.text_requirements();
         Self {
             position: DocumentPosition {
                 element_depth: 0,
                 reader_position: 0, // for inner_html
-                text_content_position: usize::MAX,
                 self_closing: false,
             },
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState::default(),
-            capture_text_content,
+            text_state: ParserTextState::new(requirements),
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
@@ -69,29 +89,46 @@ where
     }
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
-        let capture_text_content = selectors.requires_text_content();
+        let requirements = selectors.text_requirements();
         Self {
             position: DocumentPosition {
                 element_depth: 0,
                 reader_position: 0, // for inner_html
-                text_content_position: usize::MAX,
                 self_closing: false,
             },
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState::default(),
-            capture_text_content,
+            text_state: ParserTextState::new(requirements),
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
             store: Store::with_capacity_options(
                 capacity,
                 crate::CapacityOptions {
-                    reserve_text_content: capture_text_content,
+                    reserve_raw_text: requirements.raw_text,
+                    reserve_text: requirements.text,
                     ..crate::CapacityOptions::default()
                 },
             ),
+        }
+    }
+
+    fn flush_source_text(&mut self, reader: &Reader<'html>, end: usize) {
+        let Some(start) = self.text_state.source_start.take() else {
+            return;
+        };
+        if start >= end {
+            return;
+        }
+        let slice = reader.slice(start..end);
+        if self.text_state.requirements.raw_text {
+            self.store.text.raw_text.push_str(slice);
+        }
+        if self.text_state.requirements.text {
+            self.text_state
+                .write_normalized_fragment(&mut self.store.text.text, slice);
         }
     }
 
@@ -118,25 +155,16 @@ where
                 if reader.match_ignore_case(close_tag)
                     && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
                 {
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                        && let Some(position) =
-                            self.store.text_content.push(reader, reader.get_position())
-                    {
-                        self.position.text_content_position = position;
-                    }
+                    self.flush_source_text(reader, reader.get_position());
                     self.raw_text_close = None;
 
                     self.position.reader_position = reader.get_position();
                     reader.next_until(b'>');
                     reader.skip();
 
-                    if self.capture_text_content {
-                        self.store.text_content.set_start(reader.get_position());
-                    }
-
                     let closing_tag = &close_tag[2..];
                     let early_exit = self.handle_close_tag(closing_tag, reader);
+                    self.text_state.mark_source_start(reader.get_position());
                     return !early_exit && !reader.eof();
                 } else {
                     reader.skip();
@@ -160,16 +188,11 @@ where
                 tag = XHtmlTag::from(reader);
                 if let Some(XHtmlTag::Open) = tag {
                     self.element.from(reader, &mut self.store.attributes);
-                } else if self.capture_text_content
-                    && tag.is_none()
-                    && self.store.text_content.text_start.is_some()
-                    && let Some(position) = self
-                        .store
-                        .text_content
-                        .push(reader, self.position.reader_position)
-                {
-                    self.position.text_content_position = position;
-                    self.store.text_content.set_start(reader.get_position());
+                } else if tag.is_none() {
+                    // Comment / doctype / declaration: keep preceding text,
+                    // skip the markup itself.
+                    self.flush_source_text(reader, self.position.reader_position);
+                    self.text_state.mark_source_start(reader.get_position());
                 }
             }
 
@@ -177,27 +200,14 @@ where
         };
         let tag_start_position = self.position.reader_position;
 
-        if self.capture_text_content
-            && self.store.text_content.text_start.is_some()
-            && let Some(position) = self
-                .store
-                .text_content
-                .push(reader, self.position.reader_position)
-        {
-            self.position.text_content_position = position;
-        }
+        self.flush_source_text(reader, tag_start_position);
 
-        if self.capture_text_content {
-            self.store.text_content.set_start(reader.get_position());
-        }
-
-        // TODO: register the start
-        //reader.next_while(|c| c.is_whitespace());
         let mut early_exit = false;
 
         match tag {
             XHtmlTag::Open => {
                 let tag = TagFlags::classify(self.element.name);
+                let text_flags = text_flags_for(tag, element_has_hidden(&self.element));
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
@@ -211,6 +221,19 @@ where
 
                 let is_self_closing = tag.is_void();
                 self.position.self_closing = is_self_closing;
+
+                if !is_self_closing {
+                    if tag.is_text_block() || tag.is_text_row() {
+                        self.text_state.queue_separator(PendingSeparator::LineBreak);
+                    }
+                    if self.text_state.requirements.text {
+                        self.text_state.flush_pending(&mut self.store.text.text);
+                    }
+                }
+
+                let raw_start = self.store.text.raw_text.len();
+                let text_start = self.store.text.text.len();
+
                 if is_self_closing {
                     let depth = self.open_elements.depth().saturating_add(1);
                     if depth > MAX_ELEMENT_DEPTH {
@@ -218,7 +241,9 @@ where
                         return false;
                     }
                     self.position.element_depth = depth;
-                } else if let Err(err) = self.open_elements.push_classified(self.element.name, tag)
+                } else if let Err(err) =
+                    self.open_elements
+                        .push_classified(self.element.name, tag, text_flags)
                 {
                     self.record_parse_error(err);
                     return false;
@@ -243,6 +268,17 @@ where
                     &mut self.temp_state.save_hits,
                 );
                 if is_self_closing {
+                    for save_hit in &self.temp_state.save_hits {
+                        self.store.set_content(
+                            save_hit.element_id,
+                            None,
+                            save_hit.save_raw_text.then_some(raw_start..raw_start),
+                            save_hit.save_text.then_some(text_start..text_start),
+                        );
+                    }
+                    if tag.is_text_break() {
+                        self.text_state.queue_separator(PendingSeparator::LineBreak);
+                    }
                     early_exit = self.selectors.back(
                         self.element.name,
                         &self.position,
@@ -256,17 +292,19 @@ where
                             save_hit
                                 .save_inner_html
                                 .then_some(self.position.reader_position),
-                            save_hit
-                                .save_text_content
-                                .then_some(self.position.text_content_position),
+                            save_hit.save_raw_text.then_some(raw_start),
+                            save_hit.save_text.then_some(text_start),
                         );
                     }
+                    self.text_state.enter_element(text_flags);
                 }
 
                 self.element.clear();
+                self.text_state.mark_source_start(reader.get_position());
             }
             XHtmlTag::Close(closing_tag) => {
                 early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
+                self.text_state.mark_source_start(reader.get_position());
             }
         }
 
@@ -310,7 +348,8 @@ where
                 element_count: self.store.elements.len(),
                 query_node_count: self.store.queries.len(),
                 attribute_count: self.store.attributes.len(),
-                text_content_len: self.store.text_content.len(),
+                raw_text_len: self.store.text.raw_text.len(),
+                text_len: self.store.text.text.len(),
             }
         );
         self.store
@@ -323,6 +362,14 @@ where
         reader: &Reader<'html>,
     ) -> bool {
         self.finalize_open_element(&open_element, reader);
+        self.text_state.exit_element(open_element.text_flags);
+        if !open_element
+            .text_flags
+            .contains(TextElementFlags::SUPPRESSED)
+            && let Some(separator) = open_element.tag().post_text_separator()
+        {
+            self.text_state.queue_separator(separator);
+        }
         self.position.element_depth = close_depth;
         self.selectors
             .back(open_element.name, &self.position, reader, &mut self.store)
@@ -425,24 +472,15 @@ where
                 .inner_html_start
                 .map(|start_idx| reader.slice(start_idx..self.position.reader_position));
 
-            let text_content = saved.text_content_start.and_then(|start_idx| {
-                // `get_position()` asserts the buffer is non-empty, so guard
-                // empty/whitespace-only elements here to avoid a panic.
-                if self.store.text_content.is_empty() {
-                    return None;
-                }
-                let end = self.store.text_content.get_position();
-                if start_idx == usize::MAX {
-                    Some(0..end)
-                } else if start_idx == end {
-                    None
-                } else {
-                    Some((start_idx + 1)..end)
-                }
+            let raw_text = saved
+                .raw_text_start
+                .map(|start| start..self.store.text.raw_text.len());
+            let text = saved.text_start.map(|start| {
+                trim_normalized_range(&self.store.text.text, start..self.store.text.text.len())
             });
 
             self.store
-                .set_content(saved.element_id, inner_html, text_content);
+                .set_content(saved.element_id, inner_html, raw_text, text);
         }
     }
 
@@ -451,12 +489,7 @@ where
             return;
         }
 
-        if self.capture_text_content
-            && self.store.text_content.text_start.is_some()
-            && let Some(position) = self.store.text_content.push(reader, reader.get_position())
-        {
-            self.position.text_content_position = position;
-        }
+        self.flush_source_text(reader, reader.get_position());
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
@@ -464,6 +497,7 @@ where
         self.eof_drained = true;
     }
 }
+
 #[cfg(test)]
 mod tests {
     use std::ops::Deref;
@@ -521,56 +555,96 @@ mod tests {
 
     #[test]
     fn test_text_content() {
-        let mut reader = Reader::new(BASIC_HTML);
-
-        let queries = &[Query::all("p.indent > .bold", Save::only_text_content())
+        let html = BASIC_HTML;
+        let queries = &[Query::all("p.indent > .bold", Save::only_text())
             .unwrap()
             .build()];
-        let manager = QueryMultiplexer::new(queries);
+        let store = parse(html, queries).expect("parse succeeds");
+        let bold = store.get("p.indent > .bold").unwrap().next().unwrap();
+        assert_eq!(bold.text(&store), Some("Zachary"));
+        assert_eq!(bold.raw_text(&store), None);
+    }
 
-        let mut parser = XHtmlParser::new(manager);
+    #[test]
+    fn test_raw_text_preserves_source() {
+        let html = "<p>Hello   <strong>world</strong>\nagain</p>";
+        let queries = &[Query::all("p", Save::only_raw_text()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let p = store.get("p").unwrap().next().unwrap();
+        assert_eq!(p.raw_text(&store), Some("Hello   world\nagain"));
+        assert_eq!(p.text(&store), None);
+    }
 
-        let mut continue_parser = parser.next(&mut reader); // <html>
-        assert!(continue_parser);
+    #[test]
+    fn test_normalized_text_collapses_whitespace() {
+        let html = "<p>Hello   <strong>world</strong>\nagain</p>";
+        let queries = &[Query::all("p", Save::only_text()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let p = store.get("p").unwrap().next().unwrap();
+        assert_eq!(p.text(&store), Some("Hello world again"));
+    }
 
-        continue_parser = parser.next(&mut reader); // <h1>
-        assert!(continue_parser);
+    #[test]
+    fn test_block_boundaries_insert_newlines() {
+        let html = "<section><div>Hello</div><div>world</div></section>";
+        let queries = &[Query::all("section", Save::all()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let section = store.get("section").unwrap().next().unwrap();
+        assert_eq!(section.raw_text(&store), Some("Helloworld"));
+        assert_eq!(section.text(&store), Some("Hello\nworld"));
+    }
 
-        continue_parser = parser.next(&mut reader); // </h1>
-        assert!(continue_parser);
-        assert_eq!(parser.store.text_content.content, b"Hello World ");
+    #[test]
+    fn test_entities_raw_vs_normalized() {
+        let html = "<p>A&nbsp;&amp;&#x20;B</p>";
+        let queries = &[Query::all("p", Save::all()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let p = store.get("p").unwrap().next().unwrap();
+        assert_eq!(p.raw_text(&store), Some("A&nbsp;&amp;&#x20;B"));
+        assert_eq!(p.text(&store), Some("A & B"));
+    }
 
-        continue_parser = parser.next(&mut reader); // <p class="indent">
-        assert!(continue_parser);
-        assert_eq!(parser.store.text_content.content, b"Hello World ");
-
-        continue_parser = parser.next(&mut reader); // <span id="name" class="bold">
-        assert!(continue_parser);
+    #[test]
+    fn test_suppressed_script_style_hidden() {
+        let html =
+            r#"<div>A<script>const value = "<x>";</script>B<span hidden>secret</span>C</div>"#;
+        let queries = &[Query::all("div", Save::all()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let div = store.get("div").unwrap().next().unwrap();
         assert_eq!(
-            parser.store.text_content.content,
-            b"Hello World My name is "
+            div.raw_text(&store),
+            Some(r#"Aconst value = "<x>";BsecretC"#)
         );
+        assert_eq!(div.text(&store), Some("ABC"));
+    }
 
-        continue_parser = parser.next(&mut reader); // </span>
-        assert!(continue_parser);
-        assert_eq!(
-            parser.store.text_content.content,
-            b"Hello World My name is Zachary "
-        );
+    #[test]
+    fn test_table_normalized_text() {
+        let html = "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>";
+        let queries = &[Query::all("table", Save::only_text()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let table = store.get("table").unwrap().next().unwrap();
+        assert_eq!(table.text(&store), Some("A\tB\nC\tD"));
+    }
 
-        continue_parser = parser.next(&mut reader); // </p>
-        assert!(continue_parser);
-        assert_eq!(
-            parser.store.text_content.content,
-            b"Hello World My name is Zachary "
-        );
+    #[test]
+    fn test_empty_capture_returns_empty_string() {
+        let html = "<div></div>";
+        let queries = &[Query::all("div", Save::all()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let div = store.get("div").unwrap().next().unwrap();
+        assert_eq!(div.raw_text(&store), Some(""));
+        assert_eq!(div.text(&store), Some(""));
+    }
 
-        continue_parser = parser.next(&mut reader); // </html>
-        assert!(!continue_parser);
-        assert_eq!(
-            parser.store.text_content.content,
-            b"Hello World My name is Zachary "
-        );
+    #[test]
+    fn test_uncaptured_vs_empty() {
+        let html = "<input>";
+        let queries = &[Query::all("input", Save::only_text()).unwrap().build()];
+        let store = parse(html, queries).expect("parse succeeds");
+        let input = store.get("input").unwrap().next().unwrap();
+        assert_eq!(input.text(&store), Some(""));
+        assert_eq!(input.raw_text(&store), None);
     }
 
     #[test]
@@ -586,8 +660,8 @@ mod tests {
         let store = parser.matches();
         let anchor = store.get("a").unwrap().next().unwrap();
         assert_eq!(anchor.inner_html, Some("Hello <b>World</b>"));
-        assert_eq!(anchor.text_content(&store), None);
-        assert!(store.text_content.content.is_empty());
+        assert_eq!(anchor.text(&store), None);
+        assert!(store.text.raw_text.is_empty() && store.text.text.is_empty());
     }
 
     #[test]
@@ -596,7 +670,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[
             Query::all("a", Save::only_inner_html()).unwrap().build(),
-            Query::all("b", Save::only_text_content()).unwrap().build(),
+            Query::all("b", Save::only_text()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
         let mut parser = XHtmlParser::new(manager);
@@ -607,8 +681,8 @@ mod tests {
         let anchor = store.get("a").unwrap().next().unwrap();
         let bold = store.get("b").unwrap().next().unwrap();
         assert_eq!(anchor.inner_html, Some("Hello <b>World</b>"));
-        assert_eq!(anchor.text_content(&store), None);
-        assert_eq!(bold.text_content(&store), Some("World"));
+        assert_eq!(anchor.text(&store), None);
+        assert_eq!(bold.text(&store), Some("World"));
     }
 
     #[test]
@@ -690,11 +764,11 @@ mod tests {
 
         // Section 1
         let s1 = sections[0];
-        assert_eq!(s1.text_content(&store), Some("Hello World"));
+        assert_eq!(s1.text(&store), Some("Hello World"));
 
         let s1_div_a: Vec<&Element> = s1.get(&store, "div a").unwrap().collect();
         assert_eq!(s1_div_a.len(), 1);
-        assert_eq!(s1_div_a[0].text_content(&store), Some("World"));
+        assert_eq!(s1_div_a[0].text(&store), Some("World"));
         assert_eq!(
             s1_div_a[0].attributes(&store).unwrap()[0].value,
             Some("https://world.com")
@@ -704,7 +778,7 @@ mod tests {
 
         let s1_direct_a: Vec<&Element> = s1.get(&store, "> a[href]").unwrap().collect();
         assert_eq!(s1_direct_a.len(), 1);
-        assert_eq!(s1_direct_a[0].text_content(&store), Some("Hello"));
+        assert_eq!(s1_direct_a[0].text(&store), Some("Hello"));
         assert_eq!(
             s1_direct_a[0].attributes(&store).unwrap()[0].value,
             Some("https://hello.com")
@@ -712,16 +786,16 @@ mod tests {
 
         // Section 2
         let s2 = sections[1];
-        assert_eq!(s2.text_content(&store), Some("Hello2 World2 World3"));
+        assert_eq!(s2.text(&store), Some("Hello2 World2 World3"));
 
         let s2_div_a: Vec<&Element> = s2.get(&store, "div a").unwrap().collect();
         assert_eq!(s2_div_a.len(), 2, "World3 Element duplicated");
-        assert_eq!(s2_div_a[0].text_content(&store), Some("World2"));
-        assert_eq!(s2_div_a[1].text_content(&store), Some("World3"));
+        assert_eq!(s2_div_a[0].text(&store), Some("World2"));
+        assert_eq!(s2_div_a[1].text(&store), Some("World3"));
 
         let s2_direct_a: Vec<&Element> = s2.get(&store, "> a[href]").unwrap().collect();
         assert_eq!(s2_direct_a.len(), 1);
-        assert_eq!(s2_direct_a[0].text_content(&store), Some("Hello2"));
+        assert_eq!(s2_direct_a[0].text(&store), Some("Hello2"));
     }
 
     const BASIC_HTML_WITH_SCRIPT: &str = r#"
@@ -839,10 +913,12 @@ mod tests {
 
         let inputs: Vec<&Element> = store.get("form > p > input").unwrap().collect();
         assert_eq!(inputs.len(), 2);
-        assert_eq!(inputs[0].text_content(&store), None);
+        assert_eq!(inputs[0].text(&store), Some(""));
+        assert_eq!(inputs[0].raw_text(&store), Some(""));
         assert_eq!(inputs[0].inner_html, None);
 
-        assert_eq!(inputs[1].text_content(&store), None);
+        assert_eq!(inputs[1].text(&store), Some(""));
+        assert_eq!(inputs[1].raw_text(&store), Some(""));
         assert_eq!(inputs[1].inner_html, None);
     }
 
@@ -869,9 +945,9 @@ mod tests {
         let anchors: Vec<&Element> = store.get("a").unwrap().collect();
         assert_eq!(anchors.len(), 3);
 
-        assert_eq!(anchors[0].text_content(&store), Some("Hello 1"));
-        assert_eq!(anchors[1].text_content(&store), Some("Hello 2"));
-        assert_eq!(anchors[2].text_content(&store), Some("Hello 3"));
+        assert_eq!(anchors[0].text(&store), Some("Hello 1"));
+        assert_eq!(anchors[1].text(&store), Some("Hello 2"));
+        assert_eq!(anchors[2].text(&store), Some("Hello 3"));
     }
 
     const POSTS: &str = r#"<div class="article"><a href="/post/0"><b>Post</b> &lt;0&gt;</a></div><div class="article"><a href="/post/1"><b>Post</b> &lt;1&gt;</a></div>"#;
@@ -895,7 +971,8 @@ mod tests {
         assert_eq!(anchor.name, "a");
         assert_eq!(anchor.attributes(&store).unwrap()[0].value, Some("/post/0"));
         assert_eq!(anchor.inner_html, Some("<b>Post</b> &lt;0&gt;"));
-        assert_eq!(anchor.text_content(&store), Some("Post &lt;0&gt;"));
+        assert_eq!(anchor.text(&store), Some("Post <0>"));
+        assert_eq!(anchor.raw_text(&store), Some("Post &lt;0&gt;"));
     }
 
     const PYTHON_TEST_HTML: &str = r#"
@@ -967,7 +1044,7 @@ mod tests {
     "#
             )
         );
-        assert!(span.text_content(&store).is_some());
+        assert!(span.text(&store).is_some());
 
         let anchors: Vec<&Element> = span.get(&store, "a").unwrap().collect();
         assert_eq!(anchors.len(), 1);
@@ -984,7 +1061,7 @@ mod tests {
             },]
         );
         assert_eq!(a.inner_html, Some("World"));
-        assert!(a.text_content(&store).is_some());
+        assert!(a.text(&store).is_some());
     }
 
     #[test]
@@ -1029,7 +1106,8 @@ mod tests {
         );
 
         assert_eq!(element.inner_html, Some("<b>Post</b> &lt;0&gt;"));
-        assert_eq!(element.text_content(&store), Some("Post &lt;0&gt;"));
+        assert_eq!(element.text(&store), Some("Post <0>"));
+        assert_eq!(element.raw_text(&store), Some("Post &lt;0&gt;"));
     }
 
     #[test]
@@ -1045,7 +1123,7 @@ mod tests {
         let store = parser.matches();
         let p = store.get("p").unwrap().next().unwrap();
         assert_eq!(p.inner_html, Some("Hello"));
-        assert_eq!(p.text_content(&store), Some("Hello"));
+        assert_eq!(p.text(&store), Some("Hello"));
     }
 
     #[test]
@@ -1066,9 +1144,9 @@ mod tests {
         let span = store.get("span").unwrap().next().unwrap();
 
         assert_eq!(span.inner_html, Some("Hello"));
-        assert_eq!(span.text_content(&store), Some("Hello"));
+        assert_eq!(span.text(&store), Some("Hello"));
         assert_eq!(div.inner_html, Some("<span>Hello"));
-        assert_eq!(div.text_content(&store), Some("Hello"));
+        assert_eq!(div.text(&store), Some("Hello"));
     }
 
     #[test]
@@ -1083,7 +1161,7 @@ mod tests {
 
         let store = parser.matches();
         let span = store.get("div span").unwrap().next().unwrap();
-        assert_eq!(span.text_content(&store), Some("Hello"));
+        assert_eq!(span.text(&store), Some("Hello"));
         assert_eq!(span.inner_html, Some("Hello</bogus>"));
     }
 
@@ -1105,9 +1183,9 @@ mod tests {
         let a = store.get("a").unwrap().next().unwrap();
 
         assert_eq!(a.inner_html, Some("Link"));
-        assert_eq!(a.text_content(&store), Some("Link"));
+        assert_eq!(a.text(&store), Some("Link"));
         assert_eq!(section.inner_html, Some("<a href='x'>Link"));
-        assert_eq!(section.text_content(&store), Some("Link"));
+        assert_eq!(section.text(&store), Some("Link"));
     }
 
     #[test]
@@ -1123,9 +1201,9 @@ mod tests {
         let store = parser.matches();
         let items: Vec<&Element> = store.get("li").unwrap().collect();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].text_content(&store), Some("One"));
+        assert_eq!(items[0].text(&store), Some("One"));
         assert_eq!(items[0].inner_html, Some("One"));
-        assert_eq!(items[1].text_content(&store), Some("Two"));
+        assert_eq!(items[1].text(&store), Some("Two"));
         assert_eq!(items[1].inner_html, Some("Two"));
     }
 
@@ -1148,9 +1226,9 @@ mod tests {
 
         assert_eq!(dts.len(), 2);
         assert_eq!(dds.len(), 1);
-        assert_eq!(dts[0].text_content(&store), Some("Term"));
-        assert_eq!(dds[0].text_content(&store), Some("Def"));
-        assert_eq!(dts[1].text_content(&store), Some("Next"));
+        assert_eq!(dts[0].text(&store), Some("Term"));
+        assert_eq!(dds[0].text(&store), Some("Def"));
+        assert_eq!(dts[1].text(&store), Some("Next"));
     }
 
     #[test]
@@ -1166,8 +1244,8 @@ mod tests {
         let store = parser.matches();
         let options: Vec<&Element> = store.get("option").unwrap().collect();
         assert_eq!(options.len(), 2);
-        assert_eq!(options[0].text_content(&store), Some("One"));
-        assert_eq!(options[1].text_content(&store), Some("Two"));
+        assert_eq!(options[0].text(&store), Some("One"));
+        assert_eq!(options[1].text(&store), Some("Two"));
     }
 
     #[test]
@@ -1189,10 +1267,10 @@ mod tests {
 
         assert_eq!(optgroups.len(), 2);
         assert_eq!(options.len(), 2);
-        assert_eq!(optgroups[0].text_content(&store), Some("One"));
-        assert_eq!(optgroups[1].text_content(&store), Some("Two"));
-        assert_eq!(options[0].text_content(&store), Some("One"));
-        assert_eq!(options[1].text_content(&store), Some("Two"));
+        assert_eq!(optgroups[0].text(&store), Some("One"));
+        assert_eq!(optgroups[1].text(&store), Some("Two"));
+        assert_eq!(options[0].text(&store), Some("One"));
+        assert_eq!(options[1].text(&store), Some("Two"));
     }
 
     #[test]
@@ -1208,8 +1286,8 @@ mod tests {
         let store = parser.matches();
         let cells: Vec<&Element> = store.get("td").unwrap().collect();
         assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].text_content(&store), Some("One"));
-        assert_eq!(cells[1].text_content(&store), Some("Two"));
+        assert_eq!(cells[0].text(&store), Some("One"));
+        assert_eq!(cells[1].text(&store), Some("Two"));
     }
 
     #[test]
@@ -1230,9 +1308,9 @@ mod tests {
         let class_match = store.get(".x").unwrap().next().unwrap();
 
         assert_eq!(div.inner_html, Some("Hello"));
-        assert_eq!(div.text_content(&store), Some("Hello"));
+        assert_eq!(div.text(&store), Some("Hello"));
         assert_eq!(class_match.inner_html, Some("Hello"));
-        assert_eq!(class_match.text_content(&store), Some("Hello"));
+        assert_eq!(class_match.text(&store), Some("Hello"));
     }
 
     #[test]
@@ -1265,7 +1343,7 @@ mod tests {
 
         let store = parser.matches();
         let div = store.get("div").unwrap().next().unwrap();
-        assert_eq!(div.text_content(&store), Some("Hello"));
+        assert_eq!(div.text(&store), Some("Hello"));
     }
 
     #[test]
@@ -1274,22 +1352,22 @@ mod tests {
         let store = parse("<div><a>Hello <b>World</b></a></div>", queries).unwrap();
 
         let anchor = store.get("a").unwrap().next().unwrap();
-        assert_eq!(anchor.text_content(&store), None);
-        assert_eq!(store.text_content.len(), 0);
+        assert_eq!(anchor.text(&store), None);
+        assert_eq!(store.text.raw_text.len() + store.text.text.len(), 0);
     }
 
     #[test]
     fn mixed_save_queries_keep_text_content_for_text_query() {
         let queries = &[
             Query::all("a", Save::none()).unwrap().build(),
-            Query::all("b", Save::only_text_content()).unwrap().build(),
+            Query::all("b", Save::only_text()).unwrap().build(),
         ];
         let store = parse("<a>Hello <b>World</b></a>", queries).unwrap();
 
         let anchor = store.get("a").unwrap().next().unwrap();
         let bold = store.get("b").unwrap().next().unwrap();
-        assert_eq!(anchor.text_content(&store), None);
-        assert_eq!(bold.text_content(&store), Some("World"));
+        assert_eq!(anchor.text(&store), None);
+        assert_eq!(bold.text(&store), Some("World"));
     }
 
     const SINGLE_PRODUCT_HTML: &str = r#"
@@ -1349,7 +1427,7 @@ mod tests {
         assert_eq!(section.name, "section");
         assert_eq!(section.id, Some("products"));
         assert!(section.inner_html.is_some());
-        assert!(section.text_content(&store).is_some());
+        assert!(section.text(&store).is_some());
 
         let products: Vec<&Element> = section.get(&store, ".product").unwrap().collect();
         assert_eq!(products.len(), 1);
@@ -1358,12 +1436,12 @@ mod tests {
         assert_eq!(product.name, "div");
         assert_eq!(product.class, Some("product"));
         assert!(product.inner_html.is_some());
-        assert!(product.text_content(&store).is_some());
+        assert!(product.text(&store).is_some());
 
         let h1 = product.get(&store, "h1").unwrap().next().unwrap();
         assert_eq!(h1.name, "h1");
         assert_eq!(h1.inner_html, Some("Product #1"));
-        assert!(h1.text_content(&store).is_some());
+        assert!(h1.text(&store).is_some());
 
         let img = product.get(&store, "img").unwrap().next().unwrap();
         assert_eq!(img.name, "img");
@@ -1372,7 +1450,7 @@ mod tests {
         let p = product.get(&store, "p").unwrap().next().unwrap();
         assert_eq!(p.name, "p");
         assert!(p.inner_html.is_some());
-        assert!(p.text_content(&store).is_some());
+        assert!(p.text(&store).is_some());
     }
 
     const PRODUCT_HTML: &str = r#"
@@ -1446,7 +1524,7 @@ mod tests {
         assert_eq!(section.name, "section");
         assert_eq!(section.id, Some("products"));
         assert!(section.inner_html.is_some());
-        assert!(section.text_content(&store).is_some());
+        assert!(section.text(&store).is_some());
 
         let products: Vec<&Element> = section.get(&store, ".product").unwrap().collect();
         assert_eq!(products.len(), 2);
@@ -1456,12 +1534,12 @@ mod tests {
         assert_eq!(p1.name, "div");
         assert_eq!(p1.class, Some("product"));
         assert!(p1.inner_html.is_some());
-        assert!(p1.text_content(&store).is_some());
+        assert!(p1.text(&store).is_some());
 
         let p1_h1 = p1.get(&store, "h1").unwrap().next().unwrap();
         assert_eq!(p1_h1.name, "h1");
         assert_eq!(p1_h1.inner_html, Some("Product #1"));
-        assert!(p1_h1.text_content(&store).is_some());
+        assert!(p1_h1.text(&store).is_some());
 
         let p1_img = p1.get(&store, "img").unwrap().next().unwrap();
         assert_eq!(p1_img.name, "img");
@@ -1470,19 +1548,19 @@ mod tests {
         let p1_p = p1.get(&store, "p").unwrap().next().unwrap();
         assert_eq!(p1_p.name, "p");
         assert!(p1_p.inner_html.is_some());
-        assert!(p1_p.text_content(&store).is_some());
+        assert!(p1_p.text(&store).is_some());
 
         // Product 2
         let p2 = products[1];
         assert_eq!(p2.name, "div");
         assert_eq!(p2.class, Some("product"));
         assert!(p2.inner_html.is_some());
-        assert!(p2.text_content(&store).is_some());
+        assert!(p2.text(&store).is_some());
 
         let p2_h1 = p2.get(&store, "h1").unwrap().next().unwrap();
         assert_eq!(p2_h1.name, "h1");
         assert!(p2_h1.inner_html.is_some());
-        assert!(p2_h1.text_content(&store).is_some());
+        assert!(p2_h1.text(&store).is_some());
 
         let p2_img = p2.get(&store, "img").unwrap().next().unwrap();
         assert_eq!(p2_img.name, "img");
@@ -1491,7 +1569,7 @@ mod tests {
         let p2_p = p2.get(&store, "p").unwrap().next().unwrap();
         assert_eq!(p2_p.name, "p");
         assert!(p2_p.inner_html.is_some());
-        assert!(p2_p.text_content(&store).is_some());
+        assert!(p2_p.text(&store).is_some());
     }
 
     // --- parse() Result tests ---

@@ -4,14 +4,12 @@ use scah::{Query, Save, parse};
 #[test]
 fn empty_elements_do_not_panic() {
     let html = "<div></div><p>   </p><div><!-- comment --></div><div><span></span></div>";
-    let queries = &[Query::all("div", Save::only_text_content())
-        .unwrap()
-        .build()];
+    let queries = &[Query::all("div", Save::only_text()).unwrap().build()];
     let store = parse(html, queries).unwrap();
     let divs: Vec<_> = store.get("div").unwrap().collect();
     assert_eq!(divs.len(), 3);
     for div in &divs {
-        assert_eq!(div.text_content(&store), None);
+        assert_eq!(div.text(&store), Some(""));
     }
 }
 
@@ -46,7 +44,7 @@ fn comment_open_only_at_eof_does_not_panic() {
 #[test]
 fn form_feed_is_treated_as_whitespace() {
     let html = "<div\x0Cclass=\"real\">text</div>";
-    let store = parse_with_saves(html, &[("div.real", Save::only_text_content())]);
+    let store = parse_with_saves(html, &[("div.real", Save::only_text())]);
     assert_eq!(elements(&store, "div.real").len(), 1);
 }
 
@@ -74,5 +72,5 @@ fn comment_with_multibyte_char_before_gt_does_not_leak_elements() {
 
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].attribute(&store, "href"), Some("real"));
-    assert_eq!(links[0].text_content(&store), Some("ok"));
+    assert_eq!(links[0].text(&store), Some("ok"));
 }

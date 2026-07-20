@@ -53,8 +53,8 @@ fn html_scope_problem_intro_example() {
         .unwrap()
         .collect::<Vec<_>>();
     assert_eq!(existing_bindings.len(), 2);
-    assert_eq!(existing_bindings[0].text_content(&store), Some("Python"));
-    assert_eq!(existing_bindings[1].text_content(&store), Some("Node.js"));
+    assert_eq!(existing_bindings[0].text(&store), Some("Python"));
+    assert_eq!(existing_bindings[1].text(&store), Some("Node.js"));
 }
 
 const FIRST_SELECTION_AS_ROOT_EARLY_EXIT: &str = r#"
@@ -90,10 +90,7 @@ fn first_selection_as_root_early_exit() {
             r#"<h1>Product 0</h1><span class="rating">3/5</span><p class="description">Description</p>"#
         )
     );
-    assert_eq!(
-        product.text_content(&store),
-        Some("Product 0 3/5 Description")
-    );
+    assert_eq!(product.text(&store), Some("Product 0\n3/5\nDescription"));
 
     let title = product
         .get(&store, PRODUCT_TITLE_SELECTOR)
@@ -102,7 +99,7 @@ fn first_selection_as_root_early_exit() {
         .unwrap();
     assert_eq!(title.name, "h1");
     assert_eq!(title.inner_html, Some("Product 0"));
-    assert_eq!(title.text_content(&store), Some("Product 0"));
+    assert_eq!(title.text(&store), Some("Product 0"));
 
     let rating = product
         .get(&store, PRODUCT_RATING_SELECTOR)
@@ -112,7 +109,7 @@ fn first_selection_as_root_early_exit() {
     assert_eq!(rating.name, "span");
     assert_eq!(rating.class, Some("rating"));
     assert_eq!(rating.inner_html, Some("3/5"));
-    assert_eq!(rating.text_content(&store), Some("3/5"));
+    assert_eq!(rating.text(&store), Some("3/5"));
 
     let description = product
         .get(&store, PRODUCT_DESCRIPTION_SELECTOR)
@@ -122,7 +119,7 @@ fn first_selection_as_root_early_exit() {
     assert_eq!(description.name, "p");
     assert_eq!(description.class, Some("description"));
     assert_eq!(description.inner_html, Some("Description"));
-    assert_eq!(description.text_content(&store), Some("Description"));
+    assert_eq!(description.text(&store), Some("Description"));
 }
 
 const FIRST_CONTEXT_WITH_REQUIRED_CHILD: &str = r#"
@@ -150,5 +147,5 @@ fn first_context_waits_for_required_child_before_early_exit() {
         .flatten()
         .collect::<Vec<_>>();
     assert_eq!(titles.len(), 1);
-    assert_eq!(titles[0].text_content(&store), Some("Product 1"));
+    assert_eq!(titles[0].text(&store), Some("Product 1"));
 }
