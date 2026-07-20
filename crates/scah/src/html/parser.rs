@@ -1,7 +1,9 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
-use super::text_state::{ParserTextState, PendingSeparator, TextElementFlags};
+use super::text_state::{
+    ParserTextState, PendingSeparator, TextEdgePolicy, TextElementBehavior, TextElementFlags,
+};
 use crate::ParseError;
 use crate::QuerySpec;
 use crate::Reader;
@@ -11,7 +13,7 @@ use crate::debug::ImpliedCloseReason;
 use crate::debug::TraceEvent;
 use crate::engine::MAX_ELEMENT_DEPTH;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
-use crate::store::{Store, trim_normalized_range};
+use crate::store::{Store, trim_collapsed_range};
 
 #[derive(Default)]
 struct ParserTempState<'html> {
@@ -52,16 +54,31 @@ fn element_has_hidden(element: &XHtmlElement<'_>) -> bool {
         .any(|attr| attr.key.eq_ignore_ascii_case("hidden"))
 }
 
+/// Compute normalized text behavior for an opening element.
+///
+/// Only called when normalized text capture is enabled.
 #[inline]
-fn text_flags_for(tag: TagFlags, has_hidden: bool) -> TextElementFlags {
-    let mut flags = TextElementFlags::empty();
-    if tag.is_text_suppressed() || has_hidden {
-        flags.insert(TextElementFlags::SUPPRESSED);
+fn text_behavior_for(tag: TagFlags, has_hidden: bool) -> TextElementBehavior {
+    let suppressed = tag.is_text_suppressed() || has_hidden;
+    let preformatted = tag.is_text_preformatted();
+    let opening_separator = if suppressed {
+        PendingSeparator::None
+    } else if tag.is_text_block() || tag.is_text_row() {
+        PendingSeparator::LineBreak
+    } else {
+        PendingSeparator::None
+    };
+    let closing_separator = if suppressed {
+        PendingSeparator::None
+    } else {
+        tag.post_text_separator().unwrap_or(PendingSeparator::None)
+    };
+    TextElementBehavior {
+        suppressed,
+        preformatted,
+        opening_separator,
+        closing_separator,
     }
-    if tag.is_text_preformatted() {
-        flags.insert(TextElementFlags::PREFORMATTED);
-    }
-    flags
 }
 
 impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
@@ -123,12 +140,13 @@ where
             return;
         }
         let slice = reader.slice(start..end);
-        if self.text_state.requirements.raw_text {
+        if self.text_state.captures_raw() {
             self.store.text.raw_text.push_str(slice);
         }
-        if self.text_state.requirements.text {
+        if self.text_state.captures_text() {
+            let depth = self.position.element_depth;
             self.text_state
-                .write_normalized_fragment(&mut self.store.text.text, slice);
+                .write_normalized_fragment(&mut self.store.text.text, slice, depth);
         }
     }
 
@@ -190,9 +208,17 @@ where
                     self.element.from(reader, &mut self.store.attributes);
                 } else if tag.is_none() {
                     // Comment / doctype / declaration: keep preceding text,
-                    // skip the markup itself.
+                    // skip the markup itself, then resume at the next `<`.
                     self.flush_source_text(reader, self.position.reader_position);
+                    if self.text_state.captures_text() {
+                        self.text_state.cancel_initial_newline();
+                    }
                     self.text_state.mark_source_start(reader.get_position());
+                    reader.next_until(b'<');
+                    if reader.peek().is_none() {
+                        self.drain_open_elements(reader);
+                        return false;
+                    }
                 }
             }
 
@@ -207,7 +233,19 @@ where
         match tag {
             XHtmlTag::Open => {
                 let tag = TagFlags::classify(self.element.name);
-                let text_flags = text_flags_for(tag, element_has_hidden(&self.element));
+                // Only scan attributes / compute text behavior when normalized
+                // text is requested. Raw-only and no-text modes skip this work.
+                let text_behavior = if self.text_state.captures_text() {
+                    Some(text_behavior_for(tag, element_has_hidden(&self.element)))
+                } else {
+                    None
+                };
+                let text_flags = text_behavior
+                    .map(TextElementBehavior::flags)
+                    .unwrap_or_else(TextElementFlags::empty);
+                let text_edge_policy = text_behavior
+                    .map(TextElementBehavior::edge_policy)
+                    .unwrap_or(TextEdgePolicy::TrimCollapsedSeparators);
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
@@ -222,13 +260,19 @@ where
                 let is_self_closing = tag.is_void();
                 self.position.self_closing = is_self_closing;
 
-                if !is_self_closing {
-                    if tag.is_text_block() || tag.is_text_row() {
-                        self.text_state.queue_separator(PendingSeparator::LineBreak);
-                    }
-                    if self.text_state.requirements.text {
-                        self.text_state.flush_pending(&mut self.store.text.text);
-                    }
+                // Child start tags cancel preformatted initial-newline eligibility
+                // for the current open pre/textarea (intervening token rule).
+                if self.text_state.captures_text() {
+                    self.text_state.cancel_initial_newline();
+                }
+
+                // Opening boundary: suppressed elements contribute nothing.
+                if let Some(behavior) = text_behavior {
+                    self.text_state.before_open_element(
+                        &mut self.store.text.text,
+                        behavior,
+                        is_self_closing,
+                    );
                 }
 
                 let raw_start = self.store.text.raw_text.len();
@@ -276,7 +320,12 @@ where
                             save_hit.save_text.then_some(text_start..text_start),
                         );
                     }
-                    if tag.is_text_break() {
+                    // Visible void breaks (`br`, `hr`) queue a parent line break
+                    // after the void itself is finalized as empty.
+                    if let Some(behavior) = text_behavior
+                        && !behavior.suppressed
+                        && tag.is_text_break()
+                    {
                         self.text_state.queue_separator(PendingSeparator::LineBreak);
                     }
                     early_exit = self.selectors.back(
@@ -294,15 +343,22 @@ where
                                 .then_some(self.position.reader_position),
                             save_hit.save_raw_text.then_some(raw_start),
                             save_hit.save_text.then_some(text_start),
+                            text_edge_policy,
                         );
                     }
-                    self.text_state.enter_element(text_flags);
+                    if let Some(behavior) = text_behavior {
+                        self.text_state
+                            .after_open_element(behavior, self.position.element_depth);
+                    }
                 }
 
                 self.element.clear();
                 self.text_state.mark_source_start(reader.get_position());
             }
             XHtmlTag::Close(closing_tag) => {
+                if self.text_state.captures_text() {
+                    self.text_state.cancel_initial_newline();
+                }
                 early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
                 self.text_state.mark_source_start(reader.get_position());
             }
@@ -362,13 +418,15 @@ where
         reader: &Reader<'html>,
     ) -> bool {
         self.finalize_open_element(&open_element, reader);
-        self.text_state.exit_element(open_element.text_flags);
-        if !open_element
-            .text_flags
-            .contains(TextElementFlags::SUPPRESSED)
-            && let Some(separator) = open_element.tag().post_text_separator()
-        {
-            self.text_state.queue_separator(separator);
+        if self.text_state.captures_text() {
+            self.text_state.after_close_element(open_element.text_flags);
+            if !open_element
+                .text_flags
+                .contains(TextElementFlags::SUPPRESSED)
+                && let Some(separator) = open_element.tag().post_text_separator()
+            {
+                self.text_state.queue_separator(separator);
+            }
         }
         self.position.element_depth = close_depth;
         self.selectors
@@ -476,7 +534,13 @@ where
                 .raw_text_start
                 .map(|start| start..self.store.text.raw_text.len());
             let text = saved.text_start.map(|start| {
-                trim_normalized_range(&self.store.text.text, start..self.store.text.text.len())
+                let range = start..self.store.text.text.len();
+                match saved.text_edge_policy {
+                    TextEdgePolicy::TrimCollapsedSeparators => {
+                        trim_collapsed_range(&self.store.text.text, range)
+                    }
+                    TextEdgePolicy::Preserve => range,
+                }
             });
 
             self.store

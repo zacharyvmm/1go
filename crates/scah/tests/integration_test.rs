@@ -173,7 +173,7 @@ fn test_html_page() {
 
     assert_eq!(
         first.text(&store).unwrap(),
-        "Link 1 Link 2 Link 3\n Not selected (nested in div)\nNo link here"
+        "Link 1 Link 2 Link 3\nNot selected (nested in div)\nNo link here"
     );
 }
 

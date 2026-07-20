@@ -217,8 +217,27 @@ test('requested empty text is empty string not null', () => {
   expect(div?.text).toBe('')
 })
 
-test('Save static helpers map correctly', () => {
-  const { Save } = require('../index')
-  expect(Save.onlyRawText()).toEqual({ innerHtml: false, rawText: true, text: false })
-  expect(Save.onlyText()).toEqual({ innerHtml: false, rawText: false, text: true })
+test('save options map rawText and text independently', () => {
+  const html = '<p>A&amp;B</p>'
+
+  const rawOnly = parse(html, [Query.all('p', { rawText: true }).build()])
+  expect(rawOnly.get('p')?.at(0)?.rawText).toBe('A&amp;B')
+  expect(rawOnly.get('p')?.at(0)?.text).toBeNull()
+
+  const textOnly = parse(html, [Query.all('p', { text: true }).build()])
+  expect(textOnly.get('p')?.at(0)?.rawText).toBeNull()
+  expect(textOnly.get('p')?.at(0)?.text).toBe('A&B')
+
+  const both = parse(html, [Query.all('p', { rawText: true, text: true }).build()])
+  expect(both.get('p')?.at(0)?.rawText).toBe('A&amp;B')
+  expect(both.get('p')?.at(0)?.text).toBe('A&B')
+
+  const omitted = parse(html, [Query.all('p', {}).build()])
+  expect(omitted.get('p')?.at(0)?.rawText).toBeNull()
+  expect(omitted.get('p')?.at(0)?.text).toBeNull()
+})
+
+test('Save is an options interface, not a runtime helper export', () => {
+  const scah = require('../index')
+  expect(scah.Save).toBeUndefined()
 })

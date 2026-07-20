@@ -3,7 +3,7 @@ use crate::QuerySection;
 use std::ops::Range;
 
 mod text;
-pub(crate) use text::{TextStore, TextTape, trim_normalized_range};
+pub(crate) use text::{TextStore, TextTape, trim_collapsed_range};
 mod arena;
 mod attributes;
 mod element;

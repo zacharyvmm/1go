@@ -21,7 +21,6 @@ scah-reader = { version = "0.0.21", path = "../scah-reader" }
 scah-query-ir = { version = "0.0.21", path = "../scah-query-ir" }
 scah-macros = { version = "0.0.21", path = "../scah-macros" }
 tracing = { version = "0.1", optional = true }
-html-escape = "0.2.14"
 
 [features]
 default = []

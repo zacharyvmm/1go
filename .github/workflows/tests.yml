@@ -39,6 +39,37 @@ jobs:
       - name: Run cursor stats report
         run: cargo run -p scah-cursor-benches --release --bin cursor_stats_report
 
+  node:
+    name: Node Binding Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-node-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install dependencies
+        working-directory: crates/bindings/scah-node
+        run: bun install --frozen-lockfile
+
+      - name: Build native binding
+        working-directory: crates/bindings/scah-node
+        run: bun run build:debug
+
+      - name: Run Node tests
+        working-directory: crates/bindings/scah-node
+        run: bun test
+
   python:
     name: Python Binding Tests
     runs-on: ubuntu-latest

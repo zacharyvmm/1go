@@ -86,7 +86,7 @@ impl TagFlags {
             "area" | "base" | "col" | "embed" | "img" | "input" | "link" | "meta" | "param"
             | "source" | "track" | "wbr" => Self::VOID,
             "br" => Self::VOID | Self::TEXT_BREAK,
-            "hr" => Self::VOID | Self::CLOSES_P | Self::TEXT_BLOCK,
+            "hr" => Self::VOID | Self::CLOSES_P | Self::TEXT_BREAK,
             "address" | "article" | "aside" | "blockquote" | "div" | "dl" | "fieldset"
             | "footer" | "form" | "header" | "main" | "nav" | "section" => {
                 Self::CLOSES_P | Self::TEXT_BLOCK

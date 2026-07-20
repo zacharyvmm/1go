@@ -60,6 +60,16 @@ impl TextTape {
     pub fn push_str(&mut self, text: &str) {
         self.content.extend_from_slice(text.as_bytes());
     }
+
+    #[inline]
+    pub fn last_byte(&self) -> Option<u8> {
+        self.content.last().copied()
+    }
+
+    #[inline]
+    pub fn pop_byte(&mut self) -> Option<u8> {
+        self.content.pop()
+    }
 }
 
 /// Result-only storage for both text extraction modes.
@@ -93,9 +103,12 @@ impl TextStore {
     }
 }
 
-/// Trim leading/trailing ASCII whitespace separators from a normalized range
+/// Trim leading/trailing collapsible separators from a normalized range
 /// without mutating the shared tape.
-pub(crate) fn trim_normalized_range(tape: &TextTape, range: Range<usize>) -> Range<usize> {
+///
+/// Only space, tab, and line break are removed. Must not be applied to
+/// selected preformatted (`pre` / `textarea`) ranges.
+pub(crate) fn trim_collapsed_range(tape: &TextTape, range: Range<usize>) -> Range<usize> {
     let bytes = tape.as_bytes();
     if range.start >= range.end || range.end > bytes.len() {
         return range.start..range.start;
@@ -112,6 +125,12 @@ pub(crate) fn trim_normalized_range(tape: &TextTape, range: Range<usize>) -> Ran
     }
 
     start..end
+}
+
+/// Compatibility alias used by older call sites / tests.
+#[allow(dead_code)]
+pub(crate) fn trim_normalized_range(tape: &TextTape, range: Range<usize>) -> Range<usize> {
+    trim_collapsed_range(tape, range)
 }
 
 #[inline]
@@ -134,16 +153,16 @@ mod tests {
     }
 
     #[test]
-    fn trim_normalized_range_strips_edges() {
+    fn trim_collapsed_range_strips_edges() {
         let mut tape = TextTape::new();
         tape.push_str("\nA  B\t\n");
-        assert_eq!(trim_normalized_range(&tape, 0..tape.len()), 1..5);
+        assert_eq!(trim_collapsed_range(&tape, 0..tape.len()), 1..5);
         assert_eq!(tape.slice(1..5), "A  B");
     }
 
     #[test]
     fn trim_empty_stays_empty() {
         let tape = TextTape::new();
-        assert_eq!(trim_normalized_range(&tape, 0..0), 0..0);
+        assert_eq!(trim_collapsed_range(&tape, 0..0), 0..0);
     }
 }

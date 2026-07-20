@@ -1,7 +1,7 @@
 use crate::ParseError;
 use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
-use crate::html::text_state::TextElementFlags;
+use crate::html::text_state::{TextEdgePolicy, TextElementFlags};
 use crate::store::ElementId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -10,6 +10,7 @@ pub(crate) struct SavedElement {
     pub inner_html_start: Option<usize>,
     pub raw_text_start: Option<usize>,
     pub text_start: Option<usize>,
+    pub text_edge_policy: TextEdgePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +81,7 @@ impl<'html> OpenElementStack<'html> {
         inner_html_start: Option<usize>,
         raw_text_start: Option<usize>,
         text_start: Option<usize>,
+        text_edge_policy: TextEdgePolicy,
     ) {
         if let Some(open_element) = self.entries.last_mut() {
             open_element.saved.push(SavedElement {
@@ -87,6 +89,7 @@ impl<'html> OpenElementStack<'html> {
                 inner_html_start,
                 raw_text_start,
                 text_start,
+                text_edge_policy,
             });
         }
     }

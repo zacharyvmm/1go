@@ -13,59 +13,12 @@ pub struct JsSave {
     pub text: Option<bool>,
 }
 
-#[napi]
 impl JsSave {
-    #[napi]
-    pub fn only_inner_html() -> Self {
-        Self {
-            inner_html: Some(true),
-            raw_text: Some(false),
-            text: Some(false),
-        }
-    }
-
-    #[napi]
-    pub fn only_raw_text() -> Self {
-        Self {
-            inner_html: Some(false),
-            raw_text: Some(true),
-            text: Some(false),
-        }
-    }
-
-    #[napi]
-    pub fn only_text() -> Self {
-        Self {
-            inner_html: Some(false),
-            raw_text: Some(false),
-            text: Some(true),
-        }
-    }
-
-    #[napi]
-    pub fn all() -> Self {
-        Self {
-            inner_html: Some(true),
-            raw_text: Some(true),
-            text: Some(true),
-        }
-    }
-
-    #[napi]
-    pub fn none() -> Self {
+    fn none() -> Self {
         Self {
             inner_html: Some(false),
             raw_text: Some(false),
             text: Some(false),
-        }
-    }
-
-    #[napi]
-    pub fn new(inner_html: Option<bool>, raw_text: Option<bool>, text: Option<bool>) -> Self {
-        Self {
-            inner_html,
-            raw_text,
-            text,
         }
     }
 

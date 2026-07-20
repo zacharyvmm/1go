@@ -225,10 +225,27 @@ Scah exposes two text modes (plus inner HTML):
 | Field | Meaning |
 | ----- | ------- |
 | `inner_html` / `innerHtml` | Raw markup between the element's tags |
-| `raw_text` / `rawText` | Source-preserving descendant text. Whitespace and entity spellings are retained; markup itself is omitted. |
-| `text` | Normalized, human-readable descendant text. Whitespace and structural boundaries are normalized, non-content elements are omitted, and HTML entities are decoded. This is **not** browser `innerText`. |
+| `raw_text` / `rawText` | Source-preserving descendant text. Whitespace and entity spellings are retained; markup itself is omitted. Includes content inside `script` / `style` / `template` / `hidden` subtrees. |
+| `text` | Normalized, human-readable descendant text. Whitespace and structural boundaries are normalized, non-content elements are omitted, and HTML character references are decoded. This is **not** browser `innerText` and does not process CSS. |
+
+Normalized `text` specifically:
+
+- Omits `script`, `style`, `template`, and elements with a `hidden` attribute (no text and no structural separators from those subtrees).
+- Inserts line breaks for blocks / `<br>` / `<hr>`, and tabs between table cells.
+- Preserves preformatted whitespace in `pre` and `textarea` after HTML's initial-newline rule (only a newline immediately after the start tag is removed).
+- Decodes HTML character references (named, numeric, legacy semicolon-less forms in data state, C1 remapping, and U+FFFD replacement for invalid scalars).
 
 `None` / `null` means the query did not request that representation. An empty string means it was requested but the element produced no text.
+
+### Node `Save` options
+
+Node uses plain option objects (no runtime `Save` helpers):
+
+```ts
+{ innerHtml?: boolean, rawText?: boolean, text?: boolean }
+```
+
+Rust and Python retain `Save::only_raw_text()` / `Save.only_raw_text()` style constructors.
 
 ### Migration from `text_content`
 

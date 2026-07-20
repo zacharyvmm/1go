@@ -36,6 +36,50 @@ fn entity_html(count: usize) -> String {
     html
 }
 
+fn no_entity_html(count: usize) -> String {
+    let mut html = String::from("<div>");
+    for i in 0..count {
+        html.push_str(&format!(
+            "<p>Plain text paragraph number {i} without entities.</p>"
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+fn hidden_heavy_html(count: usize) -> String {
+    let mut html = String::from("<section>");
+    for i in 0..count {
+        html.push_str(&format!(
+            "<div>visible {i}<div hidden>secret {i}</div><script>x={i}</script></div>"
+        ));
+    }
+    html.push_str("</section>");
+    html
+}
+
+fn preformatted_heavy_html(count: usize) -> String {
+    let mut html = String::from("<section>");
+    for i in 0..count {
+        html.push_str(&format!("<pre>\n  line {i}\n    indented\n</pre>"));
+    }
+    html.push_str("</section>");
+    html
+}
+
+fn table_heavy_html(rows: usize) -> String {
+    let mut html = String::from("<table>");
+    for r in 0..rows {
+        html.push_str("<tr>");
+        for c in 0..4 {
+            html.push_str(&format!("<td>R{r}C{c}</td>"));
+        }
+        html.push_str("</tr>");
+    }
+    html.push_str("</table>");
+    html
+}
+
 fn nested_html(depth: usize) -> String {
     let mut html = String::new();
     for i in 0..depth {
@@ -126,6 +170,86 @@ fn bench_text_modes(c: &mut Criterion) {
                 b.iter(|| {
                     let store = parse(black_box(html), black_box(text_q)).unwrap();
                     consume_text(&store, "p");
+                    black_box(store);
+                })
+            },
+        );
+
+        let no_entities = no_entity_html(size);
+        group.throughput(Throughput::Bytes(no_entities.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("text_only_no_entities", size),
+            &no_entities,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(text_q)).unwrap();
+                    consume_text(&store, "p");
+                    black_box(store);
+                })
+            },
+        );
+
+        let many_entities = entity_html(size);
+        group.bench_with_input(
+            BenchmarkId::new("text_only_many_entities", size),
+            &many_entities,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(text_q)).unwrap();
+                    consume_text(&store, "p");
+                    black_box(store);
+                })
+            },
+        );
+
+        let hidden = hidden_heavy_html(size);
+        group.throughput(Throughput::Bytes(hidden.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("hidden_heavy", size),
+            &hidden,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(text_q)).unwrap();
+                    consume_text(&store, "div");
+                    black_box(store);
+                })
+            },
+        );
+
+        let pre = preformatted_heavy_html(size);
+        let pre_q = &[Query::all("pre", Save::only_text()).unwrap().build()];
+        group.throughput(Throughput::Bytes(pre.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("preformatted_heavy", size),
+            &pre,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(pre_q)).unwrap();
+                    consume_text(&store, "pre");
+                    black_box(store);
+                })
+            },
+        );
+
+        let table = table_heavy_html(size);
+        let table_q = &[Query::all("table", Save::only_text()).unwrap().build()];
+        group.throughput(Throughput::Bytes(table.len() as u64));
+        group.bench_with_input(BenchmarkId::new("table_heavy", size), &table, |b, html| {
+            b.iter(|| {
+                let store = parse(black_box(html), black_box(table_q)).unwrap();
+                consume_text(&store, "table");
+                black_box(store);
+            })
+        });
+
+        let inner_q = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
+        group.throughput(Throughput::Bytes(prose.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("inner_html_only", size),
+            &prose,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(inner_q)).unwrap();
                     black_box(store);
                 })
             },
