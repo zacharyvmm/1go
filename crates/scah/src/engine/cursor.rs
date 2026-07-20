@@ -365,14 +365,27 @@ impl ScopedCursor {
         }
     }
 
-    /// Claim a terminal `First` selection until the selected element closes.
+    /// Claim a terminal `First` selection with dual lifetimes.
+    ///
+    /// * `selected_depth` becomes the unwind boundary (selected element close).
+    /// * `ownership_scope_depth` rebinds `scope_depth` to the output-parent
+    ///   lifetime so the winner remains the admission token until that scope ends.
     ///
     /// The cursor must be a moving, active cursor. After this transition it is
-    /// complete, carries unwind depth `depth`, and is marked as the First winner.
-    pub fn select_first_until_close(&mut self, depth: super::DepthSize) {
+    /// complete, carries unwind depth `selected_depth`, and is marked as the
+    /// First winner.
+    pub fn select_first_until_close(
+        &mut self,
+        selected_depth: super::DepthSize,
+        ownership_scope_depth: super::DepthSize,
+    ) {
         debug_assert!(
-            depth <= super::MAX_ELEMENT_DEPTH,
-            "element depth must not exceed MAX_ELEMENT_DEPTH"
+            selected_depth <= super::MAX_ELEMENT_DEPTH,
+            "selected depth must not exceed MAX_ELEMENT_DEPTH"
+        );
+        debug_assert!(
+            ownership_scope_depth == SENTINEL_SCOPE || ownership_scope_depth <= selected_depth,
+            "First ownership scope must contain selected element"
         );
         debug_assert!(
             self.is_moving(),
@@ -382,16 +395,20 @@ impl ScopedCursor {
             self.is_active(),
             "select_first_until_close requires active cursor"
         );
+
+        self.scope_depth = ownership_scope_depth;
+
         if let CursorMode::Moving {
             flags,
             unwind_depth,
             ..
         } = &mut self.mode
         {
-            *unwind_depth = depth;
+            *unwind_depth = selected_depth;
             *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND | FLAG_FIRST_WINNER;
-            self.debug_assert_moving_invariants();
         }
+
+        self.debug_assert_moving_invariants();
     }
 
     /// Permanently cancel this cursor with no pending close unwind.
@@ -562,33 +579,81 @@ mod tests {
     fn select_first_until_close_marks_moving_winner() {
         let mut cursor = moving_cursor();
 
-        cursor.select_first_until_close(4);
+        cursor.select_first_until_close(4, 2);
 
         assert!(cursor.is_moving());
         assert!(cursor.is_first_winner());
         assert!(cursor.is_complete());
         assert!(!cursor.is_active());
         assert!(!cursor.is_blocked());
+        assert_eq!(cursor.scope_depth, 2);
         assert_eq!(cursor.unwind_depth(), Some(4));
+    }
+
+    #[test]
+    fn select_first_rebinds_cursor_to_ownership_scope() {
+        let mut cursor = ScopedCursor::new_moving_with_last(
+            4,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            2,
+        );
+
+        cursor.select_first_until_close(5, 1);
+
+        assert_eq!(cursor.scope_depth, 1);
+        assert_eq!(cursor.unwind_depth(), Some(5));
+        assert!(cursor.is_complete());
+        assert!(cursor.is_first_winner());
+
+        cursor.complete_after_close();
+
+        assert_eq!(cursor.scope_depth, 1);
+        assert_eq!(cursor.unwind_depth(), None);
+        assert!(cursor.is_first_winner());
+    }
+
+    #[test]
+    fn select_first_preserves_sentinel_ownership_scope() {
+        let mut cursor = moving_cursor();
+
+        cursor.select_first_until_close(5, SENTINEL_SCOPE);
+
+        assert_eq!(cursor.scope_depth, SENTINEL_SCOPE);
+        assert_eq!(cursor.unwind_depth(), Some(5));
+        assert!(cursor.is_first_winner());
+        assert!(cursor.is_complete());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "First ownership scope must contain selected element")]
+    fn select_first_rejects_ownership_narrower_than_selected() {
+        let mut cursor = moving_cursor();
+        cursor.select_first_until_close(3, 4);
     }
 
     #[test]
     fn first_winner_preserves_flag_after_close() {
         let mut cursor = moving_cursor();
-        cursor.select_first_until_close(4);
+        cursor.select_first_until_close(4, 2);
 
         cursor.complete_after_close();
 
         assert!(cursor.is_moving());
         assert!(cursor.is_first_winner());
         assert!(cursor.is_complete());
+        assert_eq!(cursor.scope_depth, 2);
         assert_eq!(cursor.unwind_depth(), None);
     }
 
     #[test]
     fn cancel_complete_clears_first_winner() {
         let mut cursor = moving_cursor();
-        cursor.select_first_until_close(4);
+        cursor.select_first_until_close(4, 2);
         assert!(cursor.is_first_winner());
 
         cursor.cancel_complete();

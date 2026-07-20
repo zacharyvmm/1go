@@ -45,6 +45,34 @@ where
         }
     }
 
+    /// Broadest `scope_depth` among peers competing for `(section, output_parent)`.
+    ///
+    /// Continuations may narrow scope as selector prefixes advance; the section-root
+    /// obligation (or root sentinel) remains the broadest peer and is the
+    /// output-parent ownership lifetime for a claimed `First` winner.
+    fn first_ownership_scope_depth(
+        &self,
+        section: QuerySectionId,
+        output_parent: ElementId,
+    ) -> super::DepthSize {
+        let mut ownership_scope = None;
+
+        for cursor in &self.cursors {
+            if cursor.position.selection != section || cursor.parent != output_parent {
+                continue;
+            }
+
+            ownership_scope = Some(match ownership_scope {
+                None => cursor.scope_depth,
+                Some(SENTINEL_SCOPE) => SENTINEL_SCOPE,
+                Some(_) if cursor.scope_depth == SENTINEL_SCOPE => SENTINEL_SCOPE,
+                Some(current) => current.min(cursor.scope_depth),
+            });
+        }
+
+        ownership_scope.expect("claim_first_scope requires at least the selected cursor")
+    }
+
     fn claim_first_scope(
         &mut self,
         section: QuerySectionId,
@@ -86,16 +114,24 @@ where
             "First scope claimed twice for section+output_parent"
         );
 
+        let ownership_scope_depth = self.first_ownership_scope_depth(section, output_parent);
+        debug_assert!(
+            ownership_scope_depth == SENTINEL_SCOPE || ownership_scope_depth <= selected_depth,
+            "First ownership scope must contain selected element"
+        );
+
         for (index, cursor) in self.cursors.iter_mut().enumerate() {
-            if cursor.position.selection != section || cursor.parent != output_parent {
+            if index == selected_cursor_index {
                 continue;
             }
-            if index == selected_cursor_index {
-                cursor.select_first_until_close(selected_depth);
-            } else {
+
+            if cursor.position.selection == section && cursor.parent == output_parent {
                 cursor.cancel_complete();
             }
         }
+
+        self.cursors[selected_cursor_index]
+            .select_first_until_close(selected_depth, ownership_scope_depth);
     }
 
     pub fn query(&self) -> &Q {
@@ -493,11 +529,11 @@ where
                     // are not dominated by an still-active source cursor.
                     if !terminal_all {
                         if terminal_first {
-                            if saved_element.is_some() {
-                                self.claim_first_scope(position.selection, output_parent, i, depth);
-                            } else {
-                                self.cursors[i].select_first_until_close(depth);
-                            }
+                            debug_assert!(
+                                saved_element.is_some(),
+                                "terminal First must have a saved element"
+                            );
+                            self.claim_first_scope(position.selection, output_parent, i, depth);
                         } else if is_descendant || is_save_point {
                             self.cursors[i].block_until_close(depth);
                         }
@@ -2988,226 +3024,45 @@ mod tests {
         assert!(selection.early_exit());
     }
 
-    fn assert_no_anchored_terminal_first(selection: &QueryExecutor<'_, Query>) {
-        for cursor in &selection.cursors {
-            if !cursor.is_anchored() || cursor.end() {
-                continue;
+    #[test]
+    fn terminal_first_positions_never_require_descendant_anchor() {
+        let nested = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::all())?]))
+            .unwrap()
+            .build();
+        let queries = [
+            Query::first("p", Save::all()).unwrap().build(),
+            Query::first("div p", Save::all()).unwrap().build(),
+            Query::first("div > p", Save::all()).unwrap().build(),
+            Query::first("main div > p", Save::all()).unwrap().build(),
+            Query::first("br", Save::all()).unwrap().build(),
+            Query::first("div br", Save::all()).unwrap().build(),
+            nested,
+        ];
+
+        for query in &queries {
+            for (section_index, section) in query.queries().iter().enumerate() {
+                if !matches!(section.kind, SelectionKind::First) {
+                    continue;
+                }
+
+                let position = Position {
+                    selection: QuerySectionId(section_index),
+                    state: TransitionId(section.range.end.index() - 1),
+                };
+
+                assert!(query.is_save_point(&position));
+                assert!(
+                    !query.needs_descendant_anchor(position),
+                    "terminal First position must not create an anchor"
+                );
             }
-            let position = cursor.position;
-            if !selection.query.is_save_point(&position) {
-                continue;
-            }
-            assert!(
-                !matches!(
-                    selection
-                        .query
-                        .get_section_selection_kind(position.selection),
-                    SelectionKind::First
-                ),
-                "production must never leave an anchored cursor at a terminal First save point: {:?}",
-                cursor
-            );
         }
     }
 
     #[test]
-    fn production_execution_never_leaves_anchored_cursor_at_terminal_first() {
-        struct Event {
-            name: &'static str,
-            depth: u16,
-            self_closing: bool,
-        }
-        struct Case {
-            selector: &'static str,
-            events: &'static [Event],
-        }
-
-        let cases = [
-            Case {
-                selector: "p",
-                events: &[
-                    Event {
-                        name: "p",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "p",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                ],
-            },
-            Case {
-                selector: "div p",
-                events: &[
-                    Event {
-                        name: "div",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "p",
-                        depth: 1,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "div",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "p",
-                        depth: 1,
-                        self_closing: false,
-                    },
-                ],
-            },
-            Case {
-                selector: "div > p",
-                events: &[
-                    Event {
-                        name: "div",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "p",
-                        depth: 1,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "div",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "span",
-                        depth: 1,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "div",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "p",
-                        depth: 1,
-                        self_closing: false,
-                    },
-                ],
-            },
-            Case {
-                selector: "main div > p",
-                events: &[
-                    Event {
-                        name: "main",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "div",
-                        depth: 1,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "p",
-                        depth: 2,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "div",
-                        depth: 1,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "p",
-                        depth: 2,
-                        self_closing: false,
-                    },
-                ],
-            },
-            Case {
-                selector: "br",
-                events: &[
-                    Event {
-                        name: "br",
-                        depth: 0,
-                        self_closing: true,
-                    },
-                    Event {
-                        name: "br",
-                        depth: 0,
-                        self_closing: true,
-                    },
-                ],
-            },
-            Case {
-                selector: "div br",
-                events: &[
-                    Event {
-                        name: "div",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "br",
-                        depth: 1,
-                        self_closing: true,
-                    },
-                    Event {
-                        name: "div",
-                        depth: 0,
-                        self_closing: false,
-                    },
-                    Event {
-                        name: "br",
-                        depth: 1,
-                        self_closing: true,
-                    },
-                ],
-            },
-        ];
-
-        for case in cases {
-            let query = Query::first(case.selector, Save::all()).unwrap().build();
-            let query = &query;
-            let mut store = Store::default();
-            let mut selection = QueryExecutor::new(query);
-            let mut save_hits = Vec::new();
-
-            for event in case.events {
-                selection.next(
-                    0,
-                    &elem(event.name),
-                    &DocumentPosition {
-                        reader_position: 0,
-                        text_content_position: 0,
-                        element_depth: event.depth,
-                        self_closing: event.self_closing,
-                    },
-                    &mut store,
-                    &mut save_hits,
-                );
-                assert_no_anchored_terminal_first(&selection);
-                if event.self_closing {
-                    selection.back(
-                        0,
-                        event.name,
-                        &DocumentPosition {
-                            reader_position: 0,
-                            text_content_position: 0,
-                            element_depth: event.depth,
-                            self_closing: true,
-                        },
-                        &mut store,
-                    );
-                    assert_no_anchored_terminal_first(&selection);
-                }
-            }
-        }
-
+    fn first_winner_ownership_survives_prefix_close() {
         let query = Query::all("article", Save::all())
             .unwrap()
             .then(|article| Ok([article.first("div > p", Save::all())?]))
@@ -3215,21 +3070,328 @@ mod tests {
             .build();
         let query = &query;
         let mut store = Store::default();
-        let mut selection = QueryExecutor::new(query);
+        let mut executor = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
-        for (name, depth) in [
-            ("article", 0),
-            ("div", 1),
-            ("p", 2),
-            ("div", 1),
-            ("p", 2),
-            ("article", 0),
-            ("div", 1),
-            ("p", 2),
-        ] {
-            selection.next(0, &elem(name), &doc_pos(depth), &mut store, &mut save_hits);
-            assert_no_anchored_terminal_first(&selection);
+
+        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        let article_id = save_hits[0].element_id;
+
+        executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        executor.next(0, &elem("p"), &doc_pos(2), &mut store, &mut save_hits);
+
+        let first_section = QuerySectionId(1);
+        let winner = executor
+            .cursors
+            .iter()
+            .find(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_id
+            })
+            .expect("p must claim article-scoped First");
+        assert_eq!(winner.scope_depth, 0);
+        assert_eq!(winner.unwind_depth(), Some(2));
+
+        executor.back(0, "p", &doc_pos(2), &mut store);
+        let winner = executor
+            .cursors
+            .iter()
+            .find(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_id
+            })
+            .expect("winner must survive selected close");
+        assert_eq!(winner.scope_depth, 0);
+        assert_eq!(winner.unwind_depth(), None);
+
+        executor.back(0, "div", &doc_pos(1), &mut store);
+        assert!(
+            executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_id
+            }),
+            "winner must survive prefix close"
+        );
+
+        let terminal = Position {
+            selection: first_section,
+            state: TransitionId(query.get_selection(first_section).range.end.index() - 1),
+        };
+        let late_candidate = ScopedCursor::new_moving(1, article_id, terminal);
+        assert_eq!(
+            executor.try_push_cursor(late_candidate, 0, &mut store, None),
+            SpawnOutcome::Dominated,
+        );
+
+        executor.back(0, "article", &doc_pos(0), &mut store);
+        assert!(
+            !executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_id
+            }),
+            "ownership token should end with output-parent scope"
+        );
+    }
+
+    #[test]
+    fn root_compound_first_winner_owns_sentinel_scope() {
+        let query = Query::first("div > p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut executor = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        executor.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        executor.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+
+        let winner = executor
+            .cursors
+            .iter()
+            .find(|cursor| cursor.is_first_winner())
+            .expect("p must claim root First");
+        assert_eq!(winner.scope_depth, SENTINEL_SCOPE);
+        assert_eq!(winner.unwind_depth(), Some(1));
+
+        executor.back(0, "p", &doc_pos(1), &mut store);
+        executor.back(0, "div", &doc_pos(0), &mut store);
+
+        let winner = executor
+            .cursors
+            .iter()
+            .find(|cursor| cursor.is_first_winner())
+            .expect("root compound winner must retain sentinel ownership");
+        assert_eq!(winner.scope_depth, SENTINEL_SCOPE);
+        assert_eq!(winner.unwind_depth(), None);
+        assert!(executor.first_scope_is_claimed(&ScopedCursor::new_moving(
+            2,
+            ElementId::default(),
+            winner.position,
+        )));
+    }
+
+    #[test]
+    fn direct_child_first_winner_keeps_output_parent_depth() {
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("> h1", Save::all())?]))
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut executor = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        let article_id = save_hits[0].element_id;
+        executor.next(0, &elem("h1"), &doc_pos(1), &mut store, &mut save_hits);
+
+        let winner = executor
+            .cursors
+            .iter()
+            .find(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == QuerySectionId(1)
+                    && cursor.parent == article_id
+            })
+            .expect("h1 must claim article-scoped First");
+        assert_eq!(winner.scope_depth, 0);
+        assert_eq!(winner.unwind_depth(), Some(1));
+        assert_ne!(winner.scope_depth, 1, "ownership must not be h1 depth");
+    }
+
+    #[test]
+    fn self_closing_first_winner_retains_output_parent_scope() {
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div br", Save::all())?]))
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut executor = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        let article_id = save_hits[0].element_id;
+        executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("br"),
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 2,
+                self_closing: true,
+            },
+            &mut store,
+            &mut save_hits,
+        );
+        executor.back(
+            0,
+            "br",
+            &DocumentPosition {
+                reader_position: 0,
+                text_content_position: 0,
+                element_depth: 2,
+                self_closing: true,
+            },
+            &mut store,
+        );
+
+        let first_section = QuerySectionId(1);
+        assert!(
+            executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_id
+                    && cursor.scope_depth == 0
+                    && cursor.unwind_depth().is_none()
+            }),
+            "void winner must keep article ownership after synthetic close"
+        );
+
+        executor.back(0, "div", &doc_pos(1), &mut store);
+        assert!(
+            executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_id
+            }),
+            "void winner must survive prefix close"
+        );
+
+        executor.back(0, "article", &doc_pos(0), &mut store);
+        assert!(
+            !executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_id
+            }),
+            "void winner ownership ends at output-parent close"
+        );
+    }
+
+    #[test]
+    fn first_winner_ownership_isolates_independent_output_parents() {
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::all())?]))
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut executor = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+        let first_section = QuerySectionId(1);
+
+        // Nested articles so both ownership tokens can be resident at once.
+        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        let article_outer = save_hits[0].element_id;
+        executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        executor.next(0, &elem("p"), &doc_pos(2), &mut store, &mut save_hits);
+        executor.back(0, "p", &doc_pos(2), &mut store);
+        executor.back(0, "div", &doc_pos(1), &mut store);
+
+        executor.next(0, &elem("article"), &doc_pos(1), &mut store, &mut save_hits);
+        let article_inner = save_hits.last().expect("inner article").element_id;
+        assert_ne!(article_outer, article_inner);
+        executor.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
+        executor.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
+        executor.back(0, "p", &doc_pos(3), &mut store);
+        executor.back(0, "div", &doc_pos(2), &mut store);
+
+        assert!(executor.cursors.iter().any(|cursor| {
+            cursor.is_first_winner()
+                && cursor.position.selection == first_section
+                && cursor.parent == article_outer
+                && cursor.scope_depth == 0
+        }));
+        assert!(executor.cursors.iter().any(|cursor| {
+            cursor.is_first_winner()
+                && cursor.position.selection == first_section
+                && cursor.parent == article_inner
+                && cursor.scope_depth == 1
+        }));
+
+        executor.back(0, "article", &doc_pos(1), &mut store);
+        assert!(
+            !executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_inner
+            }),
+            "closing inner article removes only its owner"
+        );
+        assert!(
+            executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.position.selection == first_section
+                    && cursor.parent == article_outer
+                    && cursor.scope_depth == 0
+            }),
+            "outer article owner remains after inner close"
+        );
+
+        executor.back(0, "article", &doc_pos(0), &mut store);
+        assert!(
+            !executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner() && cursor.position.selection == first_section
+            }),
+            "closing outer article removes its owner"
+        );
+    }
+
+    #[test]
+    fn sequential_first_winners_do_not_accumulate_across_sibling_parents() {
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::all())?]))
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut executor = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+        let first_section = QuerySectionId(1);
+        let mut peak_winners = 0usize;
+
+        for _ in 0..3 {
+            let before = save_hits.len();
+            executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+            let article_id = save_hits[before].element_id;
+            executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+            executor.next(0, &elem("p"), &doc_pos(2), &mut store, &mut save_hits);
+            executor.back(0, "p", &doc_pos(2), &mut store);
+            executor.back(0, "div", &doc_pos(1), &mut store);
+
+            let winners = executor
+                .cursors
+                .iter()
+                .filter(|cursor| {
+                    cursor.is_first_winner() && cursor.position.selection == first_section
+                })
+                .count();
+            peak_winners = peak_winners.max(winners);
+            assert_eq!(winners, 1, "one open article owns one First winner");
+            assert!(executor.cursors.iter().any(|cursor| {
+                cursor.is_first_winner()
+                    && cursor.parent == article_id
+                    && cursor.scope_depth == 0
+            }));
+
+            executor.back(0, "article", &doc_pos(0), &mut store);
+            assert!(
+                !executor.cursors.iter().any(|cursor| {
+                    cursor.is_first_winner() && cursor.position.selection == first_section
+                }),
+                "closed article must drop its First ownership token"
+            );
         }
+
+        assert_eq!(peak_winners, 1);
     }
 
     #[test]
@@ -3245,7 +3407,7 @@ mod tests {
             state: TransitionId(0),
         };
         let mut winner = ScopedCursor::new_moving(0, parent, position);
-        winner.select_first_until_close(0);
+        winner.select_first_until_close(0, 0);
         selection.cursors.push(winner);
 
         let original_len = selection.cursors.len();
@@ -3270,7 +3432,7 @@ mod tests {
         let parent_a = ElementId::default();
         let parent_b = ElementId(1);
         let mut winner = ScopedCursor::new_moving(0, parent_a, position);
-        winner.select_first_until_close(0);
+        winner.select_first_until_close(0, 0);
         selection.cursors.push(winner);
 
         let original_len = selection.cursors.len();
@@ -3316,7 +3478,7 @@ mod tests {
         ));
 
         let mut winner = ScopedCursor::new_moving(0, parent, p_position);
-        winner.select_first_until_close(0);
+        winner.select_first_until_close(0, 0);
         selection.cursors.push(winner);
 
         let original_len = selection.cursors.len();
@@ -3362,7 +3524,7 @@ mod tests {
         ));
 
         let mut winner = ScopedCursor::new_moving(0, parent, first_position);
-        winner.select_first_until_close(0);
+        winner.select_first_until_close(0, 0);
         selection.cursors.push(winner);
 
         let original_len = selection.cursors.len();
