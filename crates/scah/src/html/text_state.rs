@@ -366,6 +366,10 @@ impl ParserTextState {
     /// Opening separators are flushed before the child's text range starts so
     /// parent-owned structural newlines sit outside the child range. Once
     /// flushed, those bytes are immutable.
+    ///
+    /// Callers that capture a normalized range start must also call
+    /// [`Self::before_text_range_start`] afterward so any remaining
+    /// parent/sibling-owned pending separator is emitted outside that range.
     pub fn before_open_element(
         &mut self,
         tape: &mut TextTape,
@@ -377,6 +381,34 @@ impl ParserTextState {
         }
         if !is_void && behavior.opening_separator != PendingSeparator::None {
             self.queue_separator(behavior.opening_separator);
+            self.flush_pending(tape);
+        }
+    }
+
+    /// Flush pending separators that must not belong to the newly opened
+    /// element's normalized range.
+    ///
+    /// Pending bytes caused by preceding siblings or parent context must be
+    /// emitted before `text_start` is recorded when:
+    /// - the element uses [`TextEdgePolicy::Preserve`] (preformatted / inherited
+    ///   preformatted), because edge trimming will not remove a leaked separator
+    /// - the element is a visible table cell, so consecutive empty cells each
+    ///   contribute their own tab boundary on the shared tape
+    ///
+    /// Suppressed elements must not flush: opening a hidden/`script`/`style`/
+    /// `template` subtree must not force a parent separator onto the tape.
+    pub fn before_text_range_start(
+        &mut self,
+        tape: &mut TextTape,
+        behavior: TextElementBehavior,
+        edge_policy: TextEdgePolicy,
+        is_table_cell: bool,
+    ) {
+        if !self.captures_text() || behavior.suppressed {
+            return;
+        }
+
+        if edge_policy == TextEdgePolicy::Preserve || is_table_cell {
             self.flush_pending(tape);
         }
     }
@@ -451,8 +483,10 @@ fn apply_separator(tape: &mut TextTape, separator: PendingSeparator) {
                 return;
             };
             // Collapsed Space+Tab is resolved in pending state before flush, so
-            // a trailing literal space here must be left intact.
-            if matches!(last, b' ' | b'\t' | b'\n') {
+            // a trailing literal space here must be left intact. Consecutive
+            // tabs are allowed: each visible cell boundary may flush its own
+            // tab so empty columns remain represented as `\t\t`.
+            if matches!(last, b' ' | b'\n') {
                 return;
             }
             tape.push_byte(b'\t');
@@ -549,6 +583,15 @@ mod tests {
         tape.push_str("A ");
         apply_separator(&mut tape, PendingSeparator::Tab);
         assert_eq!(tape.slice(0..tape.len()), "A ");
+    }
+
+    #[test]
+    fn consecutive_tabs_are_emitted_for_empty_columns() {
+        let mut tape = TextTape::new();
+        tape.push_str("A");
+        apply_separator(&mut tape, PendingSeparator::Tab);
+        apply_separator(&mut tape, PendingSeparator::Tab);
+        assert_eq!(tape.slice(0..tape.len()), "A\t\t");
     }
 
     #[test]

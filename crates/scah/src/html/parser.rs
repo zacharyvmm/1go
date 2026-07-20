@@ -314,12 +314,19 @@ where
                     self.text_state.cancel_initial_newline();
                 }
 
-                // Opening boundary: suppressed elements contribute nothing.
+                // Opening boundary, then flush any parent/sibling-owned pending
+                // separator before capturing text_start. Raw tape is unaffected.
                 if let Some(behavior) = text_behavior {
                     self.text_state.before_open_element(
                         &mut self.store.text.text,
                         behavior,
                         is_self_closing,
+                    );
+                    self.text_state.before_text_range_start(
+                        &mut self.store.text.text,
+                        behavior,
+                        text_edge_policy,
+                        tag.is_text_cell(),
                     );
                 }
 
