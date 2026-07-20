@@ -1,6 +1,10 @@
 use std::ops::Range;
 
-/// Shared result tape for one text representation (`raw_text` or `text`).
+/// Append-only shared text storage for one representation (`raw_text` or `text`).
+///
+/// Once an element range has been finalized, previously emitted bytes must not
+/// be removed, shifted, or rewritten. Separator canonicalization must therefore
+/// occur in pending parser state before bytes are appended.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TextTape {
     content: Vec<u8>,
@@ -64,15 +68,6 @@ impl TextTape {
     #[inline]
     pub fn last_byte(&self) -> Option<u8> {
         self.content.last().copied()
-    }
-
-    /// Pop the last byte. The normalized text tape is append-only after content
-    /// may be referenced by finalized ranges; callers must not use this to
-    /// rewrite emitted text.
-    #[inline]
-    #[allow(dead_code)]
-    pub fn pop_byte(&mut self) -> Option<u8> {
-        self.content.pop()
     }
 }
 

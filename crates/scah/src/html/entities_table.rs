@@ -2,7 +2,8 @@
 // Source: https://html.spec.whatwg.org/entities.json
 // Source SHA-256: d741d877ac77c4194c4ad526b5b4a19aef8dfe411ab840a466891cdbb9f362e6
 // Entry count: 2231
-// Retrieved: committed-fixture
+// Fixture: crates/scah/scripts/entities.json
+// Third-party license: THIRD_PARTY_LICENSES/WHATWG-HTML.txt
 
 pub(super) const MAX_NAME_LEN: usize = 32;
 

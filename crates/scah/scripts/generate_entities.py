@@ -3,10 +3,11 @@
 
 Usage:
   python crates/scah/scripts/generate_entities.py
-  python crates/scah/scripts/generate_entities.py --input crates/scah/scripts/entities.json
+  python crates/scah/scripts/generate_entities.py --update-fixture
 
 By default, reads the committed fixture next to this script so regeneration is
-offline and deterministic. Pass --fetch to download from the WHATWG URL instead.
+offline and deterministic. Pass --update-fixture to download from WHATWG and
+replace both the fixture and the generated Rust table from the same bytes.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import json
 import sys
 import tempfile
 import unicodedata
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -27,6 +27,8 @@ DEFAULT_INPUT = SCRIPT_PATH.with_name("entities.json")
 DESTINATION = SCRIPT_PATH.parents[1] / "src" / "html" / "entities_table.rs"
 SOURCE_URL = "https://html.spec.whatwg.org/entities.json"
 GENERATOR_REL = "crates/scah/scripts/generate_entities.py"
+FIXTURE_REL = "crates/scah/scripts/entities.json"
+LICENSE_REL = "THIRD_PARTY_LICENSES/WHATWG-HTML.txt"
 
 
 def rust_string_literal(value: str) -> str:
@@ -61,15 +63,39 @@ def rust_string_literal(value: str) -> str:
     return "".join(pieces)
 
 
-def load_source(raw: bytes) -> tuple[dict, str]:
-    source_hash = hashlib.sha256(raw).hexdigest()
+def read_fixture(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def fetch_upstream() -> bytes:
+    with urlopen(SOURCE_URL) as response:
+        return response.read()
+
+
+def validate_source(raw: bytes) -> dict:
     source = json.loads(raw.decode("utf-8"))
+
     if not isinstance(source, dict):
-        raise SystemExit("entities source must be a JSON object")
+        raise ValueError("entity source must be a JSON object")
+
+    for name, value in source.items():
+        if not isinstance(name, str):
+            raise ValueError("entity names must be strings")
+        if not isinstance(value, dict):
+            raise ValueError(f"entity {name!r} must be an object")
+        if not isinstance(value.get("characters"), str):
+            raise ValueError(f"entity {name!r} has no string characters field")
+
+    return source
+
+
+def load_source(raw: bytes) -> tuple[dict, str]:
+    source = validate_source(raw)
+    source_hash = hashlib.sha256(raw).hexdigest()
     return source, source_hash
 
 
-def generate_table(source: dict, source_hash: str, retrieved: str) -> str:
+def generate_table(source: dict, source_hash: str) -> str:
     entries = sorted(
         (name.removeprefix("&"), value["characters"]) for name, value in source.items()
     )
@@ -78,7 +104,8 @@ def generate_table(source: dict, source_hash: str, retrieved: str) -> str:
         f"// Source: {SOURCE_URL}",
         f"// Source SHA-256: {source_hash}",
         f"// Entry count: {len(entries)}",
-        f"// Retrieved: {retrieved}",
+        f"// Fixture: {FIXTURE_REL}",
+        f"// Third-party license: {LICENSE_REL}",
         "",
         f"pub(super) const MAX_NAME_LEN: usize = {max(len(name) for name, _ in entries)};",
         "",
@@ -93,7 +120,12 @@ def generate_table(source: dict, source_hash: str, retrieved: str) -> str:
     return "\n".join(lines)
 
 
-def atomic_write(destination: Path, content: str) -> None:
+def generate_from_bytes(raw: bytes) -> str:
+    source, source_hash = load_source(raw)
+    return generate_table(source, source_hash)
+
+
+def atomic_write_text(destination: Path, content: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -109,6 +141,59 @@ def atomic_write(destination: Path, content: str) -> None:
     temporary.replace(destination)
 
 
+def atomic_write_bytes(destination: Path, content: bytes) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(content)
+        temporary = Path(handle.name)
+    temporary.replace(destination)
+
+
+def update_fixture(
+    fixture_path: Path = DEFAULT_INPUT,
+    table_path: Path = DESTINATION,
+    raw: bytes | None = None,
+) -> None:
+    """Download (or accept) upstream bytes and replace fixture + table together."""
+    previous_fixture = fixture_path.read_bytes() if fixture_path.exists() else None
+    previous_table = table_path.read_text(encoding="utf-8") if table_path.exists() else None
+
+    if raw is None:
+        raw = fetch_upstream()
+    table = generate_from_bytes(raw)
+    source_hash = hashlib.sha256(raw).hexdigest()
+    entry_count = len(validate_source(raw))
+
+    # Validate and generate first; then write fixture, then table.
+    try:
+        atomic_write_bytes(fixture_path, raw)
+    except OSError as exc:
+        raise SystemExit(f"failed to write fixture {fixture_path}: {exc}") from exc
+
+    try:
+        atomic_write_text(table_path, table)
+    except OSError as exc:
+        raise SystemExit(
+            f"wrote fixture {fixture_path} but failed to write table {table_path}: {exc}\n"
+            "Rerun with --update-fixture to restore consistency."
+        ) from exc
+
+    fixture_changed = previous_fixture != raw
+    table_changed = previous_table != table
+    print(f"wrote {fixture_path}")
+    print(f"wrote {table_path}")
+    print(f"source sha-256: {source_hash}")
+    print(f"entry count: {entry_count}")
+    print(f"fixture changed: {fixture_changed}")
+    print(f"table changed: {table_changed}")
+
+
 def self_test() -> None:
     expected = {
         "plain": '"plain"',
@@ -116,8 +201,14 @@ def self_test() -> None:
         "slash: \\": '"slash: \\\\"',
         "\u0001": '"\\u{1}"',
         "\n": '"\\n"',
+        "\r": '"\\r"',
         "\t": '"\\t"',
+        "\0": '"\\0"',
+        "\u007f": '"\\u{7F}"',
+        "\u00a0": '"\\u{A0}"',
         "\u2061": '"\\u{2061}"',
+        "\u2028": '"\\u{2028}"',
+        "\u2029": '"\\u{2029}"',
         "𝔄": '"𝔄"',
         "\u2242\u0338": '"\u2242\u0338"',
     }
@@ -136,9 +227,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to entities.json (default: committed fixture beside this script)",
     )
     parser.add_argument(
+        "--update-fixture",
+        action="store_true",
+        help=(
+            f"Download {SOURCE_URL} and atomically update both the committed "
+            "fixture and generated Rust table from those bytes"
+        ),
+    )
+    parser.add_argument(
         "--fetch",
         action="store_true",
-        help=f"Download {SOURCE_URL} instead of reading --input",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--self-test",
@@ -153,16 +252,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.fetch:
-        with urlopen(SOURCE_URL) as response:
-            raw = response.read()
-        retrieved = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    else:
-        raw = args.input.read_bytes()
-        retrieved = "committed-fixture"
+        print(
+            "--fetch has been replaced by --update-fixture because fetching must update\n"
+            "both the committed source fixture and generated Rust table.",
+            file=sys.stderr,
+        )
+        return 2
 
+    if args.update_fixture:
+        update_fixture(fixture_path=args.input, table_path=DESTINATION)
+        return 0
+
+    raw = read_fixture(args.input)
     source, source_hash = load_source(raw)
-    content = generate_table(source, source_hash, retrieved)
-    atomic_write(DESTINATION, content)
+    content = generate_table(source, source_hash)
+    atomic_write_text(DESTINATION, content)
     print(f"wrote {DESTINATION}")
     print(f"source sha-256: {source_hash}")
     print(f"entry count: {len(source)}")
