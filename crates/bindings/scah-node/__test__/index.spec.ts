@@ -181,18 +181,18 @@ test('Save defaults omitted object to false', () => {
   expect(span?.textContent).toBeNull()
 })
 
-test("store remains valid after query object goes out of scope", () => {
+test('store remains valid after query object goes out of scope', () => {
   // Compiled query data is retained by the FFI store handle, so dropping the
   // JS Query after parse must not invalidate lookups.
   const store = (() => {
-    const q = Query.all("a[href]", { innerHtml: true, textContent: true }).build()
+    const q = Query.all('a[href]', { innerHtml: true, textContent: true }).build()
     return parse("<a href='x'>x</a>", [q])
   })()
 
-  const hits = store.get("a[href]")
+  const hits = store.get('a[href]')
   expect(hits).toHaveLength(1)
-  expect(hits![0].name).toBe("a")
-  expect(hits![0].attributes).toEqual({ href: "x" })
+  expect(hits![0].name).toBe('a')
+  expect(hits![0].attributes).toEqual({ href: 'x' })
 })
 
 test('multi-child then appends all branches', () => {
@@ -237,4 +237,13 @@ test('parse with empty queries throws', () => {
 
 test('invalid selector fails at build', () => {
   expect(() => Query.all('').build()).toThrow()
+})
+
+test('attributes preserve missing versus empty values', () => {
+  const q = Query.all('input', { innerHtml: true, textContent: true }).build()
+  const store = parse('<input disabled value="">', [q])
+  const element = store.get('input')![0]
+  // napi maps Option::None to null and Some("") to "".
+  expect(element.attributes.disabled).toBeNull()
+  expect(element.attributes.value).toBe('')
 })

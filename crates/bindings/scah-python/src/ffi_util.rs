@@ -22,16 +22,6 @@ pub fn view_to_string(view: ScahStringView) -> String {
     unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(view.data, view.len)).into_owned() }
 }
 
-/// Distinguish missing attribute values (null data) from empty strings.
-#[inline]
-pub fn view_to_option_string(view: ScahStringView) -> Option<String> {
-    if view.data.is_null() {
-        None
-    } else {
-        Some(view_to_string(view))
-    }
-}
-
 #[inline]
 pub fn optional_to_option(opt: ScahOptionalStringView) -> Option<String> {
     if opt.is_some == 0 {

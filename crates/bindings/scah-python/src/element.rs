@@ -1,6 +1,4 @@
-use crate::ffi_util::{
-    map_status, optional_to_option, string_view, view_to_option_string, view_to_string,
-};
+use crate::ffi_util::{map_status, optional_to_option, string_view, view_to_string};
 use pyo3::exceptions::PyValueError;
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt, prelude::*};
@@ -134,10 +132,7 @@ impl PyElement {
                 data: std::ptr::null(),
                 len: 0,
             };
-            let mut value = ScahStringView {
-                data: std::ptr::null(),
-                len: 0,
-            };
+            let mut value = ScahOptionalStringView::none();
             let mut out_error: *mut ScahError = std::ptr::null_mut();
             let status = unsafe {
                 scah_element_attribute_at(
@@ -149,7 +144,7 @@ impl PyElement {
                 )
             };
             map_status(status, out_error)?;
-            object.set_item(view_to_string(key), view_to_option_string(value))?;
+            object.set_item(view_to_string(key), optional_to_option(value))?;
         }
         Ok(object)
     }

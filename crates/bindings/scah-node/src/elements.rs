@@ -181,9 +181,12 @@ impl JsElement {
                 data: std::ptr::null(),
                 len: 0,
             };
-            let mut value = ScahStringView {
-                data: std::ptr::null(),
-                len: 0,
+            let mut value = ScahOptionalStringView {
+                value: ScahStringView {
+                    data: std::ptr::null(),
+                    len: 0,
+                },
+                is_some: 0,
             };
             let mut err = null_mut();
             let status = unsafe {
@@ -192,7 +195,7 @@ impl JsElement {
             if status != ScahStatus::Ok {
                 return Err(status_to_error(status, err));
             }
-            object.set(view_to_string(key), view_to_string(value))?;
+            object.set(view_to_string(key), optional_to_option(value))?;
         }
 
         Ok(object)

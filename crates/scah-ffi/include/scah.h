@@ -66,6 +66,9 @@ typedef size_t ScahQuerySectionId;
 
 // Optional string view. Distinguish missing values from empty strings with
 // `is_some` rather than overloading null pointers.
+//
+// - `is_some == 0`: value is absent (`None`)
+// - `is_some != 0` with `value.len == 0`: explicitly empty string (`Some("")`)
 typedef struct ScahOptionalStringView {
   struct ScahStringView value;
   uint8_t is_some;
@@ -76,62 +79,136 @@ extern "C" {
 #endif // __cplusplus
 
 // Borrow the error message. Valid while `error` remains alive.
+//
+// # Safety
+//
+// `error` must either be null or point to a live [`ScahError`] returned by
+// scah-ffi that has not yet been freed. The returned view borrows the error's
+// message and is only valid until the error is freed or mutated.
 struct ScahStringView scah_error_message(const struct ScahError *error);
 
 // Free an error handle. Null is a no-op.
+//
+// # Safety
+//
+// A non-null `error` must have been returned by scah-ffi, must not already
+// have been freed, and must not be used again after this call.
 void scah_error_free(struct ScahError *error);
 
 // Create a root builder that matches all occurrences of `selector`.
 //
 // The selector is not validated until [`scah_query_builder_build`].
+//
+// # Safety
+//
+// `selector` must satisfy [`ScahStringView::as_str`]. `out_builder` must be
+// non-null and valid for writing one `*mut ScahQueryBuilder`. When
+// `out_error` is non-null, it must be valid for writing one `*mut ScahError`.
+// On success the caller owns the returned builder and must free it with
+// [`scah_query_builder_free`].
 enum ScahStatus scah_query_all(struct ScahStringView selector,
                                struct ScahSave save,
                                struct ScahQueryBuilder **out_builder,
                                struct ScahError **out_error);
 
 // Create a root builder that matches the first occurrence of `selector`.
+//
+// # Safety
+//
+// Same requirements as [`scah_query_all`].
 enum ScahStatus scah_query_first(struct ScahStringView selector,
                                  struct ScahSave save,
                                  struct ScahQueryBuilder **out_builder,
                                  struct ScahError **out_error);
 
 // Append a linear `all` child under the builder's current last section.
+//
+// # Safety
+//
+// `builder` must point to a live [`ScahQueryBuilder`]. `selector` must satisfy
+// [`ScahStringView::as_str`]. When `out_error` is non-null, it must be valid
+// for writing one `*mut ScahError`.
 enum ScahStatus scah_query_builder_all(struct ScahQueryBuilder *builder,
                                        struct ScahStringView selector,
                                        struct ScahSave save,
                                        struct ScahError **out_error);
 
 // Append a linear `first` child under the builder's current last section.
+//
+// # Safety
+//
+// Same requirements as [`scah_query_builder_all`].
 enum ScahStatus scah_query_builder_first(struct ScahQueryBuilder *builder,
                                          struct ScahStringView selector,
                                          struct ScahSave save,
                                          struct ScahError **out_error);
 
 // Return the current (last) section id for subsequent [`scah_query_builder_append`] calls.
+//
+// # Safety
+//
+// `builder` must either be null (returns [`ScahStatus::NullPointer`]) or point
+// to a live [`ScahQueryBuilder`]. `out_section` must be non-null and valid for
+// writing one [`ScahQuerySectionId`]. When `out_error` is non-null, it must be
+// valid for writing one `*mut ScahError`.
 enum ScahStatus scah_query_builder_current_section(const struct ScahQueryBuilder *builder,
                                                    ScahQuerySectionId *out_section,
                                                    struct ScahError **out_error);
 
 // Clone `child` under `parent` without consuming either builder.
+//
+// Self-append (`builder == child`) clones the current tree into an owned
+// temporary before taking a mutable borrow of `builder`, so overlapping
+// Rust references are never created.
+//
+// # Safety
+//
+// `builder` must point to a live mutable [`ScahQueryBuilder`]. `child` must
+// point to a live [`ScahQueryBuilder`]. When `out_error` is non-null, it must
+// be valid for writing one `*mut ScahError`.
 enum ScahStatus scah_query_builder_append(struct ScahQueryBuilder *builder,
                                           ScahQuerySectionId parent,
                                           const struct ScahQueryBuilder *child,
                                           struct ScahError **out_error);
 
 // Compile the builder into a query. Does not consume the builder.
+//
+// # Safety
+//
+// `builder` must point to a live [`ScahQueryBuilder`]. `out_query` must be
+// non-null and valid for writing one `*mut ScahQuery`. When `out_error` is
+// non-null, it must be valid for writing one `*mut ScahError`. On success the
+// caller owns the returned query and must free it with [`scah_query_free`].
 enum ScahStatus scah_query_builder_build(const struct ScahQueryBuilder *builder,
                                          struct ScahQuery **out_query,
                                          struct ScahError **out_error);
 
 // Deep-clone a builder handle.
+//
+// # Safety
+//
+// `builder` must point to a live [`ScahQueryBuilder`]. `out_builder` must be
+// non-null and valid for writing one `*mut ScahQueryBuilder`. When `out_error`
+// is non-null, it must be valid for writing one `*mut ScahError`. On success
+// the caller owns the clone and must free it with [`scah_query_builder_free`].
 enum ScahStatus scah_query_builder_clone(const struct ScahQueryBuilder *builder,
                                          struct ScahQueryBuilder **out_builder,
                                          struct ScahError **out_error);
 
 // Free a builder handle. Null is a no-op.
+//
+// # Safety
+//
+// A non-null `builder` must have been returned by scah-ffi, must not already
+// have been freed, and must not be used again after this call.
 void scah_query_builder_free(struct ScahQueryBuilder *builder);
 
 // Free a query handle. Null is a no-op.
+//
+// # Safety
+//
+// A non-null `query` must have been returned by scah-ffi, must not already
+// have been freed, and must not be used again after this call.
 void scah_query_free(struct ScahQuery *query);
 
 // Current C ABI version.
@@ -141,6 +218,16 @@ uint32_t scah_abi_version(void);
 //
 // Returned string views from the store/elements borrow store-owned HTML and
 // remain valid only while those handles are alive.
+//
+// # Safety
+//
+// `html` must satisfy [`ScahStringView::as_str`] and remain valid for the
+// duration of this call. When `query_count > 0`, `queries` must point to an
+// array of `query_count` readable query-handle pointers; every entry must
+// point to a live [`ScahQuery`]. `out_store` must be non-null and valid for
+// writing one `*mut ScahStore`. When `out_error` is non-null, it must be valid
+// for writing one `*mut ScahError`. On success the caller owns the store and
+// must free it with [`scah_store_free`].
 enum ScahStatus scah_parse(struct ScahStringView html,
                            const struct ScahQuery *const *queries,
                            size_t query_count,
@@ -148,6 +235,13 @@ enum ScahStatus scah_parse(struct ScahStringView html,
                            struct ScahError **out_error);
 
 // Number of elements in the store.
+//
+// # Safety
+//
+// `store` must either be null or point to a live [`ScahStore`] returned by
+// scah-ffi. `out_len`, when non-null, must be valid for writing one `usize`.
+// When `out_error` is non-null, it must be valid for writing one
+// `*mut ScahError`.
 enum ScahStatus scah_store_len(const struct ScahStore *store,
                                size_t *out_len,
                                struct ScahError **out_error);
@@ -155,6 +249,14 @@ enum ScahStatus scah_store_len(const struct ScahStore *store,
 // Look up elements matched by `query`.
 //
 // When the selector is absent, `*out_found` is set to 0 and this is not an error.
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. `query` must satisfy
+// [`ScahStringView::as_str`]. `out_elements` and `out_found` must be non-null
+// and valid for writing. When `out_error` is non-null, it must be valid for
+// writing one `*mut ScahError`. On success with `*out_found == 1`, the caller
+// owns the list and must free it with [`scah_element_list_free`].
 enum ScahStatus scah_store_get(const struct ScahStore *store,
                                struct ScahStringView query,
                                struct ScahElementList **out_elements,
@@ -162,70 +264,152 @@ enum ScahStatus scah_store_get(const struct ScahStore *store,
                                struct ScahError **out_error);
 
 // Free a store handle. Null is a no-op.
+//
+// # Safety
+//
+// A non-null `store` must have been returned by scah-ffi, must not already
+// have been freed, and must not be used again after this call. Element and
+// list handles that retain an `Arc` to the same store remain valid.
 void scah_store_free(struct ScahStore *store);
 
 // Length of an element list.
+//
+// # Safety
+//
+// `list` must either be null or point to a live [`ScahElementList`].
+// `out_len`, when non-null, must be valid for writing one `usize`. When
+// `out_error` is non-null, it must be valid for writing one `*mut ScahError`.
 enum ScahStatus scah_element_list_len(const struct ScahElementList *list,
                                       size_t *out_len,
                                       struct ScahError **out_error);
 
 // Get an element handle from a list. The element retains its own store `Arc`.
+//
+// # Safety
+//
+// `list` must point to a live [`ScahElementList`]. `out_element` must be
+// non-null and valid for writing one `*mut ScahElement`. When `out_error` is
+// non-null, it must be valid for writing one `*mut ScahError`. On success the
+// caller owns the element and must free it with [`scah_element_free`].
 enum ScahStatus scah_element_list_get(const struct ScahElementList *list,
                                       size_t index,
                                       struct ScahElement **out_element,
                                       struct ScahError **out_error);
 
 // Free an element list. Null is a no-op.
+//
+// # Safety
+//
+// A non-null `list` must have been returned by scah-ffi, must not already
+// have been freed, and must not be used again after this call.
 void scah_element_list_free(struct ScahElementList *list);
 
 // Element tag name. Borrowed from store-owned HTML.
+//
+// # Safety
+//
+// `element` must point to a live [`ScahElement`]. `out_name` must be non-null
+// and valid for writing one [`ScahStringView`]. The returned view is valid
+// only while the element's store remains alive. When `out_error` is non-null,
+// it must be valid for writing one `*mut ScahError`.
 enum ScahStatus scah_element_name(const struct ScahElement *element,
                                   struct ScahStringView *out_name,
                                   struct ScahError **out_error);
 
 // Element `id` attribute, if present.
+//
+// # Safety
+//
+// `element` must point to a live [`ScahElement`]. `out_id` must be non-null
+// and valid for writing one [`ScahOptionalStringView`]. Returned string data
+// is valid only while the element's store remains alive. When `out_error` is
+// non-null, it must be valid for writing one `*mut ScahError`.
 enum ScahStatus scah_element_id(const struct ScahElement *element,
                                 struct ScahOptionalStringView *out_id,
                                 struct ScahError **out_error);
 
 // Element `class` attribute, if present.
+//
+// # Safety
+//
+// Same requirements as [`scah_element_id`].
 enum ScahStatus scah_element_class_name(const struct ScahElement *element,
                                         struct ScahOptionalStringView *out_class,
                                         struct ScahError **out_error);
 
 // Element inner HTML, if captured.
+//
+// # Safety
+//
+// Same requirements as [`scah_element_id`].
 enum ScahStatus scah_element_inner_html(const struct ScahElement *element,
                                         struct ScahOptionalStringView *out_html,
                                         struct ScahError **out_error);
 
 // Element text content, if captured.
+//
+// # Safety
+//
+// Same requirements as [`scah_element_id`].
 enum ScahStatus scah_element_text_content(const struct ScahElement *element,
                                           struct ScahOptionalStringView *out_text,
                                           struct ScahError **out_error);
 
 // Look up a single attribute by name.
+//
+// # Safety
+//
+// `element` must point to a live [`ScahElement`]. `key` must satisfy
+// [`ScahStringView::as_str`]. `out_value` must be non-null and valid for
+// writing one [`ScahOptionalStringView`]. Returned string data is valid only
+// while the element's store remains alive. When `out_error` is non-null, it
+// must be valid for writing one `*mut ScahError`.
 enum ScahStatus scah_element_get_attribute(const struct ScahElement *element,
                                            struct ScahStringView key,
                                            struct ScahOptionalStringView *out_value,
                                            struct ScahError **out_error);
 
 // Number of extra attributes (excluding dedicated class/id fields).
+//
+// # Safety
+//
+// `element` must point to a live [`ScahElement`]. `out_count` must be
+// non-null and valid for writing one `usize`. When `out_error` is non-null,
+// it must be valid for writing one `*mut ScahError`.
 enum ScahStatus scah_element_attribute_count(const struct ScahElement *element,
                                              size_t *out_count,
                                              struct ScahError **out_error);
 
 // Indexed attribute access without building a hash map.
 //
-// When an attribute has no value, `out_value` is an empty string view.
+// Distinguishes missing attribute values from explicitly empty ones:
+//
+// - `out_value.is_some == 0`: attribute had no value (`None`)
+// - `out_value.is_some != 0` with `out_value.value.len == 0`: explicitly empty (`Some("")`)
+//
+// # Safety
+//
+// `element` must point to a live [`ScahElement`]. `out_key` and `out_value`
+// must be non-null and valid for writing. Returned string data is valid only
+// while the element's store remains alive. When `out_error` is non-null, it
+// must be valid for writing one `*mut ScahError`.
 enum ScahStatus scah_element_attribute_at(const struct ScahElement *element,
                                           size_t index,
                                           struct ScahStringView *out_key,
-                                          struct ScahStringView *out_value,
+                                          struct ScahOptionalStringView *out_value,
                                           struct ScahError **out_error);
 
 // Nested query lookup on an element.
 //
 // When the child query is absent, `*out_found` is 0 (not an error).
+//
+// # Safety
+//
+// `element` must point to a live [`ScahElement`]. `query` must satisfy
+// [`ScahStringView::as_str`]. `out_elements` and `out_found` must be non-null
+// and valid for writing. When `out_error` is non-null, it must be valid for
+// writing one `*mut ScahError`. On success with `*out_found == 1`, the caller
+// owns the list and must free it with [`scah_element_list_free`].
 enum ScahStatus scah_element_get(const struct ScahElement *element,
                                  struct ScahStringView query,
                                  struct ScahElementList **out_elements,
@@ -233,6 +417,11 @@ enum ScahStatus scah_element_get(const struct ScahElement *element,
                                  struct ScahError **out_error);
 
 // Free an element handle. Null is a no-op.
+//
+// # Safety
+//
+// A non-null `element` must have been returned by scah-ffi, must not already
+// have been freed, and must not be used again after this call.
 void scah_element_free(struct ScahElement *element);
 
 // Capture neither inner HTML nor text content.

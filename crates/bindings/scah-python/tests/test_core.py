@@ -192,3 +192,12 @@ def test_store_get_missing_returns_none():
 def test_query_builder_does_not_expose_try_build():
     builder = Query.all("a", Save.none())
     assert not hasattr(builder, "try_build")
+
+
+def test_attributes_preserve_missing_versus_empty():
+    """Boolean attributes without values map to None; empty values map to ''."""
+    q = Query.all("input", Save.all()).build()
+    store = parse('<input disabled value="">', [q])
+    element = store.get("input")[0]
+    assert element.attributes["disabled"] is None
+    assert element.attributes["value"] == ""

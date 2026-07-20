@@ -176,6 +176,69 @@ int main(void) {
         scah_query_builder_free(self_builder);
     }
 
+    /* Missing versus explicitly empty attribute values. */
+    {
+        ScahQueryBuilder *attr_builder = NULL;
+        ScahQuery *attr_query = NULL;
+        ScahStore *attr_store = NULL;
+        ScahElementList *attr_list = NULL;
+        ScahElement *input = NULL;
+        uint8_t attr_found = 0;
+
+        expect_ok(scah_query_all(sv("input"), scah_save_all(), &attr_builder, &err), err,
+                  "attr_query_all");
+        expect_ok(scah_query_builder_build(attr_builder, &attr_query, &err), err, "attr_build");
+        scah_query_builder_free(attr_builder);
+
+        const ScahQuery *attr_queries[1] = {attr_query};
+        expect_ok(scah_parse(sv("<input disabled value=\"\">"), attr_queries, 1, &attr_store,
+                             &err),
+                  err, "attr_parse");
+        scah_query_free(attr_query);
+
+        expect_ok(scah_store_get(attr_store, sv("input"), &attr_list, &attr_found, &err), err,
+                  "attr_store_get");
+        if (!attr_found || attr_list == NULL) {
+            fail("input not found");
+        }
+        expect_ok(scah_element_list_get(attr_list, 0, &input, &err), err, "attr_list_get");
+        scah_element_list_free(attr_list);
+
+        size_t n = 0;
+        expect_ok(scah_element_attribute_count(input, &n, &err), err, "attr_count_input");
+        if (n != 2) {
+            fail("expected two attributes");
+        }
+
+        int saw_disabled = 0;
+        int saw_value = 0;
+        for (size_t i = 0; i < n; i++) {
+            ScahStringView key;
+            ScahOptionalStringView value;
+            expect_ok(scah_element_attribute_at(input, i, &key, &value, &err), err,
+                      "attr_at");
+            if (key.len == 8 && memcmp(key.data, "disabled", 8) == 0) {
+                if (value.is_some != 0) {
+                    fail("disabled should have no value");
+                }
+                saw_disabled = 1;
+            } else if (key.len == 5 && memcmp(key.data, "value", 5) == 0) {
+                if (value.is_some == 0 || value.value.len != 0) {
+                    fail("value should be explicitly empty");
+                }
+                saw_value = 1;
+            } else {
+                fail("unexpected attribute key");
+            }
+        }
+        if (!saw_disabled || !saw_value) {
+            fail("missing expected attributes");
+        }
+
+        scah_element_free(input);
+        scah_store_free(attr_store);
+    }
+
     puts("c_smoke ok");
     return 0;
 }

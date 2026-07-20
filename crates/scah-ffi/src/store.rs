@@ -535,7 +535,10 @@ pub unsafe extern "C" fn scah_element_attribute_count(
 
 /// Indexed attribute access without building a hash map.
 ///
-/// When an attribute has no value, `out_value` is an empty string view.
+/// Distinguishes missing attribute values from explicitly empty ones:
+///
+/// - `out_value.is_some == 0`: attribute had no value (`None`)
+/// - `out_value.is_some != 0` with `out_value.value.len == 0`: explicitly empty (`Some("")`)
 ///
 /// # Safety
 ///
@@ -548,7 +551,7 @@ pub unsafe extern "C" fn scah_element_attribute_at(
     element: *const ScahElement,
     index: usize,
     out_key: *mut ScahStringView,
-    out_value: *mut ScahStringView,
+    out_value: *mut ScahOptionalStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
@@ -563,10 +566,7 @@ pub unsafe extern "C" fn scah_element_attribute_at(
                 .ok_or(ScahStatus::IndexOutOfBounds)?;
             let attr = attrs.get(index).ok_or(ScahStatus::IndexOutOfBounds)?;
             *out_key = ScahStringView::borrow(attr.key);
-            *out_value = match attr.value {
-                Some(v) => ScahStringView::borrow(v),
-                None => ScahStringView::empty(),
-            };
+            *out_value = ScahOptionalStringView::from_option(attr.value);
             Ok(())
         })
     }
@@ -951,16 +951,6 @@ mod tests {
             "input"
         );
 
-        let mut disabled = ScahOptionalStringView::none();
-        assert_eq!(
-            unsafe {
-                scah_element_get_attribute(element, view("disabled"), &mut disabled, &mut err)
-            },
-            ScahStatus::Ok
-        );
-        // Boolean attributes without `=` have no value; presence is still queryable
-        // via attributes(), but get_attribute may return None for missing values.
-        // Here we mainly prove the store HTML survived caller destruction.
         let mut value = ScahOptionalStringView::none();
         assert_eq!(
             unsafe { scah_element_get_attribute(element, view("value"), &mut value, &mut err) },
@@ -968,6 +958,79 @@ mod tests {
         );
         assert_eq!(value.is_some, 1);
         assert_eq!(value.value.len, 0);
+
+        unsafe {
+            scah_element_free(element);
+            scah_element_list_free(list);
+            scah_store_free(store);
+        }
+    }
+
+    #[test]
+    fn attribute_at_preserves_missing_versus_empty() {
+        let query = build_simple_query("input");
+        let mut store: *mut ScahStore = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        let queries = [query as *const ScahQuery];
+        assert_eq!(
+            unsafe {
+                scah_parse(
+                    view("<input disabled value=\"\">"),
+                    queries.as_ptr(),
+                    1,
+                    &mut store,
+                    &mut err,
+                )
+            },
+            ScahStatus::Ok
+        );
+        unsafe {
+            scah_query_free(query);
+        }
+
+        let mut list: *mut ScahElementList = std::ptr::null_mut();
+        let mut found = 0u8;
+        unsafe {
+            scah_store_get(store, view("input"), &mut list, &mut found, &mut err);
+        }
+        let mut element: *mut ScahElement = std::ptr::null_mut();
+        unsafe {
+            scah_element_list_get(list, 0, &mut element, &mut err);
+        }
+
+        let mut count = 0usize;
+        assert_eq!(
+            unsafe { scah_element_attribute_count(element, &mut count, &mut err) },
+            ScahStatus::Ok
+        );
+        assert_eq!(count, 2);
+
+        let mut saw_disabled = false;
+        let mut saw_value = false;
+        for i in 0..count {
+            let mut key = ScahStringView::empty();
+            let mut value = ScahOptionalStringView::none();
+            assert_eq!(
+                unsafe { scah_element_attribute_at(element, i, &mut key, &mut value, &mut err) },
+                ScahStatus::Ok
+            );
+            let key_str =
+                unsafe { std::str::from_utf8(std::slice::from_raw_parts(key.data, key.len)) }
+                    .unwrap();
+            match key_str {
+                "disabled" => {
+                    assert_eq!(value.is_some, 0);
+                    saw_disabled = true;
+                }
+                "value" => {
+                    assert_eq!(value.is_some, 1);
+                    assert_eq!(value.value.len, 0);
+                    saw_value = true;
+                }
+                other => panic!("unexpected attribute key: {other}"),
+            }
+        }
+        assert!(saw_disabled && saw_value);
 
         unsafe {
             scah_element_free(element);
