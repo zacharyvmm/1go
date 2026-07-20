@@ -579,7 +579,9 @@ fn nested_pre_strips_its_own_initial_newline() {
     let inner = pres.next().unwrap();
 
     assert_eq!(inner.text(&store), Some("B"));
-    assert_eq!(outer.text(&store), Some("AB\nC"));
+    // Inner `pre` is a block, so its opening boundary contributes a newline
+    // to the outer preformatted parent; closing contributes another before C.
+    assert_eq!(outer.text(&store), Some("A\nB\nC"));
 }
 
 #[test]

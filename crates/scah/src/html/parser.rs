@@ -478,7 +478,8 @@ where
     ) -> bool {
         self.finalize_open_element(&open_element, reader);
         if self.capture_mode.captures_text() {
-            self.text_state.after_close_element(open_element.text_flags);
+            self.text_state
+                .after_close_element(open_element.text_flags, close_depth);
             if !open_element
                 .text_flags
                 .contains(TextElementFlags::SUPPRESSED)

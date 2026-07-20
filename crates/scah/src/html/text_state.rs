@@ -420,11 +420,11 @@ impl ParserTextState {
         self.enter_element(behavior.flags(), depth);
     }
 
-    pub fn after_close_element(&mut self, behavior_flags: TextElementFlags) {
+    pub fn after_close_element(&mut self, behavior_flags: TextElementFlags, depth: DepthSize) {
         if !self.captures_text() {
             return;
         }
-        self.exit_element(behavior_flags);
+        self.exit_element(behavior_flags, depth);
     }
 
     pub fn enter_element(&mut self, flags: TextElementFlags, depth: DepthSize) {
@@ -432,15 +432,17 @@ impl ParserTextState {
             self.suppressed_depth = self.suppressed_depth.saturating_add(1);
         }
         if flags.contains(TextElementFlags::PREFORMATTED) {
-            let was_pre = self.preformatted_depth > 0;
+            // Each pre/textarea owns its own initial-newline eligibility,
+            // including when nested inside another preformatted context.
             self.preformatted_depth = self.preformatted_depth.saturating_add(1);
-            if !was_pre {
-                self.initial_newline_depth = Some(depth);
-            }
+            self.initial_newline_depth = Some(depth);
         }
     }
 
-    pub fn exit_element(&mut self, flags: TextElementFlags) {
+    pub fn exit_element(&mut self, flags: TextElementFlags, depth: DepthSize) {
+        if self.initial_newline_depth == Some(depth) {
+            self.initial_newline_depth = None;
+        }
         if flags.contains(TextElementFlags::SUPPRESSED) {
             self.suppressed_depth = self.suppressed_depth.saturating_sub(1);
         }
