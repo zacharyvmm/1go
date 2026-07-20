@@ -36,8 +36,13 @@ impl ScahError {
 }
 
 /// Set `*out_error` to null when the pointer is provided.
+///
+/// # Safety
+///
+/// When `out_error` is non-null, it must be valid for writing one
+/// `*mut ScahError`.
 #[inline]
-pub(crate) fn clear_out_error(out_error: *mut *mut ScahError) {
+pub(crate) unsafe fn clear_out_error(out_error: *mut *mut ScahError) {
     if !out_error.is_null() {
         unsafe {
             *out_error = std::ptr::null_mut();
@@ -46,8 +51,14 @@ pub(crate) fn clear_out_error(out_error: *mut *mut ScahError) {
 }
 
 /// Allocate an error into `out_error` when the slot is non-null.
+///
+/// # Safety
+///
+/// When `out_error` is non-null, it must be valid for writing one
+/// `*mut ScahError`. Any previous non-null value in the slot is overwritten
+/// without freeing it; callers must free prior errors themselves.
 #[inline]
-pub(crate) fn set_error(out_error: *mut *mut ScahError, message: impl Into<String>) {
+pub(crate) unsafe fn set_error(out_error: *mut *mut ScahError, message: impl Into<String>) {
     if out_error.is_null() {
         return;
     }
@@ -58,16 +69,25 @@ pub(crate) fn set_error(out_error: *mut *mut ScahError, message: impl Into<Strin
 }
 
 /// Run `f` behind `catch_unwind`, mapping panics to [`ScahStatus::InternalPanic`].
-pub(crate) fn ffi_guard<F>(out_error: *mut *mut ScahError, f: F) -> ScahStatus
+///
+/// # Safety
+///
+/// When `out_error` is non-null, it must be valid for writing one
+/// `*mut ScahError` for the duration of this call.
+pub(crate) unsafe fn ffi_guard<F>(out_error: *mut *mut ScahError, f: F) -> ScahStatus
 where
     F: FnOnce() -> Result<(), ScahStatus> + std::panic::UnwindSafe,
 {
-    clear_out_error(out_error);
+    unsafe {
+        clear_out_error(out_error);
+    }
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(())) => ScahStatus::Ok,
         Ok(Err(status)) => status,
         Err(_) => {
-            set_error(out_error, "internal panic in scah-ffi");
+            unsafe {
+                set_error(out_error, "internal panic in scah-ffi");
+            }
             ScahStatus::InternalPanic
         }
     }
@@ -90,24 +110,37 @@ where
 }
 
 /// Borrow the error message. Valid while `error` remains alive.
+///
+/// # Safety
+///
+/// `error` must either be null or point to a live [`ScahError`] returned by
+/// scah-ffi that has not yet been freed. The returned view borrows the error's
+/// message and is only valid until the error is freed or mutated.
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_error_message(error: *const ScahError) -> ScahStringView {
+pub unsafe extern "C" fn scah_error_message(error: *const ScahError) -> ScahStringView {
     ffi_guard_value(ScahStringView::empty(), || {
         if error.is_null() {
             return ScahStringView::empty();
         }
+        // SAFETY: caller guarantees `error` is a live ScahError.
         let error = unsafe { &*error };
         ScahStringView::borrow(error.message())
     })
 }
 
 /// Free an error handle. Null is a no-op.
+///
+/// # Safety
+///
+/// A non-null `error` must have been returned by scah-ffi, must not already
+/// have been freed, and must not be used again after this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_error_free(error: *mut ScahError) {
+pub unsafe extern "C" fn scah_error_free(error: *mut ScahError) {
     ffi_guard_void(|| {
         if error.is_null() {
             return;
         }
+        // SAFETY: caller guarantees ownership of a live ScahError.
         unsafe {
             drop(Box::from_raw(error));
         }
@@ -120,34 +153,46 @@ mod tests {
 
     #[test]
     fn free_null_is_ok() {
-        scah_error_free(std::ptr::null_mut());
+        unsafe {
+            scah_error_free(std::ptr::null_mut());
+        }
     }
 
     #[test]
     fn set_and_read_error() {
         let mut err: *mut ScahError = std::ptr::null_mut();
-        set_error(&mut err, "hello");
+        unsafe {
+            set_error(&mut err, "hello");
+        }
         assert!(!err.is_null());
-        let view = scah_error_message(err);
+        let view = unsafe { scah_error_message(err) };
         let s = unsafe { std::str::from_utf8(std::slice::from_raw_parts(view.data, view.len)) }
             .unwrap();
         assert_eq!(s, "hello");
-        scah_error_free(err);
+        unsafe {
+            scah_error_free(err);
+        }
     }
 
     #[test]
     fn null_out_error_discards_message() {
-        set_error(std::ptr::null_mut(), "ignored");
+        unsafe {
+            set_error(std::ptr::null_mut(), "ignored");
+        }
     }
 
     #[test]
     fn ffi_guard_maps_panic() {
         let mut err: *mut ScahError = std::ptr::null_mut();
-        let status = ffi_guard(&mut err, || -> Result<(), ScahStatus> {
-            panic!("boom");
-        });
+        let status = unsafe {
+            ffi_guard(&mut err, || -> Result<(), ScahStatus> {
+                panic!("boom");
+            })
+        };
         assert_eq!(status, ScahStatus::InternalPanic);
         assert!(!err.is_null());
-        scah_error_free(err);
+        unsafe {
+            scah_error_free(err);
+        }
     }
 }

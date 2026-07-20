@@ -23,13 +23,16 @@ fn parse(html: String, queries: Vec<PyRef<PyQuery>>) -> PyResult<PyStore> {
 
     let mut out_store: *mut ScahStore = std::ptr::null_mut();
     let mut out_error: *mut ScahError = std::ptr::null_mut();
-    let status = scah_parse(
-        string_view(&html),
-        ptrs.as_ptr(),
-        ptrs.len(),
-        &mut out_store,
-        &mut out_error,
-    );
+    // SAFETY: html and query handles remain live for the duration of the call.
+    let status = unsafe {
+        scah_parse(
+            string_view(&html),
+            ptrs.as_ptr(),
+            ptrs.len(),
+            &mut out_store,
+            &mut out_error,
+        )
+    };
     map_status(status, out_error)?;
 
     Ok(PyStore {

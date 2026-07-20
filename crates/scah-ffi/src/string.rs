@@ -17,6 +17,9 @@ pub struct ScahStringView {
 
 /// Optional string view. Distinguish missing values from empty strings with
 /// `is_some` rather than overloading null pointers.
+///
+/// - `is_some == 0`: value is absent (`None`)
+/// - `is_some != 0` with `value.len == 0`: explicitly empty string (`Some("")`)
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ScahOptionalStringView {
@@ -53,14 +56,27 @@ impl ScahStringView {
         }
     }
 
-    /// Convert to `&str`, validating UTF-8 and the null/length contract.
-    pub fn to_str<'a>(self) -> Result<&'a str, ScahStatus> {
+    /// Interpret this view as UTF-8.
+    ///
+    /// # Safety
+    ///
+    /// When `len > 0`, `data` must:
+    ///
+    /// - be non-null;
+    /// - be valid for reads of `len` bytes;
+    /// - point to initialized memory;
+    /// - remain alive and unmodified for the returned reference's lifetime.
+    ///
+    /// A null `data` with `len == 0` is accepted as an empty string.
+    pub(crate) unsafe fn as_str<'a>(self) -> Result<&'a str, ScahStatus> {
         if self.data.is_null() {
             if self.len == 0 {
                 return Ok("");
             }
             return Err(ScahStatus::NullPointer);
         }
+
+        // SAFETY: guaranteed by the caller of this unsafe helper.
         let bytes = unsafe { slice::from_raw_parts(self.data, self.len) };
         std::str::from_utf8(bytes).map_err(|_| ScahStatus::InvalidUtf8)
     }
@@ -148,7 +164,7 @@ mod tests {
 
     #[test]
     fn empty_null_view_is_ok() {
-        assert_eq!(ScahStringView::empty().to_str().unwrap(), "");
+        assert_eq!(unsafe { ScahStringView::empty().as_str() }.unwrap(), "");
     }
 
     #[test]
@@ -157,7 +173,10 @@ mod tests {
             data: std::ptr::null(),
             len: 3,
         };
-        assert_eq!(view.to_str().unwrap_err(), ScahStatus::NullPointer);
+        assert_eq!(
+            unsafe { view.as_str() }.unwrap_err(),
+            ScahStatus::NullPointer
+        );
     }
 
     #[test]
@@ -167,7 +186,10 @@ mod tests {
             data: bytes.as_ptr(),
             len: bytes.len(),
         };
-        assert_eq!(view.to_str().unwrap_err(), ScahStatus::InvalidUtf8);
+        assert_eq!(
+            unsafe { view.as_str() }.unwrap_err(),
+            ScahStatus::InvalidUtf8
+        );
     }
 
     #[test]

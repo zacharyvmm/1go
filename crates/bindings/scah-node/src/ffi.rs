@@ -17,6 +17,7 @@ pub fn view_to_string(view: ScahStringView) -> String {
     if view.data.is_null() {
         return String::new();
     }
+    // SAFETY: views returned by scah-ffi borrow live handle-owned UTF-8.
     let bytes = unsafe { std::slice::from_raw_parts(view.data, view.len) };
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_owned(),
@@ -39,9 +40,12 @@ pub fn status_to_error(status: ScahStatus, err: *mut ScahError) -> Error {
     let message = if err.is_null() {
         format!("scah-ffi error: {status:?}")
     } else {
-        let view = scah_error_message(err);
+        // SAFETY: `err` is a live scah-ffi error handle.
+        let view = unsafe { scah_error_message(err) };
         let msg = view_to_string(view);
-        scah_error_free(err);
+        unsafe {
+            scah_error_free(err);
+        }
         if msg.is_empty() {
             format!("scah-ffi error: {status:?}")
         } else {
@@ -59,6 +63,8 @@ pub fn status_to_error(status: ScahStatus, err: *mut ScahError) -> Error {
 /// Free an error handle if present (e.g. after manually mapping a known status).
 pub fn free_error(err: *mut ScahError) {
     if !err.is_null() {
-        scah_error_free(err);
+        unsafe {
+            scah_error_free(err);
+        }
     }
 }

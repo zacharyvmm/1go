@@ -18,7 +18,10 @@ pub struct PyQueryBuilder {
 
 impl Drop for PyQueryBuilder {
     fn drop(&mut self) {
-        scah_query_builder_free(self.handle.as_ptr());
+        // SAFETY: handle was returned by scah-ffi and is freed exactly once.
+        unsafe {
+            scah_query_builder_free(self.handle.as_ptr());
+        }
     }
 }
 
@@ -34,12 +37,15 @@ impl PyQueryBuilder {
         save: PySave,
     ) -> PyResult<PyRefMut<'_, Self>> {
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_query_builder_all(
-            slf.handle.as_ptr(),
-            string_view(&selector),
-            save.save,
-            &mut out_error,
-        );
+        // SAFETY: handle is live; selector bytes borrow the local String.
+        let status = unsafe {
+            scah_query_builder_all(
+                slf.handle.as_ptr(),
+                string_view(&selector),
+                save.save,
+                &mut out_error,
+            )
+        };
         map_status(status, out_error)?;
         Ok(slf)
     }
@@ -50,12 +56,14 @@ impl PyQueryBuilder {
         save: PySave,
     ) -> PyResult<PyRefMut<'_, Self>> {
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_query_builder_first(
-            slf.handle.as_ptr(),
-            string_view(&selector),
-            save.save,
-            &mut out_error,
-        );
+        let status = unsafe {
+            scah_query_builder_first(
+                slf.handle.as_ptr(),
+                string_view(&selector),
+                save.save,
+                &mut out_error,
+            )
+        };
         map_status(status, out_error)?;
         Ok(slf)
     }
@@ -66,8 +74,9 @@ impl PyQueryBuilder {
     ) -> PyResult<PyRefMut<'a, Self>> {
         let mut parent: ScahQuerySectionId = 0;
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status =
-            scah_query_builder_current_section(slf.handle.as_ptr(), &mut parent, &mut out_error);
+        let status = unsafe {
+            scah_query_builder_current_section(slf.handle.as_ptr(), &mut parent, &mut out_error)
+        };
         map_status(status, out_error)?;
 
         let factory = PyQueryFactory {};
@@ -76,12 +85,14 @@ impl PyQueryBuilder {
 
         for child in &builders {
             let mut out_error: *mut ScahError = std::ptr::null_mut();
-            let status = scah_query_builder_append(
-                slf.handle.as_ptr(),
-                parent,
-                child.handle.as_ptr(),
-                &mut out_error,
-            );
+            let status = unsafe {
+                scah_query_builder_append(
+                    slf.handle.as_ptr(),
+                    parent,
+                    child.handle.as_ptr(),
+                    &mut out_error,
+                )
+            };
             map_status(status, out_error)?;
         }
 
@@ -91,7 +102,9 @@ impl PyQueryBuilder {
     fn build(&self) -> PyResult<PyQuery> {
         let mut out_query: *mut ScahQuery = std::ptr::null_mut();
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_query_builder_build(self.handle.as_ptr(), &mut out_query, &mut out_error);
+        let status = unsafe {
+            scah_query_builder_build(self.handle.as_ptr(), &mut out_query, &mut out_error)
+        };
         map_status(status, out_error)?;
         Ok(PyQuery {
             handle: NonNull::new(out_query).expect("Ok status with null query"),
@@ -124,7 +137,9 @@ pub struct PyQuery {
 
 impl Drop for PyQuery {
     fn drop(&mut self) {
-        scah_query_free(self.handle.as_ptr());
+        unsafe {
+            scah_query_free(self.handle.as_ptr());
+        }
     }
 }
 
@@ -161,19 +176,23 @@ fn new_root_builder(all: bool, selector: String, save: PySave) -> PyResult<PyQue
     let mut out_builder: *mut ScahQueryBuilder = std::ptr::null_mut();
     let mut out_error: *mut ScahError = std::ptr::null_mut();
     let status = if all {
-        scah_query_all(
-            string_view(&selector),
-            save.save,
-            &mut out_builder,
-            &mut out_error,
-        )
+        unsafe {
+            scah_query_all(
+                string_view(&selector),
+                save.save,
+                &mut out_builder,
+                &mut out_error,
+            )
+        }
     } else {
-        scah_query_first(
-            string_view(&selector),
-            save.save,
-            &mut out_builder,
-            &mut out_error,
-        )
+        unsafe {
+            scah_query_first(
+                string_view(&selector),
+                save.save,
+                &mut out_builder,
+                &mut out_error,
+            )
+        }
     };
     map_status(status, out_error)?;
     Ok(PyQueryBuilder {

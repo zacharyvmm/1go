@@ -16,7 +16,9 @@ pub struct JSStore {
 
 impl Drop for JSStore {
     fn drop(&mut self) {
-        scah_store_free(self.handle.as_ptr());
+        unsafe {
+            scah_store_free(self.handle.as_ptr());
+        }
     }
 }
 
@@ -27,13 +29,15 @@ impl JSStore {
         let mut list: *mut ScahElementList = null_mut();
         let mut found = 0u8;
         let mut err = null_mut();
-        let status = scah_store_get(
-            self.handle.as_ptr(),
-            string_view(&query),
-            &mut list,
-            &mut found,
-            &mut err,
-        );
+        let status = unsafe {
+            scah_store_get(
+                self.handle.as_ptr(),
+                string_view(&query),
+                &mut list,
+                &mut found,
+                &mut err,
+            )
+        };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -47,7 +51,7 @@ impl JSStore {
     pub fn length(&self) -> Result<i64> {
         let mut len = 0usize;
         let mut err = null_mut();
-        let status = scah_store_len(self.handle.as_ptr(), &mut len, &mut err);
+        let status = unsafe { scah_store_len(self.handle.as_ptr(), &mut len, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }

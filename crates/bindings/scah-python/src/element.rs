@@ -23,7 +23,9 @@ pub struct PyElement {
 
 impl Drop for PyElement {
     fn drop(&mut self) {
-        scah_element_free(self.handle.as_ptr());
+        unsafe {
+            scah_element_free(self.handle.as_ptr());
+        }
     }
 }
 
@@ -40,8 +42,10 @@ impl PyElement {
             len: 0,
         };
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_name(self.handle.as_ptr(), &mut out, &mut out_error);
-        scah_error_free(out_error);
+        let status = unsafe { scah_element_name(self.handle.as_ptr(), &mut out, &mut out_error) };
+        unsafe {
+            scah_error_free(out_error);
+        }
         if status != ScahStatus::Ok {
             return None;
         }
@@ -58,8 +62,11 @@ impl PyElement {
             is_some: 0,
         };
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_class_name(self.handle.as_ptr(), &mut out, &mut out_error);
-        scah_error_free(out_error);
+        let status =
+            unsafe { scah_element_class_name(self.handle.as_ptr(), &mut out, &mut out_error) };
+        unsafe {
+            scah_error_free(out_error);
+        }
         if status != ScahStatus::Ok {
             return None;
         }
@@ -76,8 +83,10 @@ impl PyElement {
             is_some: 0,
         };
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_id(self.handle.as_ptr(), &mut out, &mut out_error);
-        scah_error_free(out_error);
+        let status = unsafe { scah_element_id(self.handle.as_ptr(), &mut out, &mut out_error) };
+        unsafe {
+            scah_error_free(out_error);
+        }
         if status != ScahStatus::Ok {
             return None;
         }
@@ -93,13 +102,17 @@ impl PyElement {
             is_some: 0,
         };
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_get_attribute(
-            self.handle.as_ptr(),
-            string_view(&key),
-            &mut out,
-            &mut out_error,
-        );
-        scah_error_free(out_error);
+        let status = unsafe {
+            scah_element_get_attribute(
+                self.handle.as_ptr(),
+                string_view(&key),
+                &mut out,
+                &mut out_error,
+            )
+        };
+        unsafe {
+            scah_error_free(out_error);
+        }
         if status != ScahStatus::Ok {
             return None;
         }
@@ -111,7 +124,9 @@ impl PyElement {
         let object = PyDict::new(py);
         let mut count = 0usize;
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_attribute_count(self.handle.as_ptr(), &mut count, &mut out_error);
+        let status = unsafe {
+            scah_element_attribute_count(self.handle.as_ptr(), &mut count, &mut out_error)
+        };
         map_status(status, out_error)?;
 
         for i in 0..count {
@@ -124,13 +139,15 @@ impl PyElement {
                 len: 0,
             };
             let mut out_error: *mut ScahError = std::ptr::null_mut();
-            let status = scah_element_attribute_at(
-                self.handle.as_ptr(),
-                i,
-                &mut key,
-                &mut value,
-                &mut out_error,
-            );
+            let status = unsafe {
+                scah_element_attribute_at(
+                    self.handle.as_ptr(),
+                    i,
+                    &mut key,
+                    &mut value,
+                    &mut out_error,
+                )
+            };
             map_status(status, out_error)?;
             object.set_item(view_to_string(key), view_to_option_string(value))?;
         }
@@ -147,8 +164,11 @@ impl PyElement {
             is_some: 0,
         };
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_inner_html(self.handle.as_ptr(), &mut out, &mut out_error);
-        scah_error_free(out_error);
+        let status =
+            unsafe { scah_element_inner_html(self.handle.as_ptr(), &mut out, &mut out_error) };
+        unsafe {
+            scah_error_free(out_error);
+        }
         if status != ScahStatus::Ok {
             return None;
         }
@@ -165,8 +185,11 @@ impl PyElement {
             is_some: 0,
         };
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_text_content(self.handle.as_ptr(), &mut out, &mut out_error);
-        scah_error_free(out_error);
+        let status =
+            unsafe { scah_element_text_content(self.handle.as_ptr(), &mut out, &mut out_error) };
+        unsafe {
+            scah_error_free(out_error);
+        }
         if status != ScahStatus::Ok {
             return None;
         }
@@ -177,13 +200,15 @@ impl PyElement {
         let mut out_elements: *mut ScahElementList = std::ptr::null_mut();
         let mut out_found = 0u8;
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_get(
-            self.handle.as_ptr(),
-            string_view(&query),
-            &mut out_elements,
-            &mut out_found,
-            &mut out_error,
-        );
+        let status = unsafe {
+            scah_element_get(
+                self.handle.as_ptr(),
+                string_view(&query),
+                &mut out_elements,
+                &mut out_found,
+                &mut out_error,
+            )
+        };
         map_status(status, out_error)?;
         if out_found == 0 {
             return Err(PyValueError::new_err(format!(
@@ -225,7 +250,9 @@ pub(crate) struct PyStore {
 
 impl Drop for PyStore {
     fn drop(&mut self) {
-        scah_store_free(self.handle.as_ptr());
+        unsafe {
+            scah_store_free(self.handle.as_ptr());
+        }
     }
 }
 
@@ -239,13 +266,15 @@ impl PyStore {
         let mut out_elements: *mut ScahElementList = std::ptr::null_mut();
         let mut out_found = 0u8;
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_store_get(
-            self.handle.as_ptr(),
-            string_view(&query),
-            &mut out_elements,
-            &mut out_found,
-            &mut out_error,
-        );
+        let status = unsafe {
+            scah_store_get(
+                self.handle.as_ptr(),
+                string_view(&query),
+                &mut out_elements,
+                &mut out_found,
+                &mut out_error,
+            )
+        };
         map_status(status, out_error)?;
         if out_found == 0 {
             return Ok(None);
@@ -256,8 +285,10 @@ impl PyStore {
     fn __len__(&self) -> usize {
         let mut len = 0usize;
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_store_len(self.handle.as_ptr(), &mut len, &mut out_error);
-        scah_error_free(out_error);
+        let status = unsafe { scah_store_len(self.handle.as_ptr(), &mut len, &mut out_error) };
+        unsafe {
+            scah_error_free(out_error);
+        }
         if status != ScahStatus::Ok {
             return 0;
         }
@@ -268,9 +299,11 @@ impl PyStore {
 fn element_list_to_vec(list: *mut ScahElementList) -> PyResult<Vec<PyElement>> {
     let mut len = 0usize;
     let mut out_error: *mut ScahError = std::ptr::null_mut();
-    let status = scah_element_list_len(list, &mut len, &mut out_error);
+    let status = unsafe { scah_element_list_len(list, &mut len, &mut out_error) };
     if let Err(e) = map_status(status, out_error) {
-        scah_element_list_free(list);
+        unsafe {
+            scah_element_list_free(list);
+        }
         return Err(e);
     }
 
@@ -278,15 +311,19 @@ fn element_list_to_vec(list: *mut ScahElementList) -> PyResult<Vec<PyElement>> {
     for i in 0..len {
         let mut out_element: *mut ScahElement = std::ptr::null_mut();
         let mut out_error: *mut ScahError = std::ptr::null_mut();
-        let status = scah_element_list_get(list, i, &mut out_element, &mut out_error);
+        let status = unsafe { scah_element_list_get(list, i, &mut out_element, &mut out_error) };
         if let Err(e) = map_status(status, out_error) {
-            scah_element_list_free(list);
+            unsafe {
+                scah_element_list_free(list);
+            }
             return Err(e);
         }
         result.push(PyElement {
             handle: NonNull::new(out_element).expect("Ok status with null element"),
         });
     }
-    scah_element_list_free(list);
+    unsafe {
+        scah_element_list_free(list);
+    }
     Ok(result)
 }

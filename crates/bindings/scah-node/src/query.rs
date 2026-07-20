@@ -76,7 +76,7 @@ fn save_or_none(save: Option<JsSave>) -> ScahSave {
 fn new_root_all(selector: &str, save: ScahSave) -> Result<JsQueryBuilder> {
     let mut out: *mut ScahQueryBuilder = null_mut();
     let mut err = null_mut();
-    let status = scah_query_all(string_view(selector), save, &mut out, &mut err);
+    let status = unsafe { scah_query_all(string_view(selector), save, &mut out, &mut err) };
     if status != ScahStatus::Ok {
         return Err(status_to_error(status, err));
     }
@@ -89,7 +89,7 @@ fn new_root_all(selector: &str, save: ScahSave) -> Result<JsQueryBuilder> {
 fn new_root_first(selector: &str, save: ScahSave) -> Result<JsQueryBuilder> {
     let mut out: *mut ScahQueryBuilder = null_mut();
     let mut err = null_mut();
-    let status = scah_query_first(string_view(selector), save, &mut out, &mut err);
+    let status = unsafe { scah_query_first(string_view(selector), save, &mut out, &mut err) };
     if status != ScahStatus::Ok {
         return Err(status_to_error(status, err));
     }
@@ -103,7 +103,7 @@ fn new_root_first(selector: &str, save: ScahSave) -> Result<JsQueryBuilder> {
 fn clone_builder(handle: NonNull<ScahQueryBuilder>) -> Result<JsQueryBuilder> {
     let mut out: *mut ScahQueryBuilder = null_mut();
     let mut err = null_mut();
-    let status = scah_query_builder_clone(handle.as_ptr(), &mut out, &mut err);
+    let status = unsafe { scah_query_builder_clone(handle.as_ptr(), &mut out, &mut err) };
     if status != ScahStatus::Ok {
         return Err(status_to_error(status, err));
     }
@@ -121,7 +121,9 @@ pub struct JsQueryBuilder {
 
 impl Drop for JsQueryBuilder {
     fn drop(&mut self) {
-        scah_query_builder_free(self.handle.as_ptr());
+        unsafe {
+            scah_query_builder_free(self.handle.as_ptr());
+        }
     }
 }
 
@@ -130,12 +132,14 @@ impl JsQueryBuilder {
     #[napi]
     pub fn all(&mut self, selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
         let mut err = null_mut();
-        let status = scah_query_builder_all(
-            self.handle.as_ptr(),
-            string_view(&selector),
-            save_or_none(save),
-            &mut err,
-        );
+        let status = unsafe {
+            scah_query_builder_all(
+                self.handle.as_ptr(),
+                string_view(&selector),
+                save_or_none(save),
+                &mut err,
+            )
+        };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -145,12 +149,14 @@ impl JsQueryBuilder {
     #[napi]
     pub fn first(&mut self, selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
         let mut err = null_mut();
-        let status = scah_query_builder_first(
-            self.handle.as_ptr(),
-            string_view(&selector),
-            save_or_none(save),
-            &mut err,
-        );
+        let status = unsafe {
+            scah_query_builder_first(
+                self.handle.as_ptr(),
+                string_view(&selector),
+                save_or_none(save),
+                &mut err,
+            )
+        };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -164,8 +170,9 @@ impl JsQueryBuilder {
     ) -> Result<JsQueryBuilder> {
         let mut parent: ScahQuerySectionId = 0;
         let mut err = null_mut();
-        let status =
-            scah_query_builder_current_section(self.handle.as_ptr(), &mut parent, &mut err);
+        let status = unsafe {
+            scah_query_builder_current_section(self.handle.as_ptr(), &mut parent, &mut err)
+        };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -175,12 +182,14 @@ impl JsQueryBuilder {
 
         for child in &builders {
             let mut err = null_mut();
-            let status = scah_query_builder_append(
-                self.handle.as_ptr(),
-                parent,
-                child.handle.as_ptr(),
-                &mut err,
-            );
+            let status = unsafe {
+                scah_query_builder_append(
+                    self.handle.as_ptr(),
+                    parent,
+                    child.handle.as_ptr(),
+                    &mut err,
+                )
+            };
             if status != ScahStatus::Ok {
                 return Err(status_to_error(status, err));
             }
@@ -193,7 +202,7 @@ impl JsQueryBuilder {
     pub fn build(&self) -> Result<JsQuery> {
         let mut out: *mut ScahQuery = null_mut();
         let mut err = null_mut();
-        let status = scah_query_builder_build(self.handle.as_ptr(), &mut out, &mut err);
+        let status = unsafe { scah_query_builder_build(self.handle.as_ptr(), &mut out, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -231,7 +240,9 @@ pub struct JsQuery {
 
 impl Drop for JsQuery {
     fn drop(&mut self) {
-        scah_query_free(self.handle.as_ptr());
+        unsafe {
+            scah_query_free(self.handle.as_ptr());
+        }
     }
 }
 

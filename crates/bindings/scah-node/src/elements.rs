@@ -21,9 +21,11 @@ pub(crate) fn take_element_list(list: *mut ScahElementList) -> Result<Vec<JsElem
 
     let mut len = 0usize;
     let mut err = null_mut();
-    let status = scah_element_list_len(list, &mut len, &mut err);
+    let status = unsafe { scah_element_list_len(list, &mut len, &mut err) };
     if status != ScahStatus::Ok {
-        scah_element_list_free(list);
+        unsafe {
+            scah_element_list_free(list);
+        }
         return Err(status_to_error(status, err));
     }
 
@@ -31,15 +33,19 @@ pub(crate) fn take_element_list(list: *mut ScahElementList) -> Result<Vec<JsElem
     for i in 0..len {
         let mut out: *mut ScahElement = null_mut();
         let mut err = null_mut();
-        let status = scah_element_list_get(list, i, &mut out, &mut err);
+        let status = unsafe { scah_element_list_get(list, i, &mut out, &mut err) };
         if status != ScahStatus::Ok {
-            scah_element_list_free(list);
+            unsafe {
+                scah_element_list_free(list);
+            }
             return Err(status_to_error(status, err));
         }
         let handle = match NonNull::new(out) {
             Some(h) => h,
             None => {
-                scah_element_list_free(list);
+                unsafe {
+                    scah_element_list_free(list);
+                }
                 return Err(Error::from_reason(
                     "scah_element_list_get returned null element".to_owned(),
                 ));
@@ -48,7 +54,9 @@ pub(crate) fn take_element_list(list: *mut ScahElementList) -> Result<Vec<JsElem
         elements.push(JsElement { handle });
     }
 
-    scah_element_list_free(list);
+    unsafe {
+        scah_element_list_free(list);
+    }
     Ok(elements)
 }
 
@@ -69,7 +77,9 @@ pub struct JsElement {
 
 impl Drop for JsElement {
     fn drop(&mut self) {
-        scah_element_free(self.handle.as_ptr());
+        unsafe {
+            scah_element_free(self.handle.as_ptr());
+        }
     }
 }
 
@@ -94,7 +104,7 @@ impl JsElement {
             len: 0,
         };
         let mut err = null_mut();
-        let status = scah_element_name(self.handle.as_ptr(), &mut view, &mut err);
+        let status = unsafe { scah_element_name(self.handle.as_ptr(), &mut view, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -111,7 +121,7 @@ impl JsElement {
             is_some: 0,
         };
         let mut err = null_mut();
-        let status = scah_element_class_name(self.handle.as_ptr(), &mut opt, &mut err);
+        let status = unsafe { scah_element_class_name(self.handle.as_ptr(), &mut opt, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -128,7 +138,7 @@ impl JsElement {
             is_some: 0,
         };
         let mut err = null_mut();
-        let status = scah_element_id(self.handle.as_ptr(), &mut opt, &mut err);
+        let status = unsafe { scah_element_id(self.handle.as_ptr(), &mut opt, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -145,8 +155,9 @@ impl JsElement {
             is_some: 0,
         };
         let mut err = null_mut();
-        let status =
-            scah_element_get_attribute(self.handle.as_ptr(), string_view(&key), &mut opt, &mut err);
+        let status = unsafe {
+            scah_element_get_attribute(self.handle.as_ptr(), string_view(&key), &mut opt, &mut err)
+        };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -159,7 +170,8 @@ impl JsElement {
 
         let mut count = 0usize;
         let mut err = null_mut();
-        let status = scah_element_attribute_count(self.handle.as_ptr(), &mut count, &mut err);
+        let status =
+            unsafe { scah_element_attribute_count(self.handle.as_ptr(), &mut count, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -174,8 +186,9 @@ impl JsElement {
                 len: 0,
             };
             let mut err = null_mut();
-            let status =
-                scah_element_attribute_at(self.handle.as_ptr(), i, &mut key, &mut value, &mut err);
+            let status = unsafe {
+                scah_element_attribute_at(self.handle.as_ptr(), i, &mut key, &mut value, &mut err)
+            };
             if status != ScahStatus::Ok {
                 return Err(status_to_error(status, err));
             }
@@ -195,7 +208,7 @@ impl JsElement {
             is_some: 0,
         };
         let mut err = null_mut();
-        let status = scah_element_inner_html(self.handle.as_ptr(), &mut opt, &mut err);
+        let status = unsafe { scah_element_inner_html(self.handle.as_ptr(), &mut opt, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -212,7 +225,7 @@ impl JsElement {
             is_some: 0,
         };
         let mut err = null_mut();
-        let status = scah_element_text_content(self.handle.as_ptr(), &mut opt, &mut err);
+        let status = unsafe { scah_element_text_content(self.handle.as_ptr(), &mut opt, &mut err) };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }
@@ -224,13 +237,15 @@ impl JsElement {
         let mut list: *mut ScahElementList = null_mut();
         let mut found = 0u8;
         let mut err = null_mut();
-        let status = scah_element_get(
-            self.handle.as_ptr(),
-            string_view(&query),
-            &mut list,
-            &mut found,
-            &mut err,
-        );
+        let status = unsafe {
+            scah_element_get(
+                self.handle.as_ptr(),
+                string_view(&query),
+                &mut list,
+                &mut found,
+                &mut err,
+            )
+        };
         if status != ScahStatus::Ok {
             return Err(status_to_error(status, err));
         }

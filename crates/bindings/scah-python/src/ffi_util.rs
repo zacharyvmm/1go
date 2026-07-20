@@ -18,6 +18,7 @@ pub fn view_to_string(view: ScahStringView) -> String {
     if view.data.is_null() || view.len == 0 {
         return String::new();
     }
+    // SAFETY: views returned by scah-ffi borrow live handle-owned UTF-8.
     unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(view.data, view.len)).into_owned() }
 }
 
@@ -44,8 +45,11 @@ pub fn take_error_message(err: *mut ScahError) -> String {
     if err.is_null() {
         return String::new();
     }
-    let msg = view_to_string(scah_error_message(err));
-    scah_error_free(err);
+    // SAFETY: `err` is a live scah-ffi error handle owned by the caller.
+    let msg = view_to_string(unsafe { scah_error_message(err) });
+    unsafe {
+        scah_error_free(err);
+    }
     msg
 }
 
@@ -53,7 +57,10 @@ pub fn map_status(status: ScahStatus, err: *mut ScahError) -> PyResult<()> {
     if status == ScahStatus::Ok {
         // Clear any leftover error slot just in case.
         if !err.is_null() {
-            scah_error_free(err);
+            // SAFETY: leftover error handles from Ok paths are still owned.
+            unsafe {
+                scah_error_free(err);
+            }
         }
         return Ok(());
     }

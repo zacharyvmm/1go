@@ -24,13 +24,16 @@ fn parse(html: String, queries: Vec<Reference<JsQuery>>) -> Result<JSStore> {
 
     let mut out: *mut ScahStore = null_mut();
     let mut err = null_mut();
-    let status = scah_parse(
-        string_view(&html),
-        query_ptrs.as_ptr(),
-        query_ptrs.len(),
-        &mut out,
-        &mut err,
-    );
+    // SAFETY: html and query handles remain live for the duration of the call.
+    let status = unsafe {
+        scah_parse(
+            string_view(&html),
+            query_ptrs.as_ptr(),
+            query_ptrs.len(),
+            &mut out,
+            &mut err,
+        )
+    };
 
     match status {
         ScahStatus::Ok => {

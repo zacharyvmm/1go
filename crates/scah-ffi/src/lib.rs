@@ -14,8 +14,6 @@
 //! strings until build; compiled queries own a selector tape; stores own HTML
 //! and query backing storage; elements retain their store.
 
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
-
 mod error;
 mod owned_query;
 mod owned_store;

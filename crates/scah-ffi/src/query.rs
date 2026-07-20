@@ -19,23 +19,34 @@ pub struct ScahQuery {
 /// Section identifier within a query builder tree.
 pub type ScahQuerySectionId = usize;
 
-fn require_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, ScahStatus> {
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `T` for the returned lifetime.
+unsafe fn require_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, ScahStatus> {
     if ptr.is_null() {
         Err(ScahStatus::NullPointer)
     } else {
+        // SAFETY: caller guarantees a live, uniquely borrowed `T`.
         Ok(unsafe { &mut *ptr })
     }
 }
 
-fn require_ref<'a, T>(ptr: *const T) -> Result<&'a T, ScahStatus> {
+/// # Safety
+///
+/// `ptr` must be non-null and point to a live `T` for the returned lifetime.
+unsafe fn require_ref<'a, T>(ptr: *const T) -> Result<&'a T, ScahStatus> {
     if ptr.is_null() {
         Err(ScahStatus::NullPointer)
     } else {
+        // SAFETY: caller guarantees a live `T`.
         Ok(unsafe { &*ptr })
     }
 }
 
-fn write_ptr<T>(out: *mut *mut T, value: Box<T>) -> Result<(), ScahStatus> {
+/// # Safety
+///
+/// When `out` is non-null, it must be valid for writing one `*mut T`.
+unsafe fn write_ptr<T>(out: *mut *mut T, value: Box<T>) -> Result<(), ScahStatus> {
     if out.is_null() {
         return Err(ScahStatus::NullPointer);
     }
@@ -45,18 +56,38 @@ fn write_ptr<T>(out: *mut *mut T, value: Box<T>) -> Result<(), ScahStatus> {
     Ok(())
 }
 
-fn parse_selector(
+/// # Safety
+///
+/// When `out` is non-null, it must be valid for writing one `*mut T`.
+unsafe fn clear_out_ptr<T>(out: *mut *mut T) {
+    if !out.is_null() {
+        unsafe {
+            *out = std::ptr::null_mut();
+        }
+    }
+}
+
+/// # Safety
+///
+/// `selector` must satisfy [`ScahStringView::as_str`]. When `out_error` is
+/// non-null, it must be valid for writing one `*mut ScahError`.
+unsafe fn parse_selector(
     selector: ScahStringView,
     out_error: *mut *mut ScahError,
 ) -> Result<String, ScahStatus> {
-    match selector.to_str() {
+    // SAFETY: caller guarantees the string-view contract.
+    match unsafe { selector.as_str() } {
         Ok(s) => Ok(s.to_owned()),
         Err(ScahStatus::NullPointer) => {
-            set_error(out_error, "null string pointer with nonzero length");
+            unsafe {
+                set_error(out_error, "null string pointer with nonzero length");
+            }
             Err(ScahStatus::NullPointer)
         }
         Err(ScahStatus::InvalidUtf8) => {
-            set_error(out_error, "string view is not valid UTF-8");
+            unsafe {
+                set_error(out_error, "string view is not valid UTF-8");
+            }
             Err(ScahStatus::InvalidUtf8)
         }
         Err(other) => Err(other),
@@ -66,170 +97,246 @@ fn parse_selector(
 /// Create a root builder that matches all occurrences of `selector`.
 ///
 /// The selector is not validated until [`scah_query_builder_build`].
+///
+/// # Safety
+///
+/// `selector` must satisfy [`ScahStringView::as_str`]. `out_builder` must be
+/// non-null and valid for writing one `*mut ScahQueryBuilder`. When
+/// `out_error` is non-null, it must be valid for writing one `*mut ScahError`.
+/// On success the caller owns the returned builder and must free it with
+/// [`scah_query_builder_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_all(
+pub unsafe extern "C" fn scah_query_all(
     selector: ScahStringView,
     save: ScahSave,
     out_builder: *mut *mut ScahQueryBuilder,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let selector = parse_selector(selector, out_error)?;
-        let builder = Box::new(ScahQueryBuilder {
-            inner: OwnedQueryBuilder::new_all(selector, save.to_save()),
-        });
-        write_ptr(out_builder, builder)?;
-        Ok(())
-    })
+    unsafe {
+        clear_out_ptr(out_builder);
+        ffi_guard(out_error, || {
+            let selector = parse_selector(selector, out_error)?;
+            let builder = Box::new(ScahQueryBuilder {
+                inner: OwnedQueryBuilder::new_all(selector, save.to_save()),
+            });
+            write_ptr(out_builder, builder)?;
+            Ok(())
+        })
+    }
 }
 
 /// Create a root builder that matches the first occurrence of `selector`.
+///
+/// # Safety
+///
+/// Same requirements as [`scah_query_all`].
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_first(
+pub unsafe extern "C" fn scah_query_first(
     selector: ScahStringView,
     save: ScahSave,
     out_builder: *mut *mut ScahQueryBuilder,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let selector = parse_selector(selector, out_error)?;
-        let builder = Box::new(ScahQueryBuilder {
-            inner: OwnedQueryBuilder::new_first(selector, save.to_save()),
-        });
-        write_ptr(out_builder, builder)?;
-        Ok(())
-    })
+    unsafe {
+        clear_out_ptr(out_builder);
+        ffi_guard(out_error, || {
+            let selector = parse_selector(selector, out_error)?;
+            let builder = Box::new(ScahQueryBuilder {
+                inner: OwnedQueryBuilder::new_first(selector, save.to_save()),
+            });
+            write_ptr(out_builder, builder)?;
+            Ok(())
+        })
+    }
 }
 
 /// Append a linear `all` child under the builder's current last section.
+///
+/// # Safety
+///
+/// `builder` must point to a live [`ScahQueryBuilder`]. `selector` must satisfy
+/// [`ScahStringView::as_str`]. When `out_error` is non-null, it must be valid
+/// for writing one `*mut ScahError`.
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_builder_all(
+pub unsafe extern "C" fn scah_query_builder_all(
     builder: *mut ScahQueryBuilder,
     selector: ScahStringView,
     save: ScahSave,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let builder = require_mut(builder)?;
-        let selector = parse_selector(selector, out_error)?;
-        builder.inner.all_mut(selector, save.to_save());
-        Ok(())
-    })
+    unsafe {
+        ffi_guard(out_error, || {
+            let builder = require_mut(builder)?;
+            let selector = parse_selector(selector, out_error)?;
+            builder.inner.all_mut(selector, save.to_save());
+            Ok(())
+        })
+    }
 }
 
 /// Append a linear `first` child under the builder's current last section.
+///
+/// # Safety
+///
+/// Same requirements as [`scah_query_builder_all`].
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_builder_first(
+pub unsafe extern "C" fn scah_query_builder_first(
     builder: *mut ScahQueryBuilder,
     selector: ScahStringView,
     save: ScahSave,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let builder = require_mut(builder)?;
-        let selector = parse_selector(selector, out_error)?;
-        builder.inner.first_mut(selector, save.to_save());
-        Ok(())
-    })
+    unsafe {
+        ffi_guard(out_error, || {
+            let builder = require_mut(builder)?;
+            let selector = parse_selector(selector, out_error)?;
+            builder.inner.first_mut(selector, save.to_save());
+            Ok(())
+        })
+    }
 }
 
 /// Return the current (last) section id for subsequent [`scah_query_builder_append`] calls.
+///
+/// # Safety
+///
+/// `builder` must either be null (returns [`ScahStatus::NullPointer`]) or point
+/// to a live [`ScahQueryBuilder`]. `out_section` must be non-null and valid for
+/// writing one [`ScahQuerySectionId`]. When `out_error` is non-null, it must be
+/// valid for writing one `*mut ScahError`.
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_builder_current_section(
+pub unsafe extern "C" fn scah_query_builder_current_section(
     builder: *const ScahQueryBuilder,
     out_section: *mut ScahQuerySectionId,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let builder = require_ref(builder)?;
-        if out_section.is_null() {
-            return Err(ScahStatus::NullPointer);
-        }
-        match builder.inner.current_section() {
-            Some(section) => {
-                unsafe {
+    unsafe {
+        ffi_guard(out_error, || {
+            let builder = require_ref(builder)?;
+            if out_section.is_null() {
+                return Err(ScahStatus::NullPointer);
+            }
+            match builder.inner.current_section() {
+                Some(section) => {
                     *out_section = section.index();
+                    Ok(())
                 }
-                Ok(())
+                None => {
+                    set_error(out_error, "query builder has no sections");
+                    Err(ScahStatus::InvalidSection)
+                }
             }
-            None => {
-                set_error(out_error, "query builder has no sections");
-                Err(ScahStatus::InvalidSection)
-            }
-        }
-    })
+        })
+    }
 }
 
 /// Clone `child` under `parent` without consuming either builder.
+///
+/// # Safety
+///
+/// `builder` must point to a live mutable [`ScahQueryBuilder`]. `child` must
+/// point to a live [`ScahQueryBuilder`]. When `out_error` is non-null, it must
+/// be valid for writing one `*mut ScahError`.
+///
+/// Self-append (`builder == child`) is permitted: the child tree is cloned
+/// before the mutable append begins.
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_builder_append(
+pub unsafe extern "C" fn scah_query_builder_append(
     builder: *mut ScahQueryBuilder,
     parent: ScahQuerySectionId,
     child: *const ScahQueryBuilder,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let builder = require_mut(builder)?;
-        let child = require_ref(child)?;
-        match builder.inner.append(QuerySectionId(parent), &child.inner) {
-            Ok(()) => Ok(()),
-            Err(()) => {
-                set_error(out_error, "invalid parent query section");
-                Err(ScahStatus::InvalidSection)
+    unsafe {
+        ffi_guard(out_error, || {
+            let builder = require_mut(builder)?;
+            let child = require_ref(child)?;
+            match builder.inner.append(QuerySectionId(parent), &child.inner) {
+                Ok(()) => Ok(()),
+                Err(()) => {
+                    set_error(out_error, "invalid parent query section");
+                    Err(ScahStatus::InvalidSection)
+                }
             }
-        }
-    })
+        })
+    }
 }
 
 /// Compile the builder into a query. Does not consume the builder.
+///
+/// # Safety
+///
+/// `builder` must point to a live [`ScahQueryBuilder`]. `out_query` must be
+/// non-null and valid for writing one `*mut ScahQuery`. When `out_error` is
+/// non-null, it must be valid for writing one `*mut ScahError`. On success the
+/// caller owns the returned query and must free it with [`scah_query_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_builder_build(
+pub unsafe extern "C" fn scah_query_builder_build(
     builder: *const ScahQueryBuilder,
     out_query: *mut *mut ScahQuery,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let builder = require_ref(builder)?;
-        match builder.inner.build() {
-            Ok(owned) => {
-                let query = Box::new(ScahQuery {
-                    inner: Arc::new(owned),
-                });
-                write_ptr(out_query, query)?;
-                Ok(())
+    unsafe {
+        clear_out_ptr(out_query);
+        ffi_guard(out_error, || {
+            let builder = require_ref(builder)?;
+            match builder.inner.build() {
+                Ok(owned) => {
+                    let query = Box::new(ScahQuery {
+                        inner: Arc::new(owned),
+                    });
+                    write_ptr(out_query, query)?;
+                    Ok(())
+                }
+                Err(err) => {
+                    set_error(out_error, err.to_string());
+                    Err(ScahStatus::InvalidSelector)
+                }
             }
-            Err(err) => {
-                set_error(out_error, err.to_string());
-                Err(ScahStatus::InvalidSelector)
-            }
-        }
-    })
+        })
+    }
 }
 
 /// Deep-clone a builder handle.
+///
+/// # Safety
+///
+/// `builder` must point to a live [`ScahQueryBuilder`]. `out_builder` must be
+/// non-null and valid for writing one `*mut ScahQueryBuilder`. When `out_error`
+/// is non-null, it must be valid for writing one `*mut ScahError`. On success
+/// the caller owns the clone and must free it with [`scah_query_builder_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_builder_clone(
+pub unsafe extern "C" fn scah_query_builder_clone(
     builder: *const ScahQueryBuilder,
     out_builder: *mut *mut ScahQueryBuilder,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    ffi_guard(out_error, || {
-        let builder = require_ref(builder)?;
-        let cloned = Box::new(ScahQueryBuilder {
-            inner: builder.inner.clone(),
-        });
-        write_ptr(out_builder, cloned)?;
-        Ok(())
-    })
+    unsafe {
+        clear_out_ptr(out_builder);
+        ffi_guard(out_error, || {
+            let builder = require_ref(builder)?;
+            let cloned = Box::new(ScahQueryBuilder {
+                inner: builder.inner.clone(),
+            });
+            write_ptr(out_builder, cloned)?;
+            Ok(())
+        })
+    }
 }
 
 /// Free a builder handle. Null is a no-op.
+///
+/// # Safety
+///
+/// A non-null `builder` must have been returned by scah-ffi, must not already
+/// have been freed, and must not be used again after this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_builder_free(builder: *mut ScahQueryBuilder) {
+pub unsafe extern "C" fn scah_query_builder_free(builder: *mut ScahQueryBuilder) {
     ffi_guard_void(|| {
         if builder.is_null() {
             return;
         }
+        // SAFETY: caller guarantees ownership of a live builder.
         unsafe {
             drop(Box::from_raw(builder));
         }
@@ -237,12 +344,18 @@ pub extern "C" fn scah_query_builder_free(builder: *mut ScahQueryBuilder) {
 }
 
 /// Free a query handle. Null is a no-op.
+///
+/// # Safety
+///
+/// A non-null `query` must have been returned by scah-ffi, must not already
+/// have been freed, and must not be used again after this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn scah_query_free(query: *mut ScahQuery) {
+pub unsafe extern "C" fn scah_query_free(query: *mut ScahQuery) {
     ffi_guard_void(|| {
         if query.is_null() {
             return;
         }
+        // SAFETY: caller guarantees ownership of a live query.
         unsafe {
             drop(Box::from_raw(query));
         }
@@ -262,10 +375,13 @@ mod tests {
     #[test]
     fn null_builder_returns_null_pointer() {
         let mut err: *mut ScahError = std::ptr::null_mut();
-        let status =
-            scah_query_builder_all(std::ptr::null_mut(), view("a"), scah_save_all(), &mut err);
+        let status = unsafe {
+            scah_query_builder_all(std::ptr::null_mut(), view("a"), scah_save_all(), &mut err)
+        };
         assert_eq!(status, ScahStatus::NullPointer);
-        scah_error_free(err);
+        unsafe {
+            scah_error_free(err);
+        }
     }
 
     #[test]
@@ -273,16 +389,18 @@ mod tests {
         let mut builder: *mut ScahQueryBuilder = std::ptr::null_mut();
         let mut err: *mut ScahError = std::ptr::null_mut();
         assert_eq!(
-            scah_query_all(view(""), scah_save_all(), &mut builder, &mut err),
+            unsafe { scah_query_all(view(""), scah_save_all(), &mut builder, &mut err) },
             ScahStatus::Ok
         );
         let mut query: *mut ScahQuery = std::ptr::null_mut();
-        let status = scah_query_builder_build(builder, &mut query, &mut err);
+        let status = unsafe { scah_query_builder_build(builder, &mut query, &mut err) };
         assert_eq!(status, ScahStatus::InvalidSelector);
         assert!(!err.is_null());
-        scah_error_free(err);
-        scah_query_builder_free(builder);
-        scah_query_free(query);
+        unsafe {
+            scah_error_free(err);
+            scah_query_builder_free(builder);
+            scah_query_free(query);
+        }
     }
 
     #[test]
@@ -290,19 +408,25 @@ mod tests {
         let mut builder: *mut ScahQueryBuilder = std::ptr::null_mut();
         let mut child: *mut ScahQueryBuilder = std::ptr::null_mut();
         let mut err: *mut ScahError = std::ptr::null_mut();
-        scah_query_all(view("div"), scah_save_all(), &mut builder, &mut err);
-        scah_query_all(view("span"), scah_save_none(), &mut child, &mut err);
-        let status = scah_query_builder_append(builder, 99, child, &mut err);
+        unsafe {
+            scah_query_all(view("div"), scah_save_all(), &mut builder, &mut err);
+            scah_query_all(view("span"), scah_save_none(), &mut child, &mut err);
+        }
+        let status = unsafe { scah_query_builder_append(builder, 99, child, &mut err) };
         assert_eq!(status, ScahStatus::InvalidSection);
-        scah_error_free(err);
-        scah_query_builder_free(builder);
-        scah_query_builder_free(child);
+        unsafe {
+            scah_error_free(err);
+            scah_query_builder_free(builder);
+            scah_query_builder_free(child);
+        }
     }
 
     #[test]
     fn free_null_ok() {
-        scah_query_builder_free(std::ptr::null_mut());
-        scah_query_free(std::ptr::null_mut());
+        unsafe {
+            scah_query_builder_free(std::ptr::null_mut());
+            scah_query_free(std::ptr::null_mut());
+        }
     }
 
     #[test]
@@ -310,20 +434,24 @@ mod tests {
         let mut root: *mut ScahQueryBuilder = std::ptr::null_mut();
         let mut child: *mut ScahQueryBuilder = std::ptr::null_mut();
         let mut err: *mut ScahError = std::ptr::null_mut();
-        scah_query_all(view("main"), scah_save_all(), &mut root, &mut err);
-        scah_query_all(view("a"), scah_save_all(), &mut child, &mut err);
+        unsafe {
+            scah_query_all(view("main"), scah_save_all(), &mut root, &mut err);
+            scah_query_all(view("a"), scah_save_all(), &mut child, &mut err);
+        }
         let mut parent = 0usize;
-        scah_query_builder_current_section(root, &mut parent, &mut err);
-        scah_query_builder_append(root, parent, child, &mut err);
+        unsafe {
+            scah_query_builder_current_section(root, &mut parent, &mut err);
+            scah_query_builder_append(root, parent, child, &mut err);
+        }
 
         let mut q1: *mut ScahQuery = std::ptr::null_mut();
         let mut q2: *mut ScahQuery = std::ptr::null_mut();
         assert_eq!(
-            scah_query_builder_build(root, &mut q1, &mut err),
+            unsafe { scah_query_builder_build(root, &mut q1, &mut err) },
             ScahStatus::Ok
         );
         assert_eq!(
-            scah_query_builder_build(root, &mut q2, &mut err),
+            unsafe { scah_query_builder_build(root, &mut q2, &mut err) },
             ScahStatus::Ok
         );
         assert!(!q1.is_null() && !q2.is_null());
@@ -331,14 +459,16 @@ mod tests {
         // Child still usable.
         let mut q_child: *mut ScahQuery = std::ptr::null_mut();
         assert_eq!(
-            scah_query_builder_build(child, &mut q_child, &mut err),
+            unsafe { scah_query_builder_build(child, &mut q_child, &mut err) },
             ScahStatus::Ok
         );
 
-        scah_query_free(q1);
-        scah_query_free(q2);
-        scah_query_free(q_child);
-        scah_query_builder_free(root);
-        scah_query_builder_free(child);
+        unsafe {
+            scah_query_free(q1);
+            scah_query_free(q2);
+            scah_query_free(q_child);
+            scah_query_builder_free(root);
+            scah_query_builder_free(child);
+        }
     }
 }
