@@ -644,4 +644,63 @@ mod tests {
             TextEdgePolicy::TrimCollapsedSeparators
         );
     }
+
+    #[test]
+    fn inherited_suppression_blocks_pre_range_flush() {
+        let mut state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        let mut tape = TextTape::new();
+
+        tape.push_str("A");
+        state.queue_separator(PendingSeparator::LineBreak);
+
+        state.enter_element(TextElementFlags::SUPPRESSED, 1);
+
+        let visible_descendant = TextElementBehavior {
+            suppressed: false,
+            preformatted: false,
+            opening_separator: PendingSeparator::None,
+            closing_separator: PendingSeparator::None,
+        };
+
+        state.before_text_range_start(
+            &mut tape,
+            visible_descendant,
+            TextEdgePolicy::Preserve,
+            false,
+        );
+
+        assert_eq!(tape.slice(0..tape.len()), "A");
+
+        state.exit_element(TextElementFlags::SUPPRESSED, 1);
+        state.flush_pending(&mut tape);
+
+        assert_eq!(tape.slice(0..tape.len()), "A\n");
+    }
+
+    #[test]
+    fn inherited_suppression_blocks_opening_boundary_flush() {
+        let mut state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        let mut tape = TextTape::new();
+
+        tape.push_str("A");
+        state.queue_separator(PendingSeparator::LineBreak);
+        state.enter_element(TextElementFlags::SUPPRESSED, 1);
+
+        let block_descendant = TextElementBehavior {
+            suppressed: false,
+            preformatted: false,
+            opening_separator: PendingSeparator::LineBreak,
+            closing_separator: PendingSeparator::LineBreak,
+        };
+
+        state.before_open_element(&mut tape, block_descendant, false);
+
+        assert_eq!(tape.slice(0..tape.len()), "A");
+    }
 }

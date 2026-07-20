@@ -477,6 +477,55 @@ fn suppressed_descendant_inside_pre_stays_empty() {
 }
 
 #[test]
+fn inline_descendant_inside_hidden_pre_subtree_does_not_flush_pending_separator() {
+    let baseline = "<pre>A<br><span hidden></span></pre>";
+    let nested = "<pre>A<br><span hidden><i></i></span></pre>";
+
+    assert_eq!(text_of(baseline, "pre"), "A");
+    assert_eq!(text_of(nested, "pre"), "A");
+}
+
+#[test]
+fn block_descendant_inside_hidden_pre_subtree_does_not_flush_pending_separator() {
+    let baseline = "<pre>A<br><span hidden></span></pre>";
+    let nested = "<pre>A<br><span hidden><div></div></span></pre>";
+
+    assert_eq!(text_of(baseline, "pre"), "A");
+    assert_eq!(text_of(nested, "pre"), "A");
+}
+
+#[test]
+fn table_cell_inside_hidden_subtree_does_not_flush_pending_separator() {
+    let html = concat!(
+        "<pre>A<br>",
+        "<span hidden><table><tr><td>X</td></tr></table></span>",
+        "</pre>",
+    );
+
+    assert_eq!(text_of(html, "pre"), "A");
+}
+
+#[test]
+fn break_inside_nested_hidden_descendant_does_not_emit_separator() {
+    let html = "<pre>A<span hidden><i><br></i></span>B</pre>";
+    assert_eq!(text_of(html, "pre"), "AB");
+}
+
+#[test]
+fn hidden_subtree_structure_does_not_change_visible_ancestor_text() {
+    let variants = [
+        "<pre>A<br><span hidden></span></pre>",
+        "<pre>A<br><span hidden><i></i></span></pre>",
+        "<pre>A<br><span hidden><div></div></span></pre>",
+        "<pre>A<br><span hidden><div><i><br></i></div></span></pre>",
+    ];
+
+    for html in variants {
+        assert_eq!(text_of(html, "pre"), "A", "failed for {html}");
+    }
+}
+
+#[test]
 fn parent_and_child_selected_inside_pre_preserve_whitespace() {
     let html = "<pre><span>  A  </span></pre>";
     let queries = &[
