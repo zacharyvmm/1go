@@ -1,6 +1,5 @@
 mod query;
 
-pub use query::compiler::lazy;
 pub use query::compiler::{
     Position, Query, QueryBuilder, QueryFactory, QuerySection, QuerySectionId, QuerySpec, Save,
     SelectionKind, SelectorParseError, StaticQuery, Transition, TransitionId,
