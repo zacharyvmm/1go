@@ -21,6 +21,20 @@ pub(crate) struct SaveHit {
     pub save_text_content: bool,
 }
 
+/// Stable identity for a query executor slot in [`QueryMultiplexer`].
+///
+/// Slot indices never move or reuse during a parse, so deferred sibling
+/// callbacks remain valid even after earlier `First` runners retire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunnerId(pub(crate) usize);
+
+impl RunnerId {
+    #[inline(always)]
+    pub(crate) const fn index(self) -> usize {
+        self.0
+    }
+}
+
 /// Deferred close-time activation of a CSS `+` / `~` right-hand cursor.
 ///
 /// Created when the left-hand transition matches; activated when that element
@@ -28,12 +42,12 @@ pub(crate) struct SaveHit {
 /// from the continuation transition's combinator, not stored here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SiblingCallback {
-    pub runner_index: usize,
+    pub runner: RunnerId,
     pub output_parent: ElementId,
     pub continuation: Position,
 }
 
-type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
+type Runner<'query, Q> = Vec<Option<QueryExecutor<'query, Q>>>;
 
 #[cfg(feature = "bench-internals")]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,11 +74,15 @@ where
     Q: QuerySpec<'query>,
 {
     fn build_runners(queries: &'query [Q]) -> Runner<'query, Q> {
-        #[allow(clippy::redundant_closure)]
         queries
             .iter()
-            .map(|query| QueryExecutor::new(query))
+            .map(|query| Some(QueryExecutor::new(query)))
             .collect()
+    }
+
+    #[inline]
+    fn all_runners_retired(&self) -> bool {
+        self.runners.iter().all(Option::is_none)
     }
 
     pub fn new(queries: &'query [Q]) -> Self {
@@ -97,11 +115,17 @@ where
             return;
         };
 
-        let resident = self.runners.iter().map(|runner| runner.cursors.len()).sum();
+        let resident = self
+            .runners
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(|runner| runner.cursors.len())
+            .sum();
 
         let active = self
             .runners
             .iter()
+            .filter_map(Option::as_ref)
             .flat_map(|runner| runner.cursors.iter())
             .filter(|cursor| cursor.is_active())
             .count();
@@ -127,6 +151,7 @@ where
     pub(crate) fn requires_text_content(&self) -> bool {
         self.runners
             .iter()
+            .filter_map(Option::as_ref)
             .any(|runner| runner.query().requires_text_content())
     }
 
@@ -141,9 +166,14 @@ where
         let len = store.elements.len();
         save_hits.clear();
         sibling_callbacks.clear();
-        for (runner_index, session) in self.runners.iter_mut().enumerate() {
+        for (index, slot) in self.runners.iter_mut().enumerate() {
+            let Some(session) = slot.as_mut() else {
+                continue;
+            };
+
+            let runner = RunnerId(index);
             session.next(
-                runner_index,
+                runner,
                 xhtml_element,
                 position,
                 store,
@@ -158,6 +188,27 @@ where
         }
     }
 
+    pub(crate) fn activate_sibling_callback(
+        &mut self,
+        callback: SiblingCallback,
+        source_depth: crate::engine::DepthSize,
+        store: &mut Store<'html, 'query>,
+    ) {
+        match self.runners.get_mut(callback.runner.index()) {
+            Some(Some(session)) => {
+                let _ = session.activate_sibling(callback.runner, callback, source_depth, store);
+            }
+            // The callback belongs to a runner that already completed.
+            Some(None) => {}
+            // Internal corruption: callback contains an impossible ID.
+            None => {
+                debug_assert!(false, "sibling callback references unknown runner");
+            }
+        }
+        #[cfg(feature = "bench-internals")]
+        self.track_cursor_stats();
+    }
+
     pub(crate) fn activate_sibling_callbacks(
         &mut self,
         callbacks: &mut Vec<SiblingCallback>,
@@ -165,13 +216,8 @@ where
         store: &mut Store<'html, 'query>,
     ) {
         for callback in callbacks.drain(..) {
-            let Some(session) = self.runners.get_mut(callback.runner_index) else {
-                continue;
-            };
-            let _ = session.activate_sibling(callback.runner_index, callback, source_depth, store);
+            self.activate_sibling_callback(callback, source_depth, store);
         }
-        #[cfg(feature = "bench-internals")]
-        self.track_cursor_stats();
     }
 
     pub(crate) fn back(
@@ -181,22 +227,89 @@ where
         reader: &Reader<'html>,
         store: &mut Store<'html, 'query>,
     ) -> bool {
-        let mut remove_indices = vec![];
-        for (index, session) in self.runners.iter_mut().enumerate() {
-            let significant_close = session.back(index, xhtml_element, position, store);
-            // A First runner can exit only after close handling finalizes its winner.
-            if significant_close && session.early_exit() {
-                remove_indices.push(index);
+        for (index, slot) in self.runners.iter_mut().enumerate() {
+            let retire = match slot.as_mut() {
+                Some(session) => {
+                    let runner = RunnerId(index);
+                    let significant_close = session.back(runner, xhtml_element, position, store);
+                    // A First runner can exit only after close handling finalizes its winner.
+                    significant_close && session.early_exit()
+                }
+                None => false,
+            };
+
+            if retire {
+                *slot = None;
             }
         }
         let _ = reader;
-        for idx in remove_indices.into_iter().rev() {
-            self.runners.remove(idx);
-        }
 
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
 
-        self.runners.is_empty()
+        self.all_runners_retired()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runner_slot_count(&self) -> usize {
+        self.runners.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runner_slot_occupied(&self, runner: RunnerId) -> bool {
+        matches!(self.runners.get(runner.index()), Some(Some(_)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_runner_for_test(&mut self, runner: RunnerId) {
+        if let Some(slot) = self.runners.get_mut(runner.index()) {
+            *slot = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runner_query_source(&self, runner: RunnerId) -> Option<&'query str> {
+        self.runners
+            .get(runner.index())
+            .and_then(Option::as_ref)
+            .map(|session| {
+                session
+                    .query()
+                    .get_selection(crate::QuerySectionId(0))
+                    .source
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueryMultiplexer, RunnerId};
+    use crate::{Query, Save};
+
+    #[test]
+    fn retiring_earlier_runner_does_not_shift_later_slots() {
+        let queries = [
+            Query::first("h1", Save::none()).unwrap().build(),
+            Query::all("section + p", Save::none()).unwrap().build(),
+            Query::all("aside + footer", Save::none()).unwrap().build(),
+        ];
+        let mut mux = QueryMultiplexer::new(&queries);
+
+        assert_eq!(mux.runner_slot_count(), 3);
+        assert!(mux.runner_slot_occupied(RunnerId(0)));
+        assert!(mux.runner_slot_occupied(RunnerId(1)));
+        assert!(mux.runner_slot_occupied(RunnerId(2)));
+        assert_eq!(mux.runner_query_source(RunnerId(1)), Some("section + p"));
+        assert_eq!(mux.runner_query_source(RunnerId(2)), Some("aside + footer"));
+
+        mux.retire_runner_for_test(RunnerId(0));
+
+        assert_eq!(mux.runner_slot_count(), 3);
+        assert!(!mux.runner_slot_occupied(RunnerId(0)));
+        assert!(mux.runner_slot_occupied(RunnerId(1)));
+        assert!(mux.runner_slot_occupied(RunnerId(2)));
+        assert_eq!(mux.runner_query_source(RunnerId(1)), Some("section + p"));
+        assert_eq!(mux.runner_query_source(RunnerId(2)), Some("aside + footer"));
+        assert_eq!(mux.runner_query_source(RunnerId(0)), None);
     }
 }
