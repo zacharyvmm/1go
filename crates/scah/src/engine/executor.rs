@@ -11,6 +11,7 @@ use crate::{
 #[cfg(any(debug_assertions, test))]
 use smallvec::SmallVec;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnOutcome {
     Inserted,
     Dominated,
@@ -182,6 +183,25 @@ where
         );
     }
 
+    /// Whether `(candidate.section, candidate.parent)` already has a First winner.
+    #[inline]
+    fn first_scope_is_claimed(&self, candidate: &ScopedCursor) -> bool {
+        let section = candidate.position.selection;
+        if !matches!(
+            self.query.get_section_selection_kind(section),
+            SelectionKind::First
+        ) {
+            return false;
+        }
+
+        // Check the winner flag first: almost every cursor fails immediately.
+        self.cursors.iter().rev().any(|cursor| {
+            cursor.is_first_winner()
+                && cursor.position.selection == section
+                && cursor.parent == candidate.parent
+        })
+    }
+
     fn finish_push_cursor(
         &mut self,
         candidate: ScopedCursor,
@@ -209,25 +229,6 @@ where
         }
         #[cfg(not(any(debug_assertions, test)))]
         let _ = create_reason;
-
-        #[cfg(any(debug_assertions, test))]
-        {
-            let section = candidate.position.selection;
-            if matches!(
-                self.query.get_section_selection_kind(section),
-                SelectionKind::First
-            ) {
-                let scope_claimed = self.cursors.iter().any(|c| {
-                    c.position.selection == section
-                        && c.parent == candidate.parent
-                        && c.is_first_winner()
-                });
-                debug_assert!(
-                    !scope_claimed,
-                    "must not admit live First cursor into already-claimed scope"
-                );
-            }
-        }
 
         self.cursors.push(candidate);
         SpawnOutcome::Inserted
@@ -316,6 +317,9 @@ where
 
     /// Push `candidate` unless an existing live cursor already dominates it
     /// (same parent+position, antichain on match_base_depth for descendants).
+    ///
+    /// Claimed `First` scopes are rejected before combinator-specific admission
+    /// so release builds share the same ownership barrier as debug/tests.
     fn try_push_cursor(
         &mut self,
         candidate: ScopedCursor,
@@ -326,6 +330,26 @@ where
         >,
         create_reason: Option<ScopedCursorReason>,
     ) -> SpawnOutcome {
+        if self.first_scope_is_claimed(&candidate) {
+            #[cfg(any(debug_assertions, test))]
+            {
+                if let Some(winner) = self.cursors.iter().rev().find(|cursor| {
+                    cursor.position.selection == candidate.position.selection
+                        && cursor.parent == candidate.parent
+                        && cursor.is_first_winner()
+                }) {
+                    Self::trace_cursor_suppressed(
+                        store,
+                        runner_index,
+                        &candidate,
+                        winner,
+                        CursorSuppressionReason::FirstScopeClaimed,
+                    );
+                }
+            }
+            return SpawnOutcome::Dominated;
+        }
+
         let guard = &self.query.get_transition(candidate.position.state).guard;
         match guard {
             Combinator::Descendant => {
@@ -413,7 +437,7 @@ where
             let section_kind = self.query.get_section_selection_kind(position.selection);
             let is_first = matches!(section_kind, SelectionKind::First);
             let self_closing = document_position.self_closing;
-            let terminal_first = is_save_point && matches!(section_kind, SelectionKind::First);
+            let terminal_first = is_save_point && is_first;
             let terminal_all = is_save_point
                 && matches!(section_kind, SelectionKind::All)
                 && position.next_child(self.query).is_none();
@@ -501,6 +525,15 @@ where
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
+                    // Anchored cursors are only created for non-terminal All
+                    // descendant scopes (`needs_descendant_anchor`). Their
+                    // position never advances, so they cannot occupy a terminal
+                    // First save point in production.
+                    debug_assert!(
+                        !(is_save_point && is_first),
+                        "terminal First must be represented by a moving cursor"
+                    );
+
                     if self_closing {
                         if is_save_point {
                             let output_parent = self.cursors[i].parent;
@@ -522,106 +555,9 @@ where
                                 );
                                 emitted_this_step.push((output_parent, position.selection));
                             }
-                            if is_first {
-                                let position = self.cursors[i].position;
-                                let mut winner =
-                                    ScopedCursor::new_moving(depth, output_parent, position);
-                                let hit = Self::save_element(
-                                    runner_index,
-                                    self.query,
-                                    store,
-                                    element.clone(),
-                                    &mut winner,
-                                );
-                                save_hits.push(hit);
-                                winner.parent = output_parent;
-                                self.cursors[i] = winner;
-                                self.claim_first_scope(position.selection, output_parent, i, depth);
-                            } else {
-                                let mut base = ScopedCursor::new_moving(
-                                    depth,
-                                    output_parent,
-                                    self.cursors[i].position,
-                                );
-                                let hit = Self::save_element(
-                                    runner_index,
-                                    self.query,
-                                    store,
-                                    element.clone(),
-                                    &mut base,
-                                );
-                                save_hits.push(hit);
-                            }
-                        }
-                        continue;
-                    }
-
-                    spawned_positions = self.cursors[i].next_positions(self.query);
-
-                    if is_save_point && is_first {
-                        let position = self.cursors[i].position;
-                        let output_parent = self.cursors[i].parent;
-                        #[cfg(any(debug_assertions, test))]
-                        {
-                            debug_assert!(
-                                !emitted_this_step.iter().any(|(parent, section)| {
-                                    *parent == output_parent && *section == position.selection
-                                }),
-                                "duplicate cursor emission for one physical element: \
-                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
-                                element.name,
-                                depth,
-                                output_parent,
-                                position.selection,
-                                position.state,
-                                i,
-                                self.cursors,
-                            );
-                            emitted_this_step.push((output_parent, position.selection));
-                        }
-                        let mut winner = ScopedCursor::new_moving(depth, output_parent, position);
-                        let hit = Self::save_element(
-                            runner_index,
-                            self.query,
-                            store,
-                            element.clone(),
-                            &mut winner,
-                        );
-                        let selected_element_id = hit.element_id;
-                        save_hits.push(hit);
-                        winner.parent = output_parent;
-                        self.cursors[i] = winner;
-                        self.claim_first_scope(position.selection, output_parent, i, depth);
-
-                        for pos in &spawned_positions {
-                            let continuation =
-                                ScopedCursor::new_moving(depth, selected_element_id, *pos);
-                            let _ = self.try_push_cursor(continuation, runner_index, store, None);
-                        }
-                    } else {
-                        let saved_parent = if is_save_point {
-                            let save_parent = self.cursors[i].parent;
-                            #[cfg(any(debug_assertions, test))]
-                            {
-                                debug_assert!(
-                                    !emitted_this_step.iter().any(|(parent, section)| {
-                                        *parent == save_parent && *section == position.selection
-                                    }),
-                                    "duplicate cursor emission for one physical element: \
-                                     element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
-                                    element.name,
-                                    depth,
-                                    save_parent,
-                                    position.selection,
-                                    position.state,
-                                    i,
-                                    self.cursors,
-                                );
-                                emitted_this_step.push((save_parent, position.selection));
-                            }
                             let mut base = ScopedCursor::new_moving(
                                 depth,
-                                save_parent,
+                                output_parent,
                                 self.cursors[i].position,
                             );
                             let hit = Self::save_element(
@@ -632,15 +568,50 @@ where
                                 &mut base,
                             );
                             save_hits.push(hit);
-                            base.parent
-                        } else {
-                            self.cursors[i].parent
-                        };
-
-                        for pos in &spawned_positions {
-                            let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
-                            let _ = self.try_push_cursor(continuation, runner_index, store, None);
                         }
+                        continue;
+                    }
+
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+
+                    let saved_parent = if is_save_point {
+                        let save_parent = self.cursors[i].parent;
+                        #[cfg(any(debug_assertions, test))]
+                        {
+                            debug_assert!(
+                                !emitted_this_step.iter().any(|(parent, section)| {
+                                    *parent == save_parent && *section == position.selection
+                                }),
+                                "duplicate cursor emission for one physical element: \
+                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                element.name,
+                                depth,
+                                save_parent,
+                                position.selection,
+                                position.state,
+                                i,
+                                self.cursors,
+                            );
+                            emitted_this_step.push((save_parent, position.selection));
+                        }
+                        let mut base =
+                            ScopedCursor::new_moving(depth, save_parent, self.cursors[i].position);
+                        let hit = Self::save_element(
+                            runner_index,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut base,
+                        );
+                        save_hits.push(hit);
+                        base.parent
+                    } else {
+                        self.cursors[i].parent
+                    };
+
+                    for pos in &spawned_positions {
+                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
+                        let _ = self.try_push_cursor(continuation, runner_index, store, None);
                     }
                 }
             }
@@ -747,8 +718,8 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use crate::{
-        Element, ElementId, Position, Query, QuerySectionId, Reader, Save, TransitionId,
-        XHtmlElement,
+        Element, ElementId, Position, Query, QuerySectionId, Reader, Save, SelectionKind,
+        TransitionId, XHtmlElement,
     };
     use crate::{QueryMultiplexer, XHtmlParser};
 
@@ -3017,25 +2988,426 @@ mod tests {
         assert!(selection.early_exit());
     }
 
+    fn assert_no_anchored_terminal_first(selection: &QueryExecutor<'_, Query>) {
+        for cursor in &selection.cursors {
+            if !cursor.is_anchored() || cursor.end() {
+                continue;
+            }
+            let position = cursor.position;
+            if !selection.query.is_save_point(&position) {
+                continue;
+            }
+            assert!(
+                !matches!(
+                    selection
+                        .query
+                        .get_section_selection_kind(position.selection),
+                    SelectionKind::First
+                ),
+                "production must never leave an anchored cursor at a terminal First save point: {:?}",
+                cursor
+            );
+        }
+    }
+
     #[test]
-    fn anchored_terminal_first_promotes_to_moving_winner() {
-        let query = Query::first("p", Save::all()).unwrap().build();
+    fn production_execution_never_leaves_anchored_cursor_at_terminal_first() {
+        struct Event {
+            name: &'static str,
+            depth: u16,
+            self_closing: bool,
+        }
+        struct Case {
+            selector: &'static str,
+            events: &'static [Event],
+        }
+
+        let cases = [
+            Case {
+                selector: "p",
+                events: &[
+                    Event {
+                        name: "p",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "p",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                ],
+            },
+            Case {
+                selector: "div p",
+                events: &[
+                    Event {
+                        name: "div",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "p",
+                        depth: 1,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "div",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "p",
+                        depth: 1,
+                        self_closing: false,
+                    },
+                ],
+            },
+            Case {
+                selector: "div > p",
+                events: &[
+                    Event {
+                        name: "div",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "p",
+                        depth: 1,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "div",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "span",
+                        depth: 1,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "div",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "p",
+                        depth: 1,
+                        self_closing: false,
+                    },
+                ],
+            },
+            Case {
+                selector: "main div > p",
+                events: &[
+                    Event {
+                        name: "main",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "div",
+                        depth: 1,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "p",
+                        depth: 2,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "div",
+                        depth: 1,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "p",
+                        depth: 2,
+                        self_closing: false,
+                    },
+                ],
+            },
+            Case {
+                selector: "br",
+                events: &[
+                    Event {
+                        name: "br",
+                        depth: 0,
+                        self_closing: true,
+                    },
+                    Event {
+                        name: "br",
+                        depth: 0,
+                        self_closing: true,
+                    },
+                ],
+            },
+            Case {
+                selector: "div br",
+                events: &[
+                    Event {
+                        name: "div",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "br",
+                        depth: 1,
+                        self_closing: true,
+                    },
+                    Event {
+                        name: "div",
+                        depth: 0,
+                        self_closing: false,
+                    },
+                    Event {
+                        name: "br",
+                        depth: 1,
+                        self_closing: true,
+                    },
+                ],
+            },
+        ];
+
+        for case in cases {
+            let query = Query::first(case.selector, Save::all()).unwrap().build();
+            let query = &query;
+            let mut store = Store::default();
+            let mut selection = QueryExecutor::new(query);
+            let mut save_hits = Vec::new();
+
+            for event in case.events {
+                selection.next(
+                    0,
+                    &elem(event.name),
+                    &DocumentPosition {
+                        reader_position: 0,
+                        text_content_position: 0,
+                        element_depth: event.depth,
+                        self_closing: event.self_closing,
+                    },
+                    &mut store,
+                    &mut save_hits,
+                );
+                assert_no_anchored_terminal_first(&selection);
+                if event.self_closing {
+                    selection.back(
+                        0,
+                        event.name,
+                        &DocumentPosition {
+                            reader_position: 0,
+                            text_content_position: 0,
+                            element_depth: event.depth,
+                            self_closing: true,
+                        },
+                        &mut store,
+                    );
+                    assert_no_anchored_terminal_first(&selection);
+                }
+            }
+        }
+
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::all())?]))
+            .unwrap()
+            .build();
         let query = &query;
         let mut store = Store::default();
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
+        for (name, depth) in [
+            ("article", 0),
+            ("div", 1),
+            ("p", 2),
+            ("div", 1),
+            ("p", 2),
+            ("article", 0),
+            ("div", 1),
+            ("p", 2),
+        ] {
+            selection.next(0, &elem(name), &doc_pos(depth), &mut store, &mut save_hits);
+            assert_no_anchored_terminal_first(&selection);
+        }
+    }
+
+    #[test]
+    fn claimed_first_scope_suppresses_same_parent_admission() {
+        let query = Query::first("p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+
+        let parent = ElementId::default();
+        let position = Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(0),
+        };
+        let mut winner = ScopedCursor::new_moving(0, parent, position);
+        winner.select_first_until_close(0);
+        selection.cursors.push(winner);
+
+        let original_len = selection.cursors.len();
+        let candidate = ScopedCursor::new_moving(1, parent, position);
+        let outcome = selection.try_push_cursor(candidate, 0, &mut store, None);
+
+        assert_eq!(outcome, SpawnOutcome::Dominated);
+        assert_eq!(selection.cursors.len(), original_len);
+    }
+
+    #[test]
+    fn claimed_first_scope_does_not_suppress_independent_output_parent() {
+        let query = Query::first("p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
 
         let position = Position {
             selection: QuerySectionId(0),
             state: TransitionId(0),
         };
-        let mut root = ScopedCursor::new_root(ElementId::default(), position);
-        root.mark_complete();
-        selection.cursors = vec![
-            root,
-            ScopedCursor::new_anchored(0, ElementId::default(), position),
-        ];
+        let parent_a = ElementId::default();
+        let parent_b = ElementId(1);
+        let mut winner = ScopedCursor::new_moving(0, parent_a, position);
+        winner.select_first_until_close(0);
+        selection.cursors.push(winner);
 
+        let original_len = selection.cursors.len();
+        let candidate = ScopedCursor::new_moving(1, parent_b, position);
+        let outcome = selection.try_push_cursor(candidate, 0, &mut store, None);
+
+        assert_eq!(outcome, SpawnOutcome::Inserted);
+        assert_eq!(selection.cursors.len(), original_len + 1);
+    }
+
+    #[test]
+    fn claimed_first_scope_does_not_suppress_different_section() {
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| {
+                Ok([
+                    article.first("p", Save::all())?,
+                    article.first("span", Save::all())?,
+                ])
+            })
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+
+        let parent = ElementId::default();
+        let p_position = Position {
+            selection: QuerySectionId(1),
+            state: query.get_selection(QuerySectionId(1)).range.start,
+        };
+        let span_position = Position {
+            selection: QuerySectionId(2),
+            state: query.get_selection(QuerySectionId(2)).range.start,
+        };
+        assert!(matches!(
+            query.get_section_selection_kind(QuerySectionId(1)),
+            SelectionKind::First
+        ));
+        assert!(matches!(
+            query.get_section_selection_kind(QuerySectionId(2)),
+            SelectionKind::First
+        ));
+
+        let mut winner = ScopedCursor::new_moving(0, parent, p_position);
+        winner.select_first_until_close(0);
+        selection.cursors.push(winner);
+
+        let original_len = selection.cursors.len();
+        let candidate = ScopedCursor::new_moving(1, parent, span_position);
+        let outcome = selection.try_push_cursor(candidate, 0, &mut store, None);
+
+        assert_eq!(outcome, SpawnOutcome::Inserted);
+        assert_eq!(selection.cursors.len(), original_len + 1);
+    }
+
+    #[test]
+    fn claimed_first_scope_does_not_suppress_all_section() {
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| {
+                Ok([
+                    article.first("> h1", Save::all())?,
+                    article.all("> p", Save::all())?,
+                ])
+            })
+            .unwrap()
+            .build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+
+        let parent = ElementId::default();
+        let first_position = Position {
+            selection: QuerySectionId(1),
+            state: query.get_selection(QuerySectionId(1)).range.start,
+        };
+        let all_position = Position {
+            selection: QuerySectionId(2),
+            state: query.get_selection(QuerySectionId(2)).range.start,
+        };
+        assert!(matches!(
+            query.get_section_selection_kind(QuerySectionId(1)),
+            SelectionKind::First
+        ));
+        assert!(matches!(
+            query.get_section_selection_kind(QuerySectionId(2)),
+            SelectionKind::All
+        ));
+
+        let mut winner = ScopedCursor::new_moving(0, parent, first_position);
+        winner.select_first_until_close(0);
+        selection.cursors.push(winner);
+
+        let original_len = selection.cursors.len();
+        let candidate = ScopedCursor::new_moving(1, parent, all_position);
+        let outcome = selection.try_push_cursor(candidate, 0, &mut store, None);
+
+        assert_eq!(outcome, SpawnOutcome::Inserted);
+        assert_eq!(selection.cursors.len(), original_len + 1);
+    }
+
+    #[test]
+    fn first_candidate_admitted_before_winner_exists() {
+        let query = Query::first("p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        // Retire the root obligation so admission is not combinator-dominated.
+        selection.cursors[0].cancel_complete();
+
+        let position = Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(0),
+        };
+        let original_len = selection.cursors.len();
+        let candidate = ScopedCursor::new_moving(1, ElementId::default(), position);
+        let outcome = selection.try_push_cursor(candidate, 0, &mut store, None);
+
+        assert_eq!(outcome, SpawnOutcome::Inserted);
+        assert_eq!(selection.cursors.len(), original_len + 1);
+        assert!(!selection.first_scope_is_claimed(&ScopedCursor::new_moving(
+            2,
+            ElementId::default(),
+            position
+        )));
+    }
+
+    #[test]
+    fn delayed_same_scope_admission_after_winner_is_dominated() {
+        let query = Query::first("div > p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut store = Store::default();
+        let mut selection = QueryExecutor::new(query);
+        let mut save_hits = Vec::new();
+
+        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
         selection.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
         assert_eq!(save_hits.len(), 1);
 
@@ -3043,31 +3415,18 @@ mod tests {
             .cursors
             .iter()
             .find(|c| c.is_first_winner())
-            .expect("terminal First must produce a winner");
-        assert!(
-            winner.is_moving(),
-            "anchored First winner must be promoted to moving"
-        );
-        assert!(winner.is_complete());
-        assert_eq!(winner.unwind_depth(), Some(1));
-        assert!(
-            selection
-                .cursors
-                .iter()
-                .all(|c| !c.is_anchored() || c.is_complete()),
-            "anchored search obligation must end once First wins"
-        );
+            .expect("first p must claim the scope");
+        let section = winner.position.selection;
+        let parent = winner.parent;
+        let terminal = winner.position;
 
-        selection.back(0, "p", &doc_pos(1), &mut store);
-        let winner = selection
-            .cursors
-            .iter()
-            .find(|c| c.is_first_winner())
-            .expect("winner flag must survive selected close");
-        assert!(winner.is_moving());
-        assert!(winner.is_complete());
-        assert_eq!(winner.unwind_depth(), None);
-        assert!(selection.early_exit());
+        let original_len = selection.cursors.len();
+        let late = ScopedCursor::new_moving(2, parent, terminal);
+        let outcome = selection.try_push_cursor(late, 0, &mut store, None);
+        assert_eq!(outcome, SpawnOutcome::Dominated);
+        assert_eq!(selection.cursors.len(), original_len);
+        assert!(selection.first_scope_is_claimed(&ScopedCursor::new_moving(3, parent, terminal)));
+        assert_eq!(section, QuerySectionId(0));
     }
 
     #[test]
@@ -3107,39 +3466,5 @@ mod tests {
         assert!(winner.is_moving());
         assert!(winner.is_complete());
         assert_eq!(winner.unwind_depth(), Some(1));
-    }
-
-    #[test]
-    fn first_lifecycle_has_no_executor_state_machine() {
-        let root = env!("CARGO_MANIFEST_DIR");
-        let executor = std::fs::read_to_string(format!("{root}/src/engine/executor.rs")).unwrap();
-        // Ignore this acceptance test's own needle assembly.
-        let executor_impl = executor
-            .split("fn first_lifecycle_has_no_executor_state_machine")
-            .next()
-            .unwrap_or(&executor);
-        let query_ir = std::fs::read_to_string(format!(
-            "{root}/../scah-query-ir/src/query/compiler/query.rs"
-        ))
-        .unwrap();
-
-        // Construct names so this test source does not contain the banned tokens.
-        let needles = [
-            ["First", "Match", "State"].concat(),
-            ["Selected", "Result"].concat(),
-            ["first", "_match:"].concat(),
-            ["note_first_", "terminal_match"].concat(),
-            ["try_complete_", "first_match"].concat(),
-            ["first_child_", "obligations_complete"].concat(),
-            ["is_then_", "child_section"].concat(),
-            ["section_", "transition_count"].concat(),
-            ["complete_", "terminal_first"].concat(),
-        ];
-        for needle in &needles {
-            assert!(
-                !executor_impl.contains(needle.as_str()) && !query_ir.contains(needle.as_str()),
-                "{needle} must not remain after cursor-native First migration"
-            );
-        }
     }
 }

@@ -183,6 +183,8 @@ pub enum TransitionRejectReason {
 pub enum CursorSuppressionReason {
     DescendantDominated,
     ExactDuplicate,
+    /// A completed First winner already owns this `(section, output parent)`.
+    FirstScopeClaimed,
 }
 
 impl<'html, 'query> TraceEvent<'html, 'query> {

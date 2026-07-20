@@ -209,7 +209,7 @@ impl ScopedCursor {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, debug_assertions))]
     fn set_activity_flags(&mut self, flags: u8) {
         match &mut self.mode {
             CursorMode::Moving { flags: f, .. } | CursorMode::Anchored { flags: f } => *f = flags,
@@ -365,30 +365,6 @@ impl ScopedCursor {
         }
     }
 
-    /// Mark matching complete while optionally waiting for the selected element
-    /// to close.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn complete_until_close(&mut self, depth: super::DepthSize) {
-        debug_assert!(
-            depth <= super::MAX_ELEMENT_DEPTH,
-            "element depth must not exceed MAX_ELEMENT_DEPTH"
-        );
-        debug_assert!(
-            self.is_active(),
-            "complete_until_close requires active cursor"
-        );
-        if let CursorMode::Moving {
-            flags,
-            unwind_depth,
-            ..
-        } = &mut self.mode
-        {
-            *unwind_depth = depth;
-            *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND;
-            self.debug_assert_moving_invariants();
-        }
-    }
-
     /// Claim a terminal `First` selection until the selected element closes.
     ///
     /// The cursor must be a moving, active cursor. After this transition it is
@@ -435,30 +411,6 @@ impl ScopedCursor {
             }
         }
         self.debug_assert_moving_invariants();
-    }
-
-    /// Mark this cursor complete without claiming First-winner identity.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn mark_complete(&mut self) {
-        let keep_unwind = self.unwind_depth().is_some();
-        match &mut self.mode {
-            CursorMode::Moving {
-                flags,
-                unwind_depth,
-                ..
-            } => {
-                if keep_unwind {
-                    *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND;
-                } else {
-                    *flags = CursorActivity::Complete.to_flags();
-                    *unwind_depth = 0;
-                }
-                self.debug_assert_moving_invariants();
-            }
-            CursorMode::Anchored { flags } => {
-                *flags = CursorActivity::Complete.to_flags();
-            }
-        }
     }
 }
 
@@ -607,30 +559,6 @@ mod tests {
     }
 
     #[test]
-    fn active_complete_until_close_becomes_complete_with_unwind() {
-        let mut cursor = moving_cursor();
-
-        cursor.complete_until_close(4);
-
-        assert!(!cursor.is_active());
-        assert!(!cursor.is_blocked());
-        assert!(cursor.is_complete());
-        assert_eq!(cursor.unwind_depth(), Some(4));
-    }
-
-    #[test]
-    fn complete_with_unwind_clears_unwind_after_close() {
-        let mut cursor = moving_cursor();
-        cursor.complete_until_close(4);
-        assert_eq!(cursor.unwind_depth(), Some(4));
-
-        cursor.complete_after_close();
-
-        assert!(cursor.is_complete());
-        assert_eq!(cursor.unwind_depth(), None);
-    }
-
-    #[test]
     fn select_first_until_close_marks_moving_winner() {
         let mut cursor = moving_cursor();
 
@@ -696,31 +624,12 @@ mod tests {
         assert_eq!(anchored.unwind_depth(), None);
     }
 
-    #[test]
-    fn mark_complete_on_moving_and_anchored() {
-        let mut moving = moving_cursor();
-        moving.mark_complete();
-        assert!(moving.is_complete());
-        assert!(!moving.is_blocked());
-
-        let mut anchored = ScopedCursor::new_anchored(
-            0,
-            NULL_PARENT,
-            Position {
-                selection: QuerySectionId(0),
-                state: TransitionId(0),
-            },
-        );
-        anchored.mark_complete();
-        assert!(anchored.is_complete());
-    }
-
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "cannot reactivate a permanently complete cursor")]
     fn complete_reactivate_panics_in_debug() {
         let mut cursor = moving_cursor();
-        cursor.mark_complete();
+        cursor.cancel_complete();
         cursor.reactivate_after_close();
     }
 
