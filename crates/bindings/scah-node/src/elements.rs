@@ -1,8 +1,56 @@
-use ::scah::{Attribute, ElementId, Store};
+use std::ptr::{NonNull, null_mut};
 
+use napi::Result;
 use napi::bindgen_prelude::*;
-use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
+use scah_ffi::{
+    ScahElement, ScahElementList, ScahOptionalStringView, ScahStatus, ScahStringView,
+    scah_element_attribute_at, scah_element_attribute_count, scah_element_class_name,
+    scah_element_free, scah_element_get, scah_element_get_attribute, scah_element_id,
+    scah_element_inner_html, scah_element_list_free, scah_element_list_get, scah_element_list_len,
+    scah_element_name, scah_element_text_content,
+};
+
+use crate::ffi::{optional_to_option, status_to_error, string_view, view_to_string};
+
+/// Convert an owned FFI element list into owned `JsElement` handles, then free the list.
+pub(crate) fn take_element_list(list: *mut ScahElementList) -> Result<Vec<JsElement>> {
+    if list.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut len = 0usize;
+    let mut err = null_mut();
+    let status = scah_element_list_len(list, &mut len, &mut err);
+    if status != ScahStatus::Ok {
+        scah_element_list_free(list);
+        return Err(status_to_error(status, err));
+    }
+
+    let mut elements = Vec::with_capacity(len);
+    for i in 0..len {
+        let mut out: *mut ScahElement = null_mut();
+        let mut err = null_mut();
+        let status = scah_element_list_get(list, i, &mut out, &mut err);
+        if status != ScahStatus::Ok {
+            scah_element_list_free(list);
+            return Err(status_to_error(status, err));
+        }
+        let handle = match NonNull::new(out) {
+            Some(h) => h,
+            None => {
+                scah_element_list_free(list);
+                return Err(Error::from_reason(
+                    "scah_element_list_get returned null element".to_owned(),
+                ));
+            }
+        };
+        elements.push(JsElement { handle });
+    }
+
+    scah_element_list_free(list);
+    Ok(elements)
+}
 
 #[napi(object)]
 pub struct JsonElement<'a> {
@@ -16,110 +64,182 @@ pub struct JsonElement<'a> {
 
 #[napi(js_name = "Element")]
 pub struct JsElement {
-    pub(super) store: std::sync::Arc<Store<'static, 'static>>,
-    pub(super) id: ElementId,
+    pub(crate) handle: NonNull<ScahElement>,
+}
+
+impl Drop for JsElement {
+    fn drop(&mut self) {
+        scah_element_free(self.handle.as_ptr());
+    }
 }
 
 #[napi]
 impl JsElement {
     #[napi]
-    pub fn to_json<'a>(&'a self, env: Env) -> Result<JsonElement<'a>> {
-        let element = self
-            .store
-            .elements
-            .get(self.id.index())
-            .expect("The Element ID should be valid");
-
-        let json = JsonElement {
-            name: element.name.to_string(),
-            id: element.id.map(|s| s.to_string()),
-            class: element.class.map(|s| s.to_string()),
+    pub fn to_json<'a>(&'a self, env: &'a Env) -> Result<JsonElement<'a>> {
+        Ok(JsonElement {
+            name: self.name()?.unwrap_or_default(),
+            id: self.id()?,
+            class: self.class_name()?,
             attributes: self.attributes(env)?,
-            inner_html: element.inner_html.map(|s| s.to_string()),
-            text_content: element.text_content(&self.store).map(|s| s.to_string()),
+            inner_html: self.inner_html()?,
+            text_content: self.text_content()?,
+        })
+    }
+
+    #[napi(getter)]
+    pub fn name(&self) -> Result<Option<String>> {
+        let mut view = ScahStringView {
+            data: std::ptr::null(),
+            len: 0,
         };
-
-        Ok(json)
+        let mut err = null_mut();
+        let status = scah_element_name(self.handle.as_ptr(), &mut view, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        Ok(Some(view_to_string(view)))
     }
 
     #[napi(getter)]
-    pub fn name(&self) -> Option<&str> {
-        self.store.elements.get(self.id.index()).map(|e| e.name)
+    pub fn class_name(&self) -> Result<Option<String>> {
+        let mut opt = ScahOptionalStringView {
+            value: ScahStringView {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            is_some: 0,
+        };
+        let mut err = null_mut();
+        let status = scah_element_class_name(self.handle.as_ptr(), &mut opt, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        Ok(optional_to_option(opt))
     }
 
     #[napi(getter)]
-    pub fn class_name(&self) -> Option<&str> {
-        self.store
-            .elements
-            .get(self.id.index())
-            .and_then(|e| e.class)
-    }
-
-    #[napi(getter)]
-    pub fn id(&self) -> Option<&str> {
-        self.store.elements.get(self.id.index()).and_then(|e| e.id)
+    pub fn id(&self) -> Result<Option<String>> {
+        let mut opt = ScahOptionalStringView {
+            value: ScahStringView {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            is_some: 0,
+        };
+        let mut err = null_mut();
+        let status = scah_element_id(self.handle.as_ptr(), &mut opt, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        Ok(optional_to_option(opt))
     }
 
     #[napi]
-    pub fn get_attribute(&self, key: String) -> Option<&str> {
-        self.store
-            .elements
-            .get(self.id.index())
-            .and_then(|e| e.attribute(&self.store, &key))
+    pub fn get_attribute(&self, key: String) -> Result<Option<String>> {
+        let mut opt = ScahOptionalStringView {
+            value: ScahStringView {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            is_some: 0,
+        };
+        let mut err = null_mut();
+        let status =
+            scah_element_get_attribute(self.handle.as_ptr(), string_view(&key), &mut opt, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        Ok(optional_to_option(opt))
     }
 
     #[napi(getter)]
-    pub fn attributes<'a>(&'a self, env: Env) -> Result<Object<'a>> {
-        let mut object = Object::new(&env)?;
-        let attributes = self
-            .store
-            .elements
-            .get(self.id.index())
-            .and_then(|e| e.attributes(&self.store));
+    pub fn attributes<'a>(&'a self, env: &'a Env) -> Result<Object<'a>> {
+        let mut object = Object::new(env)?;
 
-        if let Some(attrs) = attributes {
-            for Attribute { key, value } in attrs {
-                object.set(*key, *value)?
-            }
+        let mut count = 0usize;
+        let mut err = null_mut();
+        let status = scah_element_attribute_count(self.handle.as_ptr(), &mut count, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
         }
+
+        for i in 0..count {
+            let mut key = ScahStringView {
+                data: std::ptr::null(),
+                len: 0,
+            };
+            let mut value = ScahStringView {
+                data: std::ptr::null(),
+                len: 0,
+            };
+            let mut err = null_mut();
+            let status =
+                scah_element_attribute_at(self.handle.as_ptr(), i, &mut key, &mut value, &mut err);
+            if status != ScahStatus::Ok {
+                return Err(status_to_error(status, err));
+            }
+            object.set(view_to_string(key), view_to_string(value))?;
+        }
+
         Ok(object)
     }
 
     #[napi(getter)]
-    pub fn inner_html(&self) -> Option<&str> {
-        self.store
-            .elements
-            .get(self.id.index())
-            .and_then(|e| e.inner_html)
+    pub fn inner_html(&self) -> Result<Option<String>> {
+        let mut opt = ScahOptionalStringView {
+            value: ScahStringView {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            is_some: 0,
+        };
+        let mut err = null_mut();
+        let status = scah_element_inner_html(self.handle.as_ptr(), &mut opt, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        Ok(optional_to_option(opt))
     }
 
     #[napi(getter)]
-    pub fn text_content(&self) -> Option<&str> {
-        self.store
-            .elements
-            .get(self.id.index())
-            .and_then(|e| e.text_content(&self.store))
+    pub fn text_content(&self) -> Result<Option<String>> {
+        let mut opt = ScahOptionalStringView {
+            value: ScahStringView {
+                data: std::ptr::null(),
+                len: 0,
+            },
+            is_some: 0,
+        };
+        let mut err = null_mut();
+        let status = scah_element_text_content(self.handle.as_ptr(), &mut opt, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        Ok(optional_to_option(opt))
     }
 
     #[napi]
     pub fn get(&self, query: String) -> Result<Vec<JsElement>> {
-        let element = self
-            .store
-            .elements
-            .get(self.id.index())
-            .expect("The Element ID should be valid");
-        let children = element.get(&self.store, &query);
-        match children {
-            None => Err(Error::new(
+        let mut list: *mut ScahElementList = null_mut();
+        let mut found = 0u8;
+        let mut err = null_mut();
+        let status = scah_element_get(
+            self.handle.as_ptr(),
+            string_view(&query),
+            &mut list,
+            &mut found,
+            &mut err,
+        );
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        if found == 0 {
+            return Err(Error::new(
                 Status::GenericFailure,
                 format!("This Element does not have children selected with `{query}`"),
-            )),
-            Some(children) => Ok(children
-                .map(|e| JsElement {
-                    store: self.store.clone(),
-                    id: unsafe { self.store.elements.index_of(e) },
-                })
-                .collect()),
+            ));
         }
+        take_element_list(list)
     }
 }

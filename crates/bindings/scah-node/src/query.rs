@@ -1,9 +1,16 @@
-use ::scah::lazy::{LazyQuery, LazyQueryBuilder};
-use ::scah::{Query, QuerySectionId, Save};
+use std::ptr::{NonNull, null_mut};
 
 use napi::Result;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use scah_ffi::{
+    ScahQuery, ScahQueryBuilder, ScahQuerySectionId, ScahSave, ScahStatus, scah_query_all,
+    scah_query_builder_all, scah_query_builder_append, scah_query_builder_build,
+    scah_query_builder_clone, scah_query_builder_current_section, scah_query_builder_first,
+    scah_query_builder_free, scah_query_first, scah_query_free,
+};
+
+use crate::ffi::{status_to_error, string_view};
 
 #[napi(object, js_name = "Save")]
 #[derive(Clone, Copy, Debug)]
@@ -54,38 +61,100 @@ impl JsSave {
         }
     }
 
-    fn to_save(self) -> Save {
-        Save {
-            inner_html: self.inner_html.unwrap_or(false),
-            text_content: self.text_content.unwrap_or(false),
+    fn to_scah_save(self) -> ScahSave {
+        ScahSave {
+            inner_html: u8::from(self.inner_html.unwrap_or(false)),
+            text_content: u8::from(self.text_content.unwrap_or(false)),
         }
     }
 }
 
+fn save_or_none(save: Option<JsSave>) -> ScahSave {
+    save.unwrap_or_else(JsSave::none).to_scah_save()
+}
+
+fn new_root_all(selector: &str, save: ScahSave) -> Result<JsQueryBuilder> {
+    let mut out: *mut ScahQueryBuilder = null_mut();
+    let mut err = null_mut();
+    let status = scah_query_all(string_view(selector), save, &mut out, &mut err);
+    if status != ScahStatus::Ok {
+        return Err(status_to_error(status, err));
+    }
+    Ok(JsQueryBuilder {
+        handle: NonNull::new(out)
+            .ok_or_else(|| Error::from_reason("scah_query_all returned null builder".to_owned()))?,
+    })
+}
+
+fn new_root_first(selector: &str, save: ScahSave) -> Result<JsQueryBuilder> {
+    let mut out: *mut ScahQueryBuilder = null_mut();
+    let mut err = null_mut();
+    let status = scah_query_first(string_view(selector), save, &mut out, &mut err);
+    if status != ScahStatus::Ok {
+        return Err(status_to_error(status, err));
+    }
+    Ok(JsQueryBuilder {
+        handle: NonNull::new(out).ok_or_else(|| {
+            Error::from_reason("scah_query_first returned null builder".to_owned())
+        })?,
+    })
+}
+
+fn clone_builder(handle: NonNull<ScahQueryBuilder>) -> Result<JsQueryBuilder> {
+    let mut out: *mut ScahQueryBuilder = null_mut();
+    let mut err = null_mut();
+    let status = scah_query_builder_clone(handle.as_ptr(), &mut out, &mut err);
+    if status != ScahStatus::Ok {
+        return Err(status_to_error(status, err));
+    }
+    Ok(JsQueryBuilder {
+        handle: NonNull::new(out).ok_or_else(|| {
+            Error::from_reason("scah_query_builder_clone returned null builder".to_owned())
+        })?,
+    })
+}
+
 #[napi(js_name = "QueryBuilder")]
 pub struct JsQueryBuilder {
-    builder: LazyQueryBuilder<String>,
+    pub(crate) handle: NonNull<ScahQueryBuilder>,
+}
+
+impl Drop for JsQueryBuilder {
+    fn drop(&mut self) {
+        scah_query_builder_free(self.handle.as_ptr());
+    }
 }
 
 #[napi]
 impl JsQueryBuilder {
     #[napi]
-    pub fn all(&mut self, selector: String, save: Option<JsSave>) -> JsQueryBuilder {
-        self.builder
-            .all_mut(selector, save.unwrap_or_else(JsSave::none).to_save());
-
-        JsQueryBuilder {
-            builder: self.builder.clone(),
+    pub fn all(&mut self, selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
+        let mut err = null_mut();
+        let status = scah_query_builder_all(
+            self.handle.as_ptr(),
+            string_view(&selector),
+            save_or_none(save),
+            &mut err,
+        );
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
         }
+        clone_builder(self.handle)
     }
-    #[napi]
-    pub fn first(&mut self, selector: String, save: Option<JsSave>) -> JsQueryBuilder {
-        self.builder
-            .first_mut(selector, save.unwrap_or_else(JsSave::none).to_save());
 
-        JsQueryBuilder {
-            builder: self.builder.clone(),
+    #[napi]
+    pub fn first(&mut self, selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
+        let mut err = null_mut();
+        let status = scah_query_builder_first(
+            self.handle.as_ptr(),
+            string_view(&selector),
+            save_or_none(save),
+            &mut err,
+        );
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
         }
+        clone_builder(self.handle)
     }
 
     #[napi]
@@ -93,56 +162,77 @@ impl JsQueryBuilder {
         &mut self,
         callback: Function<JsQueryFactory, Vec<Reference<JsQueryBuilder>>>,
     ) -> Result<JsQueryBuilder> {
-        let factory = JsQueryFactory { _data: true };
-        let builders = callback.call(factory)?;
-        let children = builders.iter().map(|b| b.builder.clone());
-
-        let current_index = QuerySectionId(self.builder.len() - 1);
-        for child in children {
-            self.builder.append(current_index, child);
+        let mut parent: ScahQuerySectionId = 0;
+        let mut err = null_mut();
+        let status =
+            scah_query_builder_current_section(self.handle.as_ptr(), &mut parent, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
         }
 
-        Ok(JsQueryBuilder {
-            builder: self.builder.clone(),
-        })
+        let factory = JsQueryFactory { _data: true };
+        let builders = callback.call(factory)?;
+
+        for child in &builders {
+            let mut err = null_mut();
+            let status = scah_query_builder_append(
+                self.handle.as_ptr(),
+                parent,
+                child.handle.as_ptr(),
+                &mut err,
+            );
+            if status != ScahStatus::Ok {
+                return Err(status_to_error(status, err));
+            }
+        }
+
+        clone_builder(self.handle)
     }
 
     #[napi]
     pub fn build(&self) -> Result<JsQuery> {
-        let (_tape, query) = unsafe { self.builder.clone().try_to_query() }
-            .map_err(|err| Error::from_reason(err.to_string()))?;
-        Ok(JsQuery { _tape, query })
+        let mut out: *mut ScahQuery = null_mut();
+        let mut err = null_mut();
+        let status = scah_query_builder_build(self.handle.as_ptr(), &mut out, &mut err);
+        if status != ScahStatus::Ok {
+            return Err(status_to_error(status, err));
+        }
+        Ok(JsQuery {
+            handle: NonNull::new(out).ok_or_else(|| {
+                Error::from_reason("scah_query_builder_build returned null query".to_owned())
+            })?,
+        })
     }
 }
 
 #[napi(js_name = "QueryFactory")]
 pub struct JsQueryFactory {
-    // if their isn't any data in the struct, no object is created, thus the `.then` doesn't work
+    // if there isn't any data in the struct, no object is created, thus `.then` doesn't work
     _data: bool,
 }
 
 #[napi]
 impl JsQueryFactory {
     #[napi]
-    pub fn all(&self, selector: String, save: Option<JsSave>) -> JsQueryBuilder {
-        JsQueryBuilder {
-            builder: LazyQuery::all(selector, save.unwrap_or_else(JsSave::none).to_save()),
-        }
+    pub fn all(&self, selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
+        new_root_all(&selector, save_or_none(save))
     }
 
     #[napi]
-    pub fn first(&self, selector: String, save: Option<JsSave>) -> JsQueryBuilder {
-        JsQueryBuilder {
-            builder: LazyQuery::first(selector, save.unwrap_or_else(JsSave::none).to_save()),
-        }
+    pub fn first(&self, selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
+        new_root_first(&selector, save_or_none(save))
     }
 }
 
 #[napi]
-#[derive(Clone)]
 pub struct JsQuery {
-    pub(crate) _tape: std::sync::Arc<Vec<u8>>,
-    pub(crate) query: Query<'static>,
+    pub(crate) handle: NonNull<ScahQuery>,
+}
+
+impl Drop for JsQuery {
+    fn drop(&mut self) {
+        scah_query_free(self.handle.as_ptr());
+    }
 }
 
 #[napi(js_name = "Query")]
@@ -151,16 +241,12 @@ pub struct JsQueryStatic;
 #[napi]
 impl JsQueryStatic {
     #[napi]
-    pub fn all(selector: String, save: Option<JsSave>) -> JsQueryBuilder {
-        JsQueryBuilder {
-            builder: LazyQuery::all(selector, save.unwrap_or_else(JsSave::none).to_save()),
-        }
+    pub fn all(selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
+        new_root_all(&selector, save_or_none(save))
     }
 
     #[napi]
-    pub fn first(selector: String, save: Option<JsSave>) -> JsQueryBuilder {
-        JsQueryBuilder {
-            builder: LazyQuery::first(selector, save.unwrap_or_else(JsSave::none).to_save()),
-        }
+    pub fn first(selector: String, save: Option<JsSave>) -> Result<JsQueryBuilder> {
+        new_root_first(&selector, save_or_none(save))
     }
 }

@@ -38,7 +38,7 @@ export declare class QueryFactory {
 export type JsQueryFactory = QueryFactory
 
 export declare class Store {
-  get(query: string): Array<JsElement> | null
+  get(query: string): Array<Element> | null
   get length(): number
 }
 export type JSStore = Store
