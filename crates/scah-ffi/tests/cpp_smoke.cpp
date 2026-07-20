@@ -93,9 +93,33 @@ int main() {
         return 1;
     }
 
+    ScahElementList *list = nullptr;
+    uint8_t found = 0;
+    expect_ok(scah_store_get(store, sv("a"), &list, &found, &err), err, "store_get");
+    if (!found || list == nullptr) {
+        std::fprintf(stderr, "anchor not found\n");
+        return 1;
+    }
+
+    const ScahElementId *ids = nullptr;
+    size_t id_len = 0;
+    expect_ok(scah_element_list_ids(list, &ids, &id_len, &err), err, "ids");
+    if (ids == nullptr || id_len == 0) {
+        std::fprintf(stderr, "missing ids\n");
+        return 1;
+    }
+
+    ScahStringView name{};
+    expect_ok(scah_element_name(list, ids[0], &name, &err), err, "name");
+    if (name.len != 1 || name.data[0] != 'a') {
+        std::fprintf(stderr, "unexpected name\n");
+        return 1;
+    }
+
     scah_query_builder_free(builder);
     scah_query_free(query);
     scah_store_free(store);
+    scah_element_list_free(list);
 
     // Missing versus explicitly empty attribute values.
     {
@@ -103,8 +127,7 @@ int main() {
         ScahQuery *attr_query = nullptr;
         ScahStore *attr_store = nullptr;
         ScahElementList *attr_list = nullptr;
-        ScahElement *input = nullptr;
-        uint8_t found = 0;
+        uint8_t attr_found = 0;
 
         expect_ok(scah_query_all(sv("input"), scah_save_all(), &attr_builder, &err), err,
                   "attr_all");
@@ -116,13 +139,16 @@ int main() {
                   err, "attr_parse");
         scah_query_free(attr_query);
 
-        expect_ok(scah_store_get(attr_store, sv("input"), &attr_list, &found, &err), err,
+        expect_ok(scah_store_get(attr_store, sv("input"), &attr_list, &attr_found, &err), err,
                   "attr_get");
-        expect_ok(scah_element_list_get(attr_list, 0, &input, &err), err, "attr_el");
-        scah_element_list_free(attr_list);
+        const ScahElementId *attr_ids = nullptr;
+        size_t attr_id_len = 0;
+        expect_ok(scah_element_list_ids(attr_list, &attr_ids, &attr_id_len, &err), err,
+                  "attr_ids");
+        ScahElementId input = attr_ids[0];
 
         size_t n = 0;
-        expect_ok(scah_element_attribute_count(input, &n, &err), err, "attr_count");
+        expect_ok(scah_element_attribute_count(attr_list, input, &n, &err), err, "attr_count");
         if (n != 2) {
             std::fprintf(stderr, "expected 2 attrs\n");
             return 1;
@@ -133,7 +159,8 @@ int main() {
         for (size_t i = 0; i < n; i++) {
             ScahStringView key{};
             ScahOptionalStringView value{};
-            expect_ok(scah_element_attribute_at(input, i, &key, &value, &err), err, "attr_at");
+            expect_ok(scah_element_attribute_at(attr_list, input, i, &key, &value, &err), err,
+                      "attr_at");
             if (key.len == 8 && std::memcmp(key.data, "disabled", 8) == 0) {
                 if (value.is_some != 0) {
                     std::fprintf(stderr, "disabled should be missing value\n");
@@ -153,7 +180,7 @@ int main() {
             return 1;
         }
 
-        scah_element_free(input);
+        scah_element_list_free(attr_list);
         scah_store_free(attr_store);
     }
 

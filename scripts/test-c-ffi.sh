@@ -14,7 +14,7 @@ OUT_DIR="$(mktemp -d)"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
 if [[ ! -f "$INCLUDE/scah.h" ]]; then
-  echo "missing $INCLUDE/scah.h — run: cargo run -p scah-ffi --bin generate_header" >&2
+  echo "missing $INCLUDE/scah.h — run: cargo run -p scah-ffi --features header-gen --bin generate_header" >&2
   exit 1
 fi
 

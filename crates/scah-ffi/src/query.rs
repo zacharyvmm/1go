@@ -232,6 +232,15 @@ pub unsafe extern "C" fn scah_query_builder_current_section(
 
 /// Clone `child` under `parent` without consuming either builder.
 ///
+/// Section IDs are append tokens, not permanent random-access mutation
+/// handles. An append is valid when `parent` is the builder's current last
+/// section, or the active append parent established by a prior append in the
+/// same append group (as used by consecutive `.then()` sibling branches).
+/// Linear `all` / `first` mutations clear the active append parent. A stale
+/// section ID that is neither the current last section nor the active append
+/// parent returns [`ScahStatus::InvalidSection`] and leaves the builder
+/// unmodified.
+///
 /// Self-append (`builder == child`) clones the current tree into an owned
 /// temporary before taking a mutable borrow of `builder`, so overlapping
 /// Rust references are never created.
@@ -263,7 +272,10 @@ pub unsafe extern "C" fn scah_query_builder_append(
             match builder.inner.append(QuerySectionId(parent), &child_inner) {
                 Ok(()) => Ok(()),
                 Err(()) => {
-                    set_error(out_error, "invalid parent query section");
+                    set_error(
+                        out_error,
+                        "invalid or stale parent query section append token",
+                    );
                     Err(ScahStatus::InvalidSection)
                 }
             }
@@ -423,10 +435,68 @@ mod tests {
         }
         let status = unsafe { scah_query_builder_append(builder, 99, child, &mut err) };
         assert_eq!(status, ScahStatus::InvalidSection);
+        assert!(!err.is_null());
         unsafe {
             scah_error_free(err);
             scah_query_builder_free(builder);
             scah_query_builder_free(child);
+        }
+    }
+
+    #[test]
+    fn append_stale_parent_is_rejected() {
+        let mut root: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut leaf: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut sibling: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut grandchild: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        unsafe {
+            scah_query_all(view("root"), scah_save_all(), &mut root, &mut err);
+            scah_query_all(view("leaf"), scah_save_all(), &mut leaf, &mut err);
+            scah_query_all(view("sibling"), scah_save_all(), &mut sibling, &mut err);
+            scah_query_all(
+                view("grandchild"),
+                scah_save_all(),
+                &mut grandchild,
+                &mut err,
+            );
+        }
+
+        let mut parent = 0usize;
+        assert_eq!(
+            unsafe { scah_query_builder_current_section(root, &mut parent, &mut err) },
+            ScahStatus::Ok
+        );
+        assert_eq!(
+            unsafe { scah_query_builder_append(root, parent, leaf, &mut err) },
+            ScahStatus::Ok
+        );
+        let leaf_id = 1usize;
+        assert_eq!(
+            unsafe { scah_query_builder_append(root, parent, sibling, &mut err) },
+            ScahStatus::Ok
+        );
+
+        let status = unsafe { scah_query_builder_append(root, leaf_id, grandchild, &mut err) };
+        assert_eq!(status, ScahStatus::InvalidSection);
+        assert!(!err.is_null());
+        unsafe {
+            scah_error_free(err);
+        }
+
+        let mut query: *mut ScahQuery = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { scah_query_builder_build(root, &mut query, &mut err) },
+            ScahStatus::Ok
+        );
+        assert!(!query.is_null());
+
+        unsafe {
+            scah_query_free(query);
+            scah_query_builder_free(root);
+            scah_query_builder_free(leaf);
+            scah_query_builder_free(sibling);
+            scah_query_builder_free(grandchild);
         }
     }
 

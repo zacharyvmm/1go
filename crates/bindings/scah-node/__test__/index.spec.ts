@@ -247,3 +247,17 @@ test('attributes preserve missing versus empty values', () => {
   expect(element.attributes.disabled).toBeNull()
   expect(element.attributes.value).toBe('')
 })
+
+test('large result collection correctness', () => {
+  const count = 10_000
+  let html = ''
+  for (let i = 0; i < count; i++) {
+    html += `<a href="/${i}">x</a>`
+  }
+  const q = Query.all('a', { textContent: true }).build()
+  const store = parse(html, [q])
+  const hits = store.get('a')
+  expect(hits).toHaveLength(count)
+  expect(hits![0].getAttribute('href')).toBe('/0')
+  expect(hits![count - 1].getAttribute('href')).toBe(`/${count - 1}`)
+})

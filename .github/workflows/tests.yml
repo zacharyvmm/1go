@@ -32,7 +32,7 @@ jobs:
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
       - name: Check committed scah.h is current
         run: |
-          cargo run -p scah-ffi --bin generate_header
+          cargo run -p scah-ffi --features header-gen --bin generate_header
           git diff --exit-code -- crates/scah-ffi/include/scah.h
       - name: C and C++ FFI smoke tests
         run: ./scripts/test-c-ffi.sh

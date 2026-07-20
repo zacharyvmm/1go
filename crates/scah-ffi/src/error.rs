@@ -16,6 +16,8 @@ pub enum ScahStatus {
     InvalidSection = 6,
     IndexOutOfBounds = 7,
     InternalPanic = 8,
+    /// Caller-provided buffer capacity is insufficient.
+    BufferTooSmall = 9,
 }
 
 /// Owned diagnostic message allocated by the FFI layer.

@@ -1,4 +1,8 @@
-//! Opaque store/element handles and C ABI entry points.
+//! Opaque store/element-list handles and C ABI entry points.
+//!
+//! Result elements are exposed as borrowed [`ScahElementId`] values owned by a
+//! [`ScahElementList`]. There is no per-result C heap allocation: language
+//! bindings keep one list owner and copy integer IDs.
 
 use crate::error::{ScahError, ScahStatus, ffi_guard, ffi_guard_value, ffi_guard_void, set_error};
 use crate::owned_store::OwnedStore;
@@ -12,16 +16,47 @@ pub struct ScahStore {
     pub(crate) inner: Arc<OwnedStore>,
 }
 
-/// Opaque element handle. Keeps its store alive.
-pub struct ScahElement {
-    pub(crate) store: Arc<OwnedStore>,
-    pub(crate) id: ElementId,
-}
+/// Store-local element identifier. Valid only with the [`ScahElementList`] that
+/// produced it (or another list retaining the same store for bounds-checked
+/// access). Not a heap handle.
+pub type ScahElementId = usize;
 
 /// Opaque list of element ids sharing a store.
+///
+/// # Lifetime invariants
+///
+/// - [`scah_element_list_ids`] returns a pointer into this list's immutable
+///   `ids` vector. The pointer remains valid until the list is freed.
+/// - IDs never mutate after list creation.
+/// - String views obtained via element getters remain valid while this list
+///   (which retains the [`OwnedStore`]) remains alive.
+/// - Freeing the original [`ScahStore`] does not invalidate elements accessed
+///   through this list.
+/// - An element ID must not be used with a different list owner.
 pub struct ScahElementList {
     pub(crate) store: Arc<OwnedStore>,
-    pub(crate) ids: Vec<ElementId>,
+    pub(crate) ids: Vec<ScahElementId>,
+}
+
+/// Borrowed key/value view for one attribute.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScahAttributeView {
+    pub key: ScahStringView,
+    pub value: ScahOptionalStringView,
+}
+
+/// Fixed-field snapshot of an element. All string views borrow store-owned HTML
+/// and remain valid while the element-list owner remains alive.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScahElementView {
+    pub name: ScahStringView,
+    pub id: ScahOptionalStringView,
+    pub class_name: ScahOptionalStringView,
+    pub inner_html: ScahOptionalStringView,
+    pub text_content: ScahOptionalStringView,
+    pub attribute_count: usize,
 }
 
 /// # Safety
@@ -62,6 +97,28 @@ unsafe fn clear_out_ptr<T>(out: *mut *mut T) {
 
 /// # Safety
 ///
+/// When `out` is non-null, it must be valid for writing one `u8`.
+unsafe fn clear_out_u8(out: *mut u8) {
+    if !out.is_null() {
+        unsafe {
+            *out = 0;
+        }
+    }
+}
+
+/// # Safety
+///
+/// When `out` is non-null, it must be valid for writing one `usize`.
+unsafe fn clear_out_usize(out: *mut usize) {
+    if !out.is_null() {
+        unsafe {
+            *out = 0;
+        }
+    }
+}
+
+/// # Safety
+///
 /// `view` must satisfy [`ScahStringView::as_str`]. When `out_error` is
 /// non-null, it must be valid for writing one `*mut ScahError`.
 unsafe fn parse_string_view<'a>(
@@ -87,13 +144,26 @@ unsafe fn parse_string_view<'a>(
     }
 }
 
-fn element_ref(element: &ScahElement) -> Result<&scah::Element<'static>, ScahStatus> {
-    element
-        .store
+fn resolve_element(
+    list: &ScahElementList,
+    element: ScahElementId,
+) -> Result<&scah::Element<'static>, ScahStatus> {
+    list.store
         .store()
         .elements
-        .get(element.id.index())
+        .get(element)
         .ok_or(ScahStatus::IndexOutOfBounds)
+}
+
+fn collect_match_ids(store: &OwnedStore, query: &str) -> Option<Vec<ScahElementId>> {
+    store.store().get(query).map(|iter| {
+        // SAFETY: each `e` is borrowed from this store's arena.
+        iter.map(|e| {
+            let id: ElementId = unsafe { store.store().elements.index_of(e) };
+            id.index()
+        })
+        .collect()
+    })
 }
 
 /// Current C ABI version.
@@ -105,7 +175,7 @@ pub extern "C" fn scah_abi_version() -> u32 {
 /// Parse HTML against one or more compiled queries.
 ///
 /// Returned string views from the store/elements borrow store-owned HTML and
-/// remain valid only while those handles are alive.
+/// remain valid only while the owning store or element-list handle is alive.
 ///
 /// # Safety
 ///
@@ -185,6 +255,7 @@ pub unsafe extern "C" fn scah_store_len(
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
+        clear_out_usize(out_len);
         ffi_guard(out_error, || {
             let store = require_ref(store)?;
             if out_len.is_null() {
@@ -217,6 +288,7 @@ pub unsafe extern "C" fn scah_store_get(
 ) -> ScahStatus {
     unsafe {
         clear_out_ptr(out_elements);
+        clear_out_u8(out_found);
         ffi_guard(out_error, || {
             let store = require_ref(store)?;
             if out_elements.is_null() || out_found.is_null() {
@@ -224,11 +296,7 @@ pub unsafe extern "C" fn scah_store_get(
             }
             let query = parse_string_view(query, out_error)?;
             let owned = store.inner.clone();
-            let found_ids: Option<Vec<ElementId>> = owned.store().get(query).map(|iter| {
-                // SAFETY: each `e` is borrowed from this store's arena.
-                iter.map(|e| owned.store().elements.index_of(e)).collect()
-            });
-            match found_ids {
+            match collect_match_ids(&owned, query) {
                 None => {
                     *out_found = 0;
                     *out_elements = std::ptr::null_mut();
@@ -252,8 +320,8 @@ pub unsafe extern "C" fn scah_store_get(
 /// # Safety
 ///
 /// A non-null `store` must have been returned by scah-ffi, must not already
-/// have been freed, and must not be used again after this call. Element and
-/// list handles that retain an `Arc` to the same store remain valid.
+/// have been freed, and must not be used again after this call. Element-list
+/// handles that retain an `Arc` to the same store remain valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_store_free(store: *mut ScahStore) {
     ffi_guard_void(|| {
@@ -280,6 +348,7 @@ pub unsafe extern "C" fn scah_element_list_len(
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
+        clear_out_usize(out_len);
         ffi_guard(out_error, || {
             let list = require_ref(list)?;
             if out_len.is_null() {
@@ -291,37 +360,36 @@ pub unsafe extern "C" fn scah_element_list_len(
     }
 }
 
-/// Get an element handle from a list. The element retains its own store `Arc`.
+/// Borrow the complete ID slice for a result list.
+///
+/// The returned pointer remains valid until the list is freed. IDs never mutate
+/// after list creation.
 ///
 /// # Safety
 ///
-/// `list` must point to a live [`ScahElementList`]. `out_element` must be
-/// non-null and valid for writing one `*mut ScahElement`. When `out_error` is
-/// non-null, it must be valid for writing one `*mut ScahError`. On success the
-/// caller owns the element and must free it with [`scah_element_free`].
+/// `list` must point to a live [`ScahElementList`]. `out_ids` and `out_len` must
+/// be non-null and valid for writing. When `out_error` is non-null, it must be
+/// valid for writing one `*mut ScahError`. The pointer written to `*out_ids`
+/// borrows the list and must not be used after [`scah_element_list_free`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn scah_element_list_get(
+pub unsafe extern "C" fn scah_element_list_ids(
     list: *const ScahElementList,
-    index: usize,
-    out_element: *mut *mut ScahElement,
+    out_ids: *mut *const ScahElementId,
+    out_len: *mut usize,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
-        clear_out_ptr(out_element);
+        if !out_ids.is_null() {
+            *out_ids = std::ptr::null();
+        }
+        clear_out_usize(out_len);
         ffi_guard(out_error, || {
             let list = require_ref(list)?;
-            let id = list
-                .ids
-                .get(index)
-                .copied()
-                .ok_or(ScahStatus::IndexOutOfBounds)?;
-            write_ptr(
-                out_element,
-                Box::new(ScahElement {
-                    store: list.store.clone(),
-                    id,
-                }),
-            )?;
+            if out_ids.is_null() || out_len.is_null() {
+                return Err(ScahStatus::NullPointer);
+            }
+            *out_ids = list.ids.as_ptr();
+            *out_len = list.ids.len();
             Ok(())
         })
     }
@@ -349,23 +417,25 @@ pub unsafe extern "C" fn scah_element_list_free(list: *mut ScahElementList) {
 ///
 /// # Safety
 ///
-/// `element` must point to a live [`ScahElement`]. `out_name` must be non-null
-/// and valid for writing one [`ScahStringView`]. The returned view is valid
-/// only while the element's store remains alive. When `out_error` is non-null,
-/// it must be valid for writing one `*mut ScahError`.
+/// `owner` must point to a live [`ScahElementList`]. `element` must be a
+/// bounds-valid store element id. `out_name` must be non-null and valid for
+/// writing one [`ScahStringView`]. The returned view is valid only while
+/// `owner` remains alive. When `out_error` is non-null, it must be valid for
+/// writing one `*mut ScahError`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_name(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     out_name: *mut ScahStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_name.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
-            let el = element_ref(element)?;
+            let el = resolve_element(list, element)?;
             *out_name = ScahStringView::borrow(el.name);
             Ok(())
         })
@@ -376,23 +446,22 @@ pub unsafe extern "C" fn scah_element_name(
 ///
 /// # Safety
 ///
-/// `element` must point to a live [`ScahElement`]. `out_id` must be non-null
-/// and valid for writing one [`ScahOptionalStringView`]. Returned string data
-/// is valid only while the element's store remains alive. When `out_error` is
-/// non-null, it must be valid for writing one `*mut ScahError`.
+/// Same owner/element requirements as [`scah_element_name`]. `out_id` must be
+/// non-null. Returned string data is valid only while `owner` remains alive.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_id(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     out_id: *mut ScahOptionalStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_id.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
-            let el = element_ref(element)?;
+            let el = resolve_element(list, element)?;
             *out_id = ScahOptionalStringView::from_option(el.id);
             Ok(())
         })
@@ -406,17 +475,18 @@ pub unsafe extern "C" fn scah_element_id(
 /// Same requirements as [`scah_element_id`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_class_name(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     out_class: *mut ScahOptionalStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_class.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
-            let el = element_ref(element)?;
+            let el = resolve_element(list, element)?;
             *out_class = ScahOptionalStringView::from_option(el.class);
             Ok(())
         })
@@ -430,17 +500,18 @@ pub unsafe extern "C" fn scah_element_class_name(
 /// Same requirements as [`scah_element_id`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_inner_html(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     out_html: *mut ScahOptionalStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_html.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
-            let el = element_ref(element)?;
+            let el = resolve_element(list, element)?;
             *out_html = ScahOptionalStringView::from_option(el.inner_html);
             Ok(())
         })
@@ -454,19 +525,59 @@ pub unsafe extern "C" fn scah_element_inner_html(
 /// Same requirements as [`scah_element_id`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_text_content(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     out_text: *mut ScahOptionalStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_text.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
-            let el = element_ref(element)?;
-            let text = el.text_content(element.store.store());
+            let el = resolve_element(list, element)?;
+            let text = el.text_content(list.store.store());
             *out_text = ScahOptionalStringView::from_option(text);
+            Ok(())
+        })
+    }
+}
+
+/// Fixed-field element snapshot in one ABI call.
+///
+/// # Safety
+///
+/// Same owner/element requirements as [`scah_element_name`]. `out_view` must be
+/// non-null. All string views remain valid while `owner` remains alive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scah_element_view(
+    owner: *const ScahElementList,
+    element: ScahElementId,
+    out_view: *mut ScahElementView,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    unsafe {
+        ffi_guard(out_error, || {
+            let list = require_ref(owner)?;
+            if out_view.is_null() {
+                return Err(ScahStatus::NullPointer);
+            }
+            let el = resolve_element(list, element)?;
+            let attribute_count = el
+                .attributes(list.store.store())
+                .map(|attrs| attrs.len())
+                .unwrap_or(0);
+            *out_view = ScahElementView {
+                name: ScahStringView::borrow(el.name),
+                id: ScahOptionalStringView::from_option(el.id),
+                class_name: ScahOptionalStringView::from_option(el.class),
+                inner_html: ScahOptionalStringView::from_option(el.inner_html),
+                text_content: ScahOptionalStringView::from_option(
+                    el.text_content(list.store.store()),
+                ),
+                attribute_count,
+            };
             Ok(())
         })
     }
@@ -476,27 +587,26 @@ pub unsafe extern "C" fn scah_element_text_content(
 ///
 /// # Safety
 ///
-/// `element` must point to a live [`ScahElement`]. `key` must satisfy
-/// [`ScahStringView::as_str`]. `out_value` must be non-null and valid for
-/// writing one [`ScahOptionalStringView`]. Returned string data is valid only
-/// while the element's store remains alive. When `out_error` is non-null, it
-/// must be valid for writing one `*mut ScahError`.
+/// `owner` must point to a live [`ScahElementList`]. `key` must satisfy
+/// [`ScahStringView::as_str`]. `out_value` must be non-null. Returned string
+/// data is valid only while `owner` remains alive.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_get_attribute(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     key: ScahStringView,
     out_value: *mut ScahOptionalStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_value.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
             let key = parse_string_view(key, out_error)?;
-            let el = element_ref(element)?;
-            let value = el.attribute(element.store.store(), key);
+            let el = resolve_element(list, element)?;
+            let value = el.attribute(list.store.store(), key);
             *out_value = ScahOptionalStringView::from_option(value);
             Ok(())
         })
@@ -507,24 +617,25 @@ pub unsafe extern "C" fn scah_element_get_attribute(
 ///
 /// # Safety
 ///
-/// `element` must point to a live [`ScahElement`]. `out_count` must be
-/// non-null and valid for writing one `usize`. When `out_error` is non-null,
-/// it must be valid for writing one `*mut ScahError`.
+/// `owner` must point to a live [`ScahElementList`]. `out_count` must be
+/// non-null and valid for writing one `usize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_attribute_count(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     out_count: *mut usize,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
     unsafe {
+        clear_out_usize(out_count);
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_count.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
-            let el = element_ref(element)?;
+            let el = resolve_element(list, element)?;
             let count = el
-                .attributes(element.store.store())
+                .attributes(list.store.store())
                 .map(|attrs| attrs.len())
                 .unwrap_or(0);
             *out_count = count;
@@ -542,13 +653,13 @@ pub unsafe extern "C" fn scah_element_attribute_count(
 ///
 /// # Safety
 ///
-/// `element` must point to a live [`ScahElement`]. `out_key` and `out_value`
-/// must be non-null and valid for writing. Returned string data is valid only
-/// while the element's store remains alive. When `out_error` is non-null, it
-/// must be valid for writing one `*mut ScahError`.
+/// Same owner/element requirements as [`scah_element_name`]. `out_key` and
+/// `out_value` must be non-null. Returned string data is valid only while
+/// `owner` remains alive.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_attribute_at(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     index: usize,
     out_key: *mut ScahStringView,
     out_value: *mut ScahOptionalStringView,
@@ -556,17 +667,73 @@ pub unsafe extern "C" fn scah_element_attribute_at(
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_key.is_null() || out_value.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
-            let el = element_ref(element)?;
+            let el = resolve_element(list, element)?;
             let attrs = el
-                .attributes(element.store.store())
+                .attributes(list.store.store())
                 .ok_or(ScahStatus::IndexOutOfBounds)?;
             let attr = attrs.get(index).ok_or(ScahStatus::IndexOutOfBounds)?;
             *out_key = ScahStringView::borrow(attr.key);
             *out_value = ScahOptionalStringView::from_option(attr.value);
+            Ok(())
+        })
+    }
+}
+
+/// Fill a caller-provided buffer with borrowed attribute views.
+///
+/// When `capacity` is smaller than the attribute count, returns
+/// [`ScahStatus::BufferTooSmall`] and writes the required count to
+/// `*out_written` when that pointer is non-null.
+///
+/// # Safety
+///
+/// `owner` must point to a live [`ScahElementList`]. When `capacity > 0`,
+/// `out_attributes` must point to a writable array of `capacity`
+/// [`ScahAttributeView`] values. `out_written` must be non-null. Returned
+/// string data is valid only while `owner` remains alive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scah_element_attributes_fill(
+    owner: *const ScahElementList,
+    element: ScahElementId,
+    out_attributes: *mut ScahAttributeView,
+    capacity: usize,
+    out_written: *mut usize,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    unsafe {
+        clear_out_usize(out_written);
+        ffi_guard(out_error, || {
+            let list = require_ref(owner)?;
+            if out_written.is_null() {
+                return Err(ScahStatus::NullPointer);
+            }
+            if capacity > 0 && out_attributes.is_null() {
+                return Err(ScahStatus::NullPointer);
+            }
+            let el = resolve_element(list, element)?;
+            let attrs = el.attributes(list.store.store());
+            let count = attrs.map(|a| a.len()).unwrap_or(0);
+            if count > capacity {
+                *out_written = count;
+                set_error(
+                    out_error,
+                    "attribute buffer capacity is smaller than attribute count",
+                );
+                return Err(ScahStatus::BufferTooSmall);
+            }
+            if let Some(attrs) = attrs {
+                for (i, attr) in attrs.iter().enumerate() {
+                    *out_attributes.add(i) = ScahAttributeView {
+                        key: ScahStringView::borrow(attr.key),
+                        value: ScahOptionalStringView::from_option(attr.value),
+                    };
+                }
+            }
+            *out_written = count;
             Ok(())
         })
     }
@@ -578,14 +745,15 @@ pub unsafe extern "C" fn scah_element_attribute_at(
 ///
 /// # Safety
 ///
-/// `element` must point to a live [`ScahElement`]. `query` must satisfy
+/// `owner` must point to a live [`ScahElementList`]. `query` must satisfy
 /// [`ScahStringView::as_str`]. `out_elements` and `out_found` must be non-null
-/// and valid for writing. When `out_error` is non-null, it must be valid for
-/// writing one `*mut ScahError`. On success with `*out_found == 1`, the caller
-/// owns the list and must free it with [`scah_element_list_free`].
+/// and valid for writing. On success with `*out_found == 1`, the caller owns
+/// the child list and must free it with [`scah_element_list_free`]. The child
+/// list retains its own store `Arc`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_element_get(
-    element: *const ScahElement,
+    owner: *const ScahElementList,
+    element: ScahElementId,
     query: ScahStringView,
     out_elements: *mut *mut ScahElementList,
     out_found: *mut u8,
@@ -593,23 +761,26 @@ pub unsafe extern "C" fn scah_element_get(
 ) -> ScahStatus {
     unsafe {
         clear_out_ptr(out_elements);
+        clear_out_u8(out_found);
         ffi_guard(out_error, || {
-            let element = require_ref(element)?;
+            let list = require_ref(owner)?;
             if out_elements.is_null() || out_found.is_null() {
                 return Err(ScahStatus::NullPointer);
             }
             let query = parse_string_view(query, out_error)?;
-            let el = element_ref(element)?;
-            match el.get(element.store.store(), query) {
+            let el = resolve_element(list, element)?;
+            match el.get(list.store.store(), query) {
                 None => {
                     *out_found = 0;
                     *out_elements = std::ptr::null_mut();
                     Ok(())
                 }
                 Some(iter) => {
-                    let store = element.store.clone();
+                    let store = list.store.clone();
                     // SAFETY: each `e` is borrowed from this store's arena.
-                    let ids = iter.map(|e| store.store().elements.index_of(e)).collect();
+                    let ids = iter
+                        .map(|e| store.store().elements.index_of(e).index())
+                        .collect();
                     *out_found = 1;
                     write_ptr(out_elements, Box::new(ScahElementList { store, ids }))?;
                     Ok(())
@@ -617,24 +788,6 @@ pub unsafe extern "C" fn scah_element_get(
             }
         })
     }
-}
-
-/// Free an element handle. Null is a no-op.
-///
-/// # Safety
-///
-/// A non-null `element` must have been returned by scah-ffi, must not already
-/// have been freed, and must not be used again after this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scah_element_free(element: *mut ScahElement) {
-    ffi_guard_void(|| {
-        if element.is_null() {
-            return;
-        }
-        unsafe {
-            drop(Box::from_raw(element));
-        }
-    });
 }
 
 #[cfg(test)]
@@ -667,6 +820,18 @@ mod tests {
             scah_query_builder_free(builder);
         }
         query
+    }
+
+    fn first_id(list: *const ScahElementList) -> ScahElementId {
+        let mut ids: *const ScahElementId = std::ptr::null();
+        let mut len = 0usize;
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { scah_element_list_ids(list, &mut ids, &mut len, &mut err) },
+            ScahStatus::Ok
+        );
+        assert!(len >= 1);
+        unsafe { *ids }
     }
 
     #[test]
@@ -703,21 +868,23 @@ mod tests {
         );
         assert_eq!(found, 1);
 
-        let mut element: *mut ScahElement = std::ptr::null_mut();
+        let mut ids: *const ScahElementId = std::ptr::null();
+        let mut len = 0usize;
         assert_eq!(
-            unsafe { scah_element_list_get(list, 0, &mut element, &mut err) },
+            unsafe { scah_element_list_ids(list, &mut ids, &mut len, &mut err) },
             ScahStatus::Ok
         );
+        assert_eq!(len, 1);
+        let element = unsafe { *ids };
 
-        // Free list and store while element remains alive.
+        // Free store while list remains alive.
         unsafe {
-            scah_element_list_free(list);
             scah_store_free(store);
         }
 
         let mut name = ScahStringView::empty();
         assert_eq!(
-            unsafe { scah_element_name(element, &mut name, &mut err) },
+            unsafe { scah_element_name(list, element, &mut name, &mut err) },
             ScahStatus::Ok
         );
         assert_eq!(
@@ -728,20 +895,23 @@ mod tests {
 
         let mut href = ScahOptionalStringView::none();
         assert_eq!(
-            unsafe { scah_element_get_attribute(element, view("href"), &mut href, &mut err) },
+            unsafe { scah_element_get_attribute(list, element, view("href"), &mut href, &mut err) },
             ScahStatus::Ok
         );
         assert_eq!(href.is_some, 1);
 
         let mut text = ScahOptionalStringView::none();
         assert_eq!(
-            unsafe { scah_element_text_content(element, &mut text, &mut err) },
+            unsafe { scah_element_text_content(list, element, &mut text, &mut err) },
             ScahStatus::Ok
         );
         assert_eq!(text.is_some, 1);
 
+        // Borrowed ID pointer remains valid until list free.
+        assert_eq!(unsafe { *ids }, element);
+
         unsafe {
-            scah_element_free(element);
+            scah_element_list_free(list);
         }
     }
 
@@ -783,13 +953,12 @@ mod tests {
             scah_query_free(query);
             scah_store_free(store);
             scah_store_free(std::ptr::null_mut());
-            scah_element_free(std::ptr::null_mut());
             scah_element_list_free(std::ptr::null_mut());
         }
     }
 
     #[test]
-    fn list_oob_and_optional_empty() {
+    fn invalid_element_id_and_null_owner() {
         let mut builder: *mut ScahQueryBuilder = std::ptr::null_mut();
         let mut query: *mut ScahQuery = std::ptr::null_mut();
         let mut err: *mut ScahError = std::ptr::null_mut();
@@ -816,31 +985,28 @@ mod tests {
         unsafe {
             scah_store_get(store, view("a"), &mut list, &mut found, &mut err);
         }
-        let mut element: *mut ScahElement = std::ptr::null_mut();
+        let element = first_id(list);
+
+        let mut name = ScahStringView::empty();
         assert_eq!(
-            unsafe { scah_element_list_get(list, 5, &mut element, &mut err) },
+            unsafe { scah_element_name(list, usize::MAX, &mut name, &mut err) },
             ScahStatus::IndexOutOfBounds
         );
+        assert_eq!(
+            unsafe { scah_element_name(std::ptr::null(), element, &mut name, &mut err) },
+            ScahStatus::NullPointer
+        );
 
-        unsafe {
-            scah_element_list_get(list, 0, &mut element, &mut err);
-        }
-        let mut text = ScahOptionalStringView::none();
-        unsafe {
-            scah_element_text_content(element, &mut text, &mut err);
-        }
-        // Empty text may be Some("") or None depending on capture; missing id is None.
         let mut id = ScahOptionalStringView {
             value: ScahStringView::borrow("sentinel"),
             is_some: 1,
         };
         unsafe {
-            scah_element_id(element, &mut id, &mut err);
+            scah_element_id(list, element, &mut id, &mut err);
         }
         assert_eq!(id.is_some, 0);
 
         unsafe {
-            scah_element_free(element);
             scah_element_list_free(list);
             scah_store_free(store);
         }
@@ -877,19 +1043,61 @@ mod tests {
             let mut list: *mut ScahElementList = std::ptr::null_mut();
             let mut found = 0u8;
             scah_store_get(store, view("div"), &mut list, &mut found, &mut err);
-            let mut div: *mut ScahElement = std::ptr::null_mut();
-            scah_element_list_get(list, 0, &mut div, &mut err);
-            scah_element_list_free(list);
+            let div = first_id(list);
 
             let mut children: *mut ScahElementList = std::ptr::null_mut();
-            scah_element_get(div, view("a"), &mut children, &mut found, &mut err);
+            scah_element_get(list, div, view("a"), &mut children, &mut found, &mut err);
             assert_eq!(found, 1);
             let mut len = 0usize;
             scah_element_list_len(children, &mut len, &mut err);
             assert_eq!(len, 1);
 
+            // Free original store; child list retains the store.
+            scah_store_free(store);
+            let child_id = first_id(children);
+            let mut name = ScahStringView::empty();
+            assert_eq!(
+                scah_element_name(children, child_id, &mut name, &mut err),
+                ScahStatus::Ok
+            );
+
             scah_element_list_free(children);
-            scah_element_free(div);
+            scah_element_list_free(list);
+        }
+    }
+
+    #[test]
+    fn missing_nested_query_sets_found_zero() {
+        let query = build_simple_query("div");
+        let mut store: *mut ScahStore = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        let queries = [query as *const ScahQuery];
+        unsafe {
+            scah_parse(
+                view("<div></div>"),
+                queries.as_ptr(),
+                1,
+                &mut store,
+                &mut err,
+            );
+            scah_query_free(query);
+        }
+        let mut list: *mut ScahElementList = std::ptr::null_mut();
+        let mut found = 1u8;
+        unsafe {
+            scah_store_get(store, view("div"), &mut list, &mut found, &mut err);
+        }
+        let div = first_id(list);
+        let mut children: *mut ScahElementList = std::ptr::null_mut();
+        found = 1;
+        assert_eq!(
+            unsafe { scah_element_get(list, div, view("a"), &mut children, &mut found, &mut err) },
+            ScahStatus::Ok
+        );
+        assert_eq!(found, 0);
+        assert!(children.is_null());
+        unsafe {
+            scah_element_list_free(list);
             scah_store_free(store);
         }
     }
@@ -906,7 +1114,6 @@ mod tests {
         let mut err: *mut ScahError = std::ptr::null_mut();
 
         {
-            // Caller-owned temporary HTML that is destroyed before any store access.
             let mut html = String::from("<input disabled value=\"\">");
             let view = ScahStringView {
                 data: html.as_ptr(),
@@ -917,7 +1124,6 @@ mod tests {
                 unsafe { scah_parse(view, queries.as_ptr(), 1, &mut store, &mut err) },
                 ScahStatus::Ok
             );
-            // Overwrite and drop the caller buffer; store must retain its own copy.
             html.replace_range(.., &"X".repeat(html.len()));
             drop(html);
         }
@@ -934,15 +1140,10 @@ mod tests {
         );
         assert_eq!(found, 1);
 
-        let mut element: *mut ScahElement = std::ptr::null_mut();
-        assert_eq!(
-            unsafe { scah_element_list_get(list, 0, &mut element, &mut err) },
-            ScahStatus::Ok
-        );
-
+        let element = first_id(list);
         let mut name = ScahStringView::empty();
         assert_eq!(
-            unsafe { scah_element_name(element, &mut name, &mut err) },
+            unsafe { scah_element_name(list, element, &mut name, &mut err) },
             ScahStatus::Ok
         );
         assert_eq!(
@@ -953,21 +1154,22 @@ mod tests {
 
         let mut value = ScahOptionalStringView::none();
         assert_eq!(
-            unsafe { scah_element_get_attribute(element, view("value"), &mut value, &mut err) },
+            unsafe {
+                scah_element_get_attribute(list, element, view("value"), &mut value, &mut err)
+            },
             ScahStatus::Ok
         );
         assert_eq!(value.is_some, 1);
         assert_eq!(value.value.len, 0);
 
         unsafe {
-            scah_element_free(element);
             scah_element_list_free(list);
             scah_store_free(store);
         }
     }
 
     #[test]
-    fn attribute_at_preserves_missing_versus_empty() {
+    fn attribute_at_and_fill_preserve_missing_versus_empty() {
         let query = build_simple_query("input");
         let mut store: *mut ScahStore = std::ptr::null_mut();
         let mut err: *mut ScahError = std::ptr::null_mut();
@@ -993,38 +1195,70 @@ mod tests {
         unsafe {
             scah_store_get(store, view("input"), &mut list, &mut found, &mut err);
         }
-        let mut element: *mut ScahElement = std::ptr::null_mut();
-        unsafe {
-            scah_element_list_get(list, 0, &mut element, &mut err);
-        }
+        let element = first_id(list);
 
         let mut count = 0usize;
         assert_eq!(
-            unsafe { scah_element_attribute_count(element, &mut count, &mut err) },
+            unsafe { scah_element_attribute_count(list, element, &mut count, &mut err) },
             ScahStatus::Ok
         );
         assert_eq!(count, 2);
 
+        let mut buf = [ScahAttributeView {
+            key: ScahStringView::empty(),
+            value: ScahOptionalStringView::none(),
+        }; 2];
+        let mut written = 0usize;
+        assert_eq!(
+            unsafe {
+                scah_element_attributes_fill(
+                    list,
+                    element,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                    &mut err,
+                )
+            },
+            ScahStatus::Ok
+        );
+        assert_eq!(written, 2);
+
+        let mut too_small = 0usize;
+        assert_eq!(
+            unsafe {
+                scah_element_attributes_fill(
+                    list,
+                    element,
+                    buf.as_mut_ptr(),
+                    1,
+                    &mut too_small,
+                    &mut err,
+                )
+            },
+            ScahStatus::BufferTooSmall
+        );
+        assert_eq!(too_small, 2);
+        unsafe {
+            scah_error_free(err);
+            err = std::ptr::null_mut();
+        }
+
         let mut saw_disabled = false;
         let mut saw_value = false;
-        for i in 0..count {
-            let mut key = ScahStringView::empty();
-            let mut value = ScahOptionalStringView::none();
-            assert_eq!(
-                unsafe { scah_element_attribute_at(element, i, &mut key, &mut value, &mut err) },
-                ScahStatus::Ok
-            );
-            let key_str =
-                unsafe { std::str::from_utf8(std::slice::from_raw_parts(key.data, key.len)) }
-                    .unwrap();
+        for view in &buf[..written] {
+            let key_str = unsafe {
+                std::str::from_utf8(std::slice::from_raw_parts(view.key.data, view.key.len))
+            }
+            .unwrap();
             match key_str {
                 "disabled" => {
-                    assert_eq!(value.is_some, 0);
+                    assert_eq!(view.value.is_some, 0);
                     saw_disabled = true;
                 }
                 "value" => {
-                    assert_eq!(value.is_some, 1);
-                    assert_eq!(value.value.len, 0);
+                    assert_eq!(view.value.is_some, 1);
+                    assert_eq!(view.value.value.len, 0);
                     saw_value = true;
                 }
                 other => panic!("unexpected attribute key: {other}"),
@@ -1032,10 +1266,39 @@ mod tests {
         }
         assert!(saw_disabled && saw_value);
 
+        let mut snap = ScahElementView {
+            name: ScahStringView::empty(),
+            id: ScahOptionalStringView::none(),
+            class_name: ScahOptionalStringView::none(),
+            inner_html: ScahOptionalStringView::none(),
+            text_content: ScahOptionalStringView::none(),
+            attribute_count: 0,
+        };
+        assert_eq!(
+            unsafe { scah_element_view(list, element, &mut snap, &mut err) },
+            ScahStatus::Ok
+        );
+        assert_eq!(snap.attribute_count, 2);
+
         unsafe {
-            scah_element_free(element);
             scah_element_list_free(list);
             scah_store_free(store);
+        }
+    }
+
+    #[test]
+    fn output_slots_cleared_on_failure() {
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        let mut found = 1u8;
+        let mut list: *mut ScahElementList = std::ptr::null_mut();
+        // Force a null store → NullPointer; out slots must be cleared.
+        let status =
+            unsafe { scah_store_get(std::ptr::null(), view("a"), &mut list, &mut found, &mut err) };
+        assert_eq!(status, ScahStatus::NullPointer);
+        assert_eq!(found, 0);
+        assert!(list.is_null());
+        unsafe {
+            scah_error_free(err);
         }
     }
 }

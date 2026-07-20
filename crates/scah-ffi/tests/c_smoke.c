@@ -73,6 +73,16 @@ static ScahStringView sv(const char *s) {
     return v;
 }
 
+static ScahElementId first_id(const ScahElementList *list, ScahError **err) {
+    const ScahElementId *ids = NULL;
+    size_t len = 0;
+    expect_ok(scah_element_list_ids(list, &ids, &len, err), err, "list_ids");
+    if (ids == NULL || len == 0) {
+        fail("expected at least one element id");
+    }
+    return ids[0];
+}
+
 int main(void) {
     if (scah_abi_version() != 1) {
         fail("unexpected abi version");
@@ -85,7 +95,6 @@ int main(void) {
     ScahQuery *query = NULL;
     ScahStore *store = NULL;
     ScahElementList *list = NULL;
-    ScahElement *element = NULL;
 
     expect_ok(scah_query_all(sv("div"), scah_save_all(), &root, &err), &err, "query_all");
     expect_ok(scah_query_builder_all(root, sv("section"), scah_save_none(), &err), &err,
@@ -134,66 +143,82 @@ int main(void) {
         fail("div not found");
     }
 
-    expect_ok(scah_element_list_get(list, 0, &element, &err), &err, "list_get");
-    scah_element_list_free(list);
-    list = NULL;
+    const ScahElementId *ids = NULL;
+    size_t id_len = 0;
+    expect_ok(scah_element_list_ids(list, &ids, &id_len, &err), &err, "div_ids");
+    if (ids == NULL || id_len == 0) {
+        fail("missing div ids");
+    }
+    ScahElementId element = ids[0];
 
     ScahStringView name;
-    expect_ok(scah_element_name(element, &name, &err), &err, "element_name");
+    expect_ok(scah_element_name(list, element, &name, &err), &err, "element_name");
     if (name.len != 3 || memcmp(name.data, "div", 3) != 0) {
         fail("unexpected name");
     }
 
     /* Nested lookup: section is a child of div; a is a child of section. */
     ScahElementList *sections = NULL;
-    expect_ok(scah_element_get(element, sv("section"), &sections, &found, &err), &err,
+    expect_ok(scah_element_get(list, element, sv("section"), &sections, &found, &err), &err,
               "element_get_section");
     if (!found || sections == NULL) {
         fail("nested section not found");
     }
 
-    ScahElement *section = NULL;
-    expect_ok(scah_element_list_get(sections, 0, &section, &err), &err, "section_get");
-    scah_element_list_free(sections);
+    ScahElementId section = first_id(sections, &err);
 
     ScahElementList *children = NULL;
-    expect_ok(scah_element_get(section, sv("a"), &children, &found, &err), &err, "element_get_a");
+    expect_ok(scah_element_get(sections, section, sv("a"), &children, &found, &err), &err,
+              "element_get_a");
     if (!found || children == NULL) {
         fail("nested a not found");
     }
 
-    ScahElement *anchor = NULL;
-    expect_ok(scah_element_list_get(children, 0, &anchor, &err), &err, "child_get");
-    scah_element_list_free(children);
+    ScahElementId anchor = first_id(children, &err);
 
-    /* Free store while element handles remain alive. */
+    /* Free store while list owners remain alive. */
     scah_store_free(store);
     store = NULL;
 
     ScahOptionalStringView href;
-    expect_ok(scah_element_get_attribute(anchor, sv("href"), &href, &err), &err, "href");
+    expect_ok(scah_element_get_attribute(children, anchor, sv("href"), &href, &err), &err, "href");
     if (!href.is_some) {
         fail("missing href");
     }
 
     ScahOptionalStringView text;
-    expect_ok(scah_element_text_content(anchor, &text, &err), &err, "text");
+    expect_ok(scah_element_text_content(children, anchor, &text, &err), &err, "text");
     if (!text.is_some) {
         fail("missing text");
     }
 
     size_t attr_count = 0;
-    expect_ok(scah_element_attribute_count(anchor, &attr_count, &err), &err, "attr_count");
+    expect_ok(scah_element_attribute_count(children, anchor, &attr_count, &err), &err,
+              "attr_count");
 
-    scah_element_free(anchor);
-    scah_element_free(section);
-    scah_element_free(element);
+    /* Invalid element ID */
+    {
+        ScahStringView bad_name;
+        ScahStatus bad =
+            scah_element_name(children, (ScahElementId)SIZE_MAX, &bad_name, &err);
+        if (bad != ScahStatus_IndexOutOfBounds) {
+            fail("expected IndexOutOfBounds for invalid id");
+        }
+        if (err != NULL) {
+            scah_error_free(err);
+            err = NULL;
+        }
+    }
+
+    scah_element_list_free(children);
+    scah_element_list_free(sections);
+    scah_element_list_free(list);
+    list = NULL;
 
     /* Null-safe frees */
     scah_query_builder_free(NULL);
     scah_query_free(NULL);
     scah_store_free(NULL);
-    scah_element_free(NULL);
     scah_element_list_free(NULL);
     scah_error_free(NULL);
 
@@ -215,13 +240,49 @@ int main(void) {
         scah_query_builder_free(self_builder);
     }
 
+    /* Stale append token after sibling branch changes the append group. */
+    {
+        ScahQueryBuilder *stale_root = NULL;
+        ScahQueryBuilder *leaf = NULL;
+        ScahQueryBuilder *sibling = NULL;
+        ScahQueryBuilder *grandchild = NULL;
+        ScahQuerySectionId root_parent = 0;
+
+        expect_ok(scah_query_all(sv("root"), scah_save_all(), &stale_root, &err), &err,
+                  "stale_root");
+        expect_ok(scah_query_builder_current_section(stale_root, &root_parent, &err), &err,
+                  "stale_root_section");
+        expect_ok(scah_query_all(sv("leaf"), scah_save_all(), &leaf, &err), &err, "stale_leaf");
+        expect_ok(scah_query_all(sv("sibling"), scah_save_all(), &sibling, &err), &err,
+                  "stale_sibling");
+        expect_ok(scah_query_all(sv("grandchild"), scah_save_all(), &grandchild, &err), &err,
+                  "stale_grandchild");
+
+        expect_ok(scah_query_builder_append(stale_root, root_parent, leaf, &err), &err,
+                  "stale_append_leaf");
+        ScahQuerySectionId leaf_id = 1;
+        expect_ok(scah_query_builder_append(stale_root, root_parent, sibling, &err), &err,
+                  "stale_append_sibling");
+
+        ScahStatus stale_status =
+            scah_query_builder_append(stale_root, leaf_id, grandchild, &err);
+        expect_status(stale_status, ScahStatus_InvalidSection, &err, "stale_append_rejected");
+
+        ScahQuery *stale_query = NULL;
+        expect_ok(scah_query_builder_build(stale_root, &stale_query, &err), &err, "stale_build");
+        scah_query_free(stale_query);
+        scah_query_builder_free(stale_root);
+        scah_query_builder_free(leaf);
+        scah_query_builder_free(sibling);
+        scah_query_builder_free(grandchild);
+    }
+
     /* Missing versus explicitly empty attribute values. */
     {
         ScahQueryBuilder *attr_builder = NULL;
         ScahQuery *attr_query = NULL;
         ScahStore *attr_store = NULL;
         ScahElementList *attr_list = NULL;
-        ScahElement *input = NULL;
         uint8_t attr_found = 0;
 
         expect_ok(scah_query_all(sv("input"), scah_save_all(), &attr_builder, &err), &err,
@@ -239,11 +300,11 @@ int main(void) {
         if (!attr_found || attr_list == NULL) {
             fail("input not found");
         }
-        expect_ok(scah_element_list_get(attr_list, 0, &input, &err), &err, "attr_list_get");
-        scah_element_list_free(attr_list);
+        ScahElementId input = first_id(attr_list, &err);
 
         size_t n = 0;
-        expect_ok(scah_element_attribute_count(input, &n, &err), &err, "attr_count_input");
+        expect_ok(scah_element_attribute_count(attr_list, input, &n, &err), &err,
+                  "attr_count_input");
         if (n != 2) {
             fail("expected two attributes");
         }
@@ -253,7 +314,8 @@ int main(void) {
         for (size_t i = 0; i < n; i++) {
             ScahStringView key;
             ScahOptionalStringView value;
-            expect_ok(scah_element_attribute_at(input, i, &key, &value, &err), &err, "attr_at");
+            expect_ok(scah_element_attribute_at(attr_list, input, i, &key, &value, &err), &err,
+                      "attr_at");
             if (key.len == 8 && memcmp(key.data, "disabled", 8) == 0) {
                 if (value.is_some != 0) {
                     fail("disabled should have no value");
@@ -272,7 +334,7 @@ int main(void) {
             fail("missing expected attributes");
         }
 
-        scah_element_free(input);
+        scah_element_list_free(attr_list);
         scah_store_free(attr_store);
     }
 

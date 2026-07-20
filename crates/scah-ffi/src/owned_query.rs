@@ -20,9 +20,16 @@ struct PendingSection {
 }
 
 /// Pending query tree that owns selector strings until [`OwnedQueryBuilder::build`].
+///
+/// Section IDs returned by [`OwnedQueryBuilder::current_section`] are append
+/// tokens, not permanent random-access mutation handles. An append is valid
+/// only when `parent` is the current last section or the active append parent
+/// established by a prior append in the same append group.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OwnedQueryBuilder {
     sections: Vec<PendingSection>,
+    /// Parent currently accepting consecutive sibling appends (e.g. `.then()`).
+    active_append_parent: Option<QuerySectionId>,
 }
 
 /// Compiled query whose selector string slices borrow [`OwnedQuery::selector_tape`].
@@ -74,6 +81,7 @@ impl OwnedQueryBuilder {
                 parent: None,
                 next_sibling: None,
             }],
+            active_append_parent: None,
         }
     }
 
@@ -86,10 +94,12 @@ impl OwnedQueryBuilder {
                 parent: None,
                 next_sibling: None,
             }],
+            active_append_parent: None,
         }
     }
 
     pub(crate) fn all_mut(&mut self, selector: String, save: Save) {
+        self.active_append_parent = None;
         let parent_index = QuerySectionId(self.sections.len() - 1);
         self.sections.push(PendingSection {
             selector,
@@ -101,6 +111,7 @@ impl OwnedQueryBuilder {
     }
 
     pub(crate) fn first_mut(&mut self, selector: String, save: Save) {
+        self.active_append_parent = None;
         let parent_index = QuerySectionId(self.sections.len() - 1);
         self.sections.push(PendingSection {
             selector,
@@ -123,15 +134,28 @@ impl OwnedQueryBuilder {
         self
     }
 
+    /// Whether `parent` is a valid append token for the current builder state.
+    fn append_parent_is_valid(&self, parent: QuerySectionId) -> bool {
+        if parent.index() >= self.sections.len() {
+            return false;
+        }
+        match self.current_section() {
+            Some(last) if last == parent => true,
+            _ => self.active_append_parent == Some(parent),
+        }
+    }
+
     /// Append a cloned child tree under `parent`.
     ///
-    /// Returns `Err(())` when `parent` is not a valid section id.
+    /// Returns `Err(())` when `parent` is not a valid append token (see
+    /// [`OwnedQueryBuilder`] docs). On success, `parent` becomes the active
+    /// append parent so consecutive sibling branches may be appended.
     pub(crate) fn append(
         &mut self,
         parent: QuerySectionId,
         other: &OwnedQueryBuilder,
     ) -> Result<(), ()> {
-        if parent.index() >= self.sections.len() {
+        if !self.append_parent_is_valid(parent) {
             return Err(());
         }
 
@@ -177,6 +201,7 @@ impl OwnedQueryBuilder {
             }
         }
         self.sections.append(&mut other.sections);
+        self.active_append_parent = Some(parent);
         Ok(())
     }
 
@@ -384,6 +409,47 @@ mod tests {
         let child = OwnedQueryBuilder::new_all("span".into(), Save::all());
         assert!(root.append(QuerySectionId(5), &child).is_err());
         assert_eq!(root.len(), 1);
+    }
+
+    #[test]
+    fn stale_append_parent_is_rejected() {
+        let mut root = OwnedQueryBuilder::new_all("root".into(), Save::all());
+        let root_id = root.current_section().unwrap();
+
+        let leaf = OwnedQueryBuilder::new_all("leaf".into(), Save::all());
+        root.append(root_id, &leaf).unwrap();
+        let leaf_id = QuerySectionId(1);
+        assert_eq!(root.sections[leaf_id.index()].selector, "leaf");
+
+        let sibling = OwnedQueryBuilder::new_all("sibling".into(), Save::all());
+        root.append(root_id, &sibling).unwrap();
+        assert_eq!(root.len(), 3);
+
+        let before = root.clone();
+        let grandchild = OwnedQueryBuilder::new_all("grandchild".into(), Save::all());
+        assert!(root.append(leaf_id, &grandchild).is_err());
+        assert_eq!(root, before);
+
+        // Builder remains usable after the rejected append.
+        let owned = root.build().unwrap();
+        assert_eq!(owned.query().queries.len(), 3);
+    }
+
+    #[test]
+    fn all_mut_clears_active_append_parent() {
+        let mut root = OwnedQueryBuilder::new_all("root".into(), Save::all());
+        let root_id = root.current_section().unwrap();
+        root.append(
+            root_id,
+            &OwnedQueryBuilder::new_all("a".into(), Save::all()),
+        )
+        .unwrap();
+        root.all_mut("linear".into(), Save::none());
+        let stale = root_id;
+        assert!(
+            root.append(stale, &OwnedQueryBuilder::new_all("x".into(), Save::all()))
+                .is_err()
+        );
     }
 
     #[test]

@@ -1,9 +1,6 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use scah_ffi::{
-    ScahError, ScahOptionalStringView, ScahStatus, ScahStringView, scah_error_free,
-    scah_error_message,
-};
+use scah_ffi::{ScahError, ScahStatus, ScahStringView, scah_error_free, scah_error_message};
 
 #[inline]
 pub fn string_view(s: &str) -> ScahStringView {
@@ -13,22 +10,21 @@ pub fn string_view(s: &str) -> ScahStringView {
     }
 }
 
+/// Borrow a FFI string view as `&str` without allocating.
+///
+/// # Safety
+///
+/// `view` must borrow live handle-owned UTF-8 for `'a`.
 #[inline]
-pub fn view_to_string(view: ScahStringView) -> String {
+pub unsafe fn view_as_str<'a>(view: ScahStringView) -> &'a str {
     if view.data.is_null() || view.len == 0 {
-        return String::new();
+        return "";
     }
-    // SAFETY: views returned by scah-ffi borrow live handle-owned UTF-8.
-    unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(view.data, view.len)).into_owned() }
-}
-
-#[inline]
-pub fn optional_to_option(opt: ScahOptionalStringView) -> Option<String> {
-    if opt.is_some == 0 {
-        None
-    } else {
-        Some(view_to_string(opt.value))
-    }
+    // SAFETY: caller guarantees a live UTF-8 borrow for `'a`.
+    let bytes = unsafe { std::slice::from_raw_parts(view.data, view.len) };
+    debug_assert!(std::str::from_utf8(bytes).is_ok());
+    // SAFETY: ABI contract — successful views are valid UTF-8.
+    unsafe { std::str::from_utf8_unchecked(bytes) }
 }
 
 pub fn take_error_message(err: *mut ScahError) -> String {
@@ -36,7 +32,8 @@ pub fn take_error_message(err: *mut ScahError) -> String {
         return String::new();
     }
     // SAFETY: `err` is a live scah-ffi error handle owned by the caller.
-    let msg = view_to_string(unsafe { scah_error_message(err) });
+    let view = unsafe { scah_error_message(err) };
+    let msg = unsafe { view_as_str(view) }.to_owned();
     unsafe {
         scah_error_free(err);
     }
@@ -45,9 +42,7 @@ pub fn take_error_message(err: *mut ScahError) -> String {
 
 pub fn map_status(status: ScahStatus, err: *mut ScahError) -> PyResult<()> {
     if status == ScahStatus::Ok {
-        // Clear any leftover error slot just in case.
         if !err.is_null() {
-            // SAFETY: leftover error handles from Ok paths are still owned.
             unsafe {
                 scah_error_free(err);
             }
@@ -64,6 +59,7 @@ pub fn map_status(status: ScahStatus, err: *mut ScahError) -> PyResult<()> {
         }
         ScahStatus::InvalidSection => "invalid query section",
         ScahStatus::IndexOutOfBounds => "index out of bounds",
+        ScahStatus::BufferTooSmall => "buffer too small",
         ScahStatus::NullPointer => "null pointer",
         ScahStatus::InvalidUtf8 => "invalid UTF-8",
         ScahStatus::InternalPanic => "internal panic in scah-ffi",
@@ -75,12 +71,38 @@ pub fn map_status(status: ScahStatus, err: *mut ScahError) -> PyResult<()> {
         msg
     };
 
+    Err(status_err_message(status, message))
+}
+
+pub fn status_err(status: ScahStatus) -> PyErr {
+    status_err_message(status, status_fallback(status).to_string())
+}
+
+fn status_fallback(status: ScahStatus) -> &'static str {
+    match status {
+        ScahStatus::InvalidSelector => "invalid selector",
+        ScahStatus::EmptyQueries => "parse requires at least one query",
+        ScahStatus::MaximumDepthExceeded => {
+            "HTML nesting depth exceeds the maximum supported depth"
+        }
+        ScahStatus::InvalidSection => "invalid query section",
+        ScahStatus::IndexOutOfBounds => "index out of bounds",
+        ScahStatus::BufferTooSmall => "buffer too small",
+        ScahStatus::NullPointer => "null pointer",
+        ScahStatus::InvalidUtf8 => "invalid UTF-8",
+        ScahStatus::InternalPanic => "internal panic in scah-ffi",
+        ScahStatus::Ok => "ok",
+    }
+}
+
+fn status_err_message(status: ScahStatus, message: String) -> PyErr {
     match status {
         ScahStatus::InvalidSelector
         | ScahStatus::EmptyQueries
         | ScahStatus::MaximumDepthExceeded
         | ScahStatus::InvalidSection
-        | ScahStatus::IndexOutOfBounds => Err(PyValueError::new_err(message)),
-        _ => Err(PyRuntimeError::new_err(message)),
+        | ScahStatus::IndexOutOfBounds
+        | ScahStatus::BufferTooSmall => PyValueError::new_err(message),
+        _ => PyRuntimeError::new_err(message),
     }
 }

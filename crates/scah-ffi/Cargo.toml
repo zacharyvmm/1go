@@ -10,13 +10,17 @@ publish = false
 name = "scah_ffi"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
+[features]
+header-gen = ["dep:cbindgen"]
+
 [[bin]]
 name = "generate_header"
 path = "src/bin/generate_header.rs"
+required-features = ["header-gen"]
 
 [dependencies]
 scah = { path = "../scah" }
-cbindgen = "0.29"
+cbindgen = { version = "0.29", optional = true }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

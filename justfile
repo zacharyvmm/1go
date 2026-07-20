@@ -33,7 +33,7 @@ test-python:
     source ./crates/bindings/scah-python/.venv/bin/activate && uv run pytest ./crates/bindings/scah-python/tests/
 
 ffi-header:
-    cargo run -p scah-ffi --bin generate_header
+    cargo run -p scah-ffi --features header-gen --bin generate_header
 
 format:
     cargo fmt --all

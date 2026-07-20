@@ -201,3 +201,32 @@ def test_attributes_preserve_missing_versus_empty():
     element = store.get("input")[0]
     assert element.attributes["disabled"] is None
     assert element.attributes["value"] == ""
+
+
+def test_large_result_lookup_correctness():
+    """10_000-match lookup returns the correct ordered collection."""
+    count = 10_000
+    html = "".join(f'<a href="/{i}">x</a>' for i in range(count))
+    q = Query.all("a", Save.all()).build()
+    store = parse(html, [q])
+    hits = store.get("a")
+    assert hits is not None
+    assert len(hits) == count
+    assert hits[0].get_attribute("href") == "/0"
+    assert hits[-1].get_attribute("href") == f"/{count - 1}"
+    assert len(store) == count
+
+
+def test_nested_lookup_and_public_types():
+    q = (
+        Query.all("div", Save.all())
+        .all("span", Save.all())
+        .build()
+    )
+    store = parse("<div><span id='s'>hi</span></div>", [q])
+    divs = store.get("div")
+    assert isinstance(divs, list)
+    spans = divs[0].get("span")
+    assert isinstance(spans, list)
+    assert spans[0].id == "s"
+    assert spans[0].name == "span"

@@ -1,10 +1,7 @@
 //! Helpers for calling the scah-ffi C ABI from napi bindings.
 
 use napi::bindgen_prelude::*;
-use scah_ffi::{
-    ScahError, ScahOptionalStringView, ScahStatus, ScahStringView, scah_error_free,
-    scah_error_message,
-};
+use scah_ffi::{ScahError, ScahStatus, ScahStringView, scah_error_free, scah_error_message};
 
 pub fn string_view(s: &str) -> ScahStringView {
     ScahStringView {
@@ -13,24 +10,21 @@ pub fn string_view(s: &str) -> ScahStringView {
     }
 }
 
-pub fn view_to_string(view: ScahStringView) -> String {
-    if view.data.is_null() {
-        return String::new();
+/// Borrow a FFI string view as `&str` without allocating.
+///
+/// # Safety
+///
+/// `view` must borrow live handle-owned UTF-8 for `'a`.
+#[inline]
+pub unsafe fn view_as_str<'a>(view: ScahStringView) -> &'a str {
+    if view.data.is_null() || view.len == 0 {
+        return "";
     }
-    // SAFETY: views returned by scah-ffi borrow live handle-owned UTF-8.
+    // SAFETY: caller guarantees a live UTF-8 borrow for `'a`.
     let bytes = unsafe { std::slice::from_raw_parts(view.data, view.len) };
-    match std::str::from_utf8(bytes) {
-        Ok(s) => s.to_owned(),
-        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
-    }
-}
-
-pub fn optional_to_option(opt: ScahOptionalStringView) -> Option<String> {
-    if opt.is_some == 0 {
-        None
-    } else {
-        Some(view_to_string(opt.value))
-    }
+    debug_assert!(std::str::from_utf8(bytes).is_ok());
+    // SAFETY: ABI contract — successful views are valid UTF-8.
+    unsafe { std::str::from_utf8_unchecked(bytes) }
 }
 
 /// Convert an FFI status + optional error handle into a napi error.
@@ -42,7 +36,7 @@ pub fn status_to_error(status: ScahStatus, err: *mut ScahError) -> Error {
     } else {
         // SAFETY: `err` is a live scah-ffi error handle.
         let view = unsafe { scah_error_message(err) };
-        let msg = view_to_string(view);
+        let msg = unsafe { view_as_str(view) }.to_owned();
         unsafe {
             scah_error_free(err);
         }
@@ -58,13 +52,4 @@ pub fn status_to_error(status: ScahStatus, err: *mut ScahError) -> Error {
         _ => Status::GenericFailure,
     };
     Error::new(napi_status, message)
-}
-
-/// Free an error handle if present (e.g. after manually mapping a known status).
-pub fn free_error(err: *mut ScahError) {
-    if !err.is_null() {
-        unsafe {
-            scah_error_free(err);
-        }
-    }
 }
