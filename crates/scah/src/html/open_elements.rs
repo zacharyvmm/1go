@@ -1,4 +1,5 @@
 use crate::ParseError;
+use crate::engine::multiplexer::SiblingCallback;
 use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
 use crate::store::ElementId;
@@ -15,6 +16,7 @@ pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
     tag: TagFlags,
     pub saved: Vec<SavedElement>,
+    pub sibling_callbacks: Vec<SiblingCallback>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -49,6 +51,7 @@ impl<'html> OpenElementStack<'html> {
             name,
             tag,
             saved: Vec::new(),
+            sibling_callbacks: Vec::new(),
         });
         Ok(())
     }
@@ -70,6 +73,17 @@ impl<'html> OpenElementStack<'html> {
                 inner_html_start,
                 text_content_start,
             });
+        }
+    }
+
+    pub(crate) fn attach_sibling_callbacks(&mut self, callbacks: &mut Vec<SiblingCallback>) {
+        if callbacks.is_empty() {
+            return;
+        }
+        if let Some(open_element) = self.entries.last_mut() {
+            open_element.sibling_callbacks.append(callbacks);
+        } else {
+            callbacks.clear();
         }
     }
 

@@ -1,5 +1,5 @@
-use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
-use super::multiplexer::{DocumentPosition, SaveHit};
+use super::cursor::{CursorLifetime, SENTINEL_SCOPE, ScopedCursor, SiblingLifetimeResult};
+use super::multiplexer::{DocumentPosition, SaveHit, SiblingCallback};
 use crate::debug::ScopedCursorReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::{CursorSuppressionReason, CursorTraceKind, TraceEvent, TransitionRejectReason};
@@ -8,11 +8,11 @@ use crate::store::Store;
 use crate::{
     Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement,
 };
-#[cfg(any(debug_assertions, test))]
 use smallvec::SmallVec;
+use std::num::NonZeroU16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpawnOutcome {
+pub(crate) enum SpawnOutcome {
     Inserted,
     Dominated,
 }
@@ -342,6 +342,67 @@ where
         self.finish_push_cursor(candidate, runner_index, store, create_reason)
     }
 
+    /// Admit a sibling-stream obligation unless an equivalent watcher is live.
+    ///
+    /// Identity is `(output parent, continuation position, scope_depth,
+    /// match_base_depth)`. Earlier watchers dominate later equivalents so
+    /// multiple left-hand matches do not duplicate right-hand work.
+    fn try_push_sibling(
+        &mut self,
+        candidate: ScopedCursor,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
+            'html,
+            'query,
+        >,
+        create_reason: Option<ScopedCursorReason>,
+    ) -> SpawnOutcome {
+        debug_assert_eq!(
+            candidate.match_base_depth(),
+            candidate.scope_depth.saturating_add(1),
+            "sibling cursor match_base_depth must be scope_depth + 1"
+        );
+        debug_assert!(
+            matches!(
+                candidate.lifetime(),
+                CursorLifetime::Scope | CursorLifetime::SiblingsRemaining(_)
+            ),
+            "sibling admission requires a sibling-compatible lifetime"
+        );
+        debug_assert!(
+            matches!(
+                self.query.get_transition(candidate.position.state).guard,
+                Combinator::NextSibling | Combinator::SubsequentSibling
+            ),
+            "sibling admission requires a sibling combinator"
+        );
+
+        let candidate_scope = candidate.scope_depth;
+        let candidate_base = candidate.match_base_depth();
+        for existing in self.cursors.iter().rev() {
+            if existing.end() {
+                continue;
+            }
+            if existing.parent != candidate.parent || existing.position != candidate.position {
+                continue;
+            }
+            if existing.scope_depth == candidate_scope
+                && existing.match_base_depth() == candidate_base
+            {
+                #[cfg(any(debug_assertions, test))]
+                Self::trace_cursor_suppressed(
+                    store,
+                    runner_index,
+                    &candidate,
+                    existing,
+                    CursorSuppressionReason::ExactDuplicate,
+                );
+                return SpawnOutcome::Dominated;
+            }
+        }
+        self.finish_push_cursor(candidate, runner_index, store, create_reason)
+    }
+
     /// Admit a cursor after applying `First` ownership and combinator rules.
     fn try_push_cursor(
         &mut self,
@@ -379,18 +440,101 @@ where
                 self.try_push_descendant(candidate, runner_index, store, create_reason)
             }
             Combinator::Child => self.try_push_child(candidate, runner_index, store, create_reason),
-            // Sibling obligations need stream identity before they can be deduplicated.
             Combinator::NextSibling | Combinator::SubsequentSibling => {
-                debug_assert!(
-                    false,
-                    "sibling cursor admission requires sibling-stream identity"
-                );
-                self.finish_push_cursor(candidate, runner_index, store, create_reason)
+                self.try_push_sibling(candidate, runner_index, store, create_reason)
             }
             Combinator::Namespace => {
                 self.finish_push_cursor(candidate, runner_index, store, create_reason)
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_continuations(
+        &mut self,
+        runner_index: usize,
+        source_depth: super::DepthSize,
+        source_is_self_closing: bool,
+        output_parent: ElementId,
+        positions: &[Position],
+        sibling_callbacks: &mut Vec<SiblingCallback>,
+        store: &mut Store<'html, 'query>,
+    ) {
+        for pos in positions {
+            let guard = &self.query.get_transition(pos.state).guard;
+            match guard {
+                Combinator::Child | Combinator::Descendant => {
+                    if source_is_self_closing {
+                        continue;
+                    }
+                    let continuation = ScopedCursor::new_moving(source_depth, output_parent, *pos);
+                    // Admit directly with the already-resolved guard so ordinary
+                    // child/descendant paths do not re-fetch the transition.
+                    if self.first_scope_is_claimed(&continuation) {
+                        continue;
+                    }
+                    let _ = match guard {
+                        Combinator::Descendant => {
+                            self.try_push_descendant(continuation, runner_index, store, None)
+                        }
+                        Combinator::Child => {
+                            self.try_push_child(continuation, runner_index, store, None)
+                        }
+                        _ => unreachable!(),
+                    };
+                }
+                Combinator::NextSibling | Combinator::SubsequentSibling => {
+                    sibling_callbacks.push(SiblingCallback {
+                        runner_index,
+                        output_parent,
+                        continuation: *pos,
+                    });
+                }
+                Combinator::Namespace => {
+                    debug_assert!(false, "namespace combinator is unsupported");
+                }
+            }
+        }
+    }
+
+    pub(crate) fn activate_sibling(
+        &mut self,
+        runner_index: usize,
+        callback: SiblingCallback,
+        source_depth: super::DepthSize,
+        store: &mut Store<'html, 'query>,
+    ) -> SpawnOutcome {
+        let guard = &self.query.get_transition(callback.continuation.state).guard;
+        let (lifetime, reason) = match guard {
+            Combinator::NextSibling => (
+                CursorLifetime::SiblingsRemaining(NonZeroU16::new(1).unwrap()),
+                ScopedCursorReason::AdjacentSiblingActivated,
+            ),
+            Combinator::SubsequentSibling => (
+                CursorLifetime::Scope,
+                ScopedCursorReason::SubsequentSiblingActivated,
+            ),
+            _ => {
+                debug_assert!(false, "non-sibling callback activation");
+                return SpawnOutcome::Dominated;
+            }
+        };
+
+        let parent_scope_depth = source_depth.saturating_sub(1);
+        debug_assert!(
+            source_depth > 0,
+            "sibling activation requires a positive source depth"
+        );
+
+        let candidate = ScopedCursor::new_sibling(
+            parent_scope_depth,
+            source_depth,
+            callback.output_parent,
+            callback.continuation,
+            lifetime,
+        );
+
+        self.try_push_cursor(candidate, runner_index, store, Some(reason))
     }
 
     pub fn next(
@@ -400,9 +544,12 @@ where
         document_position: &DocumentPosition,
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
+        sibling_callbacks: &mut Vec<SiblingCallback>,
     ) {
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();
+        // Only allocate when an adjacent watcher actually expires.
+        let mut expired_indices: SmallVec<[usize; 2]> = SmallVec::new();
 
         #[cfg(any(debug_assertions, test))]
         let mut emitted_this_step: SmallVec<[(ElementId, QuerySectionId); 4]> = SmallVec::new();
@@ -411,6 +558,9 @@ where
             if self.cursors[i].end() {
                 continue;
             }
+
+            let expires_after = self.cursors[i].consume_sibling_at(depth)
+                == SiblingLifetimeResult::ExpiresAfterCurrentElement;
 
             let position = self.cursors[i].position;
             let matched = self.cursors[i].next(self.query, depth, element);
@@ -434,6 +584,9 @@ where
                             ),
                         }
                     );
+                }
+                if expires_after {
+                    expired_indices.push(i);
                 }
                 continue;
             }
@@ -510,7 +663,8 @@ where
 
                     // Update lifecycle before admitting the anchor so the
                     // matched source does not dominate it.
-                    if !terminal_all {
+                    // Consumed adjacent (`+`) watchers must not block/reactivate.
+                    if !terminal_all && !expires_after {
                         if terminal_first {
                             debug_assert!(
                                 saved_element.is_some(),
@@ -520,13 +674,28 @@ where
                         } else if is_descendant || is_save_point {
                             self.cursors[i].block_until_close(depth);
                         }
+                    } else if expires_after && terminal_first {
+                        debug_assert!(
+                            saved_element.is_some(),
+                            "terminal First must have a saved element"
+                        );
+                        self.claim_first_scope(position.selection, output_parent, i, depth);
                     }
 
-                    if self_closing || terminal_all {
+                    // Child/descendant continuations are skipped for void sources;
+                    // sibling callbacks are still registered via dispatch.
+                    if terminal_all && !self_closing {
+                        if expires_after {
+                            expired_indices.push(i);
+                        }
                         continue;
                     }
 
-                    if !terminal_first && let Some(anchor) = anchor_candidate {
+                    if !self_closing
+                        && !terminal_all
+                        && !terminal_first
+                        && let Some(anchor) = anchor_candidate
+                    {
                         let _ = self.try_push_cursor(
                             anchor,
                             runner_index,
@@ -535,10 +704,29 @@ where
                         );
                     }
 
-                    spawned_positions = self.cursors[i].next_positions(self.query);
-                    for pos in &spawned_positions {
-                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
-                        let _ = self.try_push_cursor(continuation, runner_index, store, None);
+                    if !terminal_all {
+                        spawned_positions = self.cursors[i].next_positions(self.query);
+                        self.dispatch_continuations(
+                            runner_index,
+                            depth,
+                            self_closing,
+                            saved_parent,
+                            &spawned_positions,
+                            sibling_callbacks,
+                            store,
+                        );
+                    } else if self_closing {
+                        // terminal_all on a void element: still allow sibling callbacks.
+                        spawned_positions = self.cursors[i].next_positions(self.query);
+                        self.dispatch_continuations(
+                            runner_index,
+                            depth,
+                            true,
+                            saved_parent,
+                            &spawned_positions,
+                            sibling_callbacks,
+                            store,
+                        );
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
@@ -583,6 +771,20 @@ where
                             );
                             save_hits.push(hit);
                         }
+                        // Void sources may still register sibling callbacks.
+                        spawned_positions = self.cursors[i].next_positions(self.query);
+                        self.dispatch_continuations(
+                            runner_index,
+                            depth,
+                            true,
+                            self.cursors[i].parent,
+                            &spawned_positions,
+                            sibling_callbacks,
+                            store,
+                        );
+                        if expires_after {
+                            expired_indices.push(i);
+                        }
                         continue;
                     }
 
@@ -623,10 +825,35 @@ where
                         self.cursors[i].parent
                     };
 
-                    for pos in &spawned_positions {
-                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
-                        let _ = self.try_push_cursor(continuation, runner_index, store, None);
+                    self.dispatch_continuations(
+                        runner_index,
+                        depth,
+                        false,
+                        saved_parent,
+                        &spawned_positions,
+                        sibling_callbacks,
+                        store,
+                    );
+                }
+            }
+
+            if expires_after {
+                expired_indices.push(i);
+            }
+        }
+
+        // Remove consumed adjacent watchers after the snapshot loop so indices
+        // visited above stay stable.
+        if !expired_indices.is_empty() {
+            expired_indices.sort_unstable();
+            expired_indices.dedup();
+            for index in expired_indices.into_iter().rev() {
+                if index < self.cursors.len() {
+                    // First winners keep ownership until their unwind/scope closes.
+                    if self.cursors[index].is_first_winner() {
+                        continue;
                     }
+                    self.cursors.swap_remove(index);
                 }
             }
         }
@@ -809,6 +1036,7 @@ mod tests {
             },
             &mut store,
             &mut Vec::new(),
+            &mut Vec::new(),
         );
 
         assert!(store.get("div a").is_none());
@@ -837,6 +1065,7 @@ mod tests {
                 self_closing: false,
             },
             &mut store,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
 
@@ -874,6 +1103,7 @@ mod tests {
             },
             &mut store,
             &mut Vec::new(),
+            &mut Vec::new(),
         );
 
         assert!(store.get("div p.class").is_none());
@@ -893,6 +1123,7 @@ mod tests {
                 self_closing: false,
             },
             &mut store,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
 
@@ -972,6 +1203,7 @@ mod tests {
             },
             &mut store,
             &mut Vec::new(),
+            &mut Vec::new(),
         );
         store.text_content.set_start(4);
 
@@ -1015,6 +1247,7 @@ mod tests {
                 self_closing: false,
             },
             &mut store,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
 
@@ -1250,6 +1483,7 @@ mod tests {
             },
             &mut store,
             &mut Vec::new(),
+            &mut Vec::new(),
         );
 
         assert_eq!(selection.cursors[0].position.selection, QuerySectionId(0));
@@ -1285,6 +1519,7 @@ mod tests {
             },
             &mut store,
             &mut save_hits,
+            &mut Vec::new(),
         );
 
         assert!(!save_hits.is_empty(), "p should have save hits");
@@ -1317,6 +1552,7 @@ mod tests {
             },
             &mut store,
             &mut save_hits2,
+            &mut Vec::new(),
         );
 
         assert!(save_hits2.is_empty(), "Second p should NOT be saved");
@@ -1401,6 +1637,7 @@ mod tests {
                 self_closing: false,
             },
             &mut store,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
 
@@ -1502,6 +1739,7 @@ mod tests {
             },
             &mut store,
             &mut Vec::new(),
+            &mut Vec::new(),
         );
 
         assert!(
@@ -1574,6 +1812,7 @@ mod tests {
                 self_closing: false,
             },
             &mut store,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
 
@@ -1655,8 +1894,22 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("main"), &doc_pos(0), &mut store, &mut save_hits);
-        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("main"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let main_depth = 0u16;
         let div_depth = 1u16;
@@ -1697,7 +1950,14 @@ mod tests {
             );
         }
 
-        selection.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(2),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         assert_eq!(
             live_moving_cursors_at(&selection, p_state, output_parent),
@@ -1705,7 +1965,14 @@ mod tests {
             "nested div must not spawn duplicate live p cursors for same parent+position"
         );
 
-        selection.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("p"),
+            &doc_pos(3),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let ps: Vec<_> = store.get("main > div p").unwrap().collect();
         assert_eq!(ps.len(), 1, "Expected exactly one p result");
@@ -1735,10 +2002,38 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("main"), &doc_pos(0), &mut store, &mut save_hits);
-        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
-        selection.next(0, &elem("main"), &doc_pos(2), &mut store, &mut save_hits);
-        selection.next(0, &elem("div"), &doc_pos(3), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("main"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("main"),
+            &doc_pos(2),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(3),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let output_parent = ElementId::default();
         assert_eq!(
@@ -1747,7 +2042,14 @@ mod tests {
             "overlapping nested main>div prefixes must not leave two live p cursors with same parent+position"
         );
 
-        selection.next(0, &elem("p"), &doc_pos(4), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("p"),
+            &doc_pos(4),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let ps: Vec<_> = store.get("main > div p").unwrap().collect();
         assert_eq!(ps.len(), 1, "Expected exactly one p result");
@@ -1763,8 +2065,22 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
-        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let output_parent = ElementId::default();
         let p_count_after_second_div = live_moving_cursors_at(&selection, p_state, output_parent);
@@ -1773,14 +2089,28 @@ mod tests {
             "only one live p cursor after first div>div match"
         );
 
-        selection.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(2),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         assert_eq!(
             live_moving_cursors_at(&selection, p_state, output_parent),
             1,
             "innermost div must not spawn another p cursor"
         );
 
-        selection.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("p"),
+            &doc_pos(3),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let ps: Vec<_> = store.get("div > div p").unwrap().collect();
         assert_eq!(ps.len(), 1, "Expected exactly one p result");
@@ -1888,7 +2218,14 @@ mod tests {
         let div_only = Query::first("div", Save::all()).unwrap().build();
         let mut selection = QueryExecutor::new(&div_only);
         let mut store3 = Store::default();
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store3, &mut Vec::new());
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store3,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
         assert!(
             !selection.early_exit(),
             "first('div') must not early-exit before selected close"
@@ -1920,8 +2257,22 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store2, &mut save_hits);
-        selection.next(0, &elem("div"), &doc_pos(1), &mut store2, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store2,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store2,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         selection.next(
             0,
             &XHtmlElement {
@@ -1938,8 +2289,16 @@ mod tests {
             },
             &mut store2,
             &mut save_hits,
+            &mut Vec::new(),
         );
-        selection.next(0, &elem("p"), &doc_pos(3), &mut store2, &mut save_hits);
+        selection.next(
+            0,
+            &elem("p"),
+            &doc_pos(3),
+            &mut store2,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let live_p: Vec<_> = selection
             .cursors
@@ -1967,13 +2326,27 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("article"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let root = &selection.cursors[0];
         assert!(root.end());
         assert_eq!(root.unwind_depth(), Some(0));
         assert!(!selection.early_exit());
 
-        selection.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("p"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         selection.back(0, "p", &doc_pos(1), &mut store);
         let root = &selection.cursors[0];
@@ -2098,7 +2471,14 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let root = &selection.cursors[0];
         assert!(!root.end());
         assert_eq!(root.unwind_depth(), None);
@@ -2143,7 +2523,14 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         save_hits.clear();
         selection.next(
             0,
@@ -2156,6 +2543,7 @@ mod tests {
             },
             &mut store,
             &mut save_hits,
+            &mut Vec::new(),
         );
         assert_eq!(save_hits.len(), 1, "void child First must save once");
         assert!(
@@ -2213,6 +2601,7 @@ mod tests {
             },
             &mut store,
             &mut save_hits,
+            &mut Vec::new(),
         );
         assert_eq!(save_hits.len(), 1, "void parent must be saved once");
         assert!(
@@ -2249,7 +2638,14 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         selection.next(
             0,
             &elem("br"),
@@ -2261,6 +2657,7 @@ mod tests {
             },
             &mut store,
             &mut save_hits,
+            &mut Vec::new(),
         );
         assert!(
             selection
@@ -2697,8 +3094,22 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("main"), &doc_pos(0), &mut store, &mut save_hits);
-        selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("main"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let blocked_idx = selection
             .cursors
@@ -2898,7 +3309,14 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         assert!(selection.cursors[0].is_first_winner());
         assert!(selection.cursors[0].is_complete());
         assert_eq!(selection.cursors[0].unwind_depth(), Some(0));
@@ -2948,6 +3366,7 @@ mod tests {
             },
             &mut store,
             &mut save_hits,
+            &mut Vec::new(),
         );
         assert!(selection.cursors[0].is_first_winner());
         assert!(selection.cursors[0].is_complete());
@@ -3092,11 +3511,32 @@ mod tests {
         let mut executor = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("article"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let article_id = save_hits[0].element_id;
 
-        executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
-        executor.next(0, &elem("p"), &doc_pos(2), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        executor.next(
+            0,
+            &elem("p"),
+            &doc_pos(2),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let first_section = QuerySectionId(1);
         let winner = executor
@@ -3163,8 +3603,22 @@ mod tests {
         let mut executor = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        executor.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
-        executor.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        executor.next(
+            0,
+            &elem("p"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let winner = executor
             .cursors
@@ -3203,9 +3657,23 @@ mod tests {
         let mut executor = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("article"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let article_id = save_hits[0].element_id;
-        executor.next(0, &elem("h1"), &doc_pos(1), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("h1"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
 
         let winner = executor
             .cursors
@@ -3233,9 +3701,23 @@ mod tests {
         let mut executor = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("article"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let article_id = save_hits[0].element_id;
-        executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         executor.next(
             0,
             &elem("br"),
@@ -3247,6 +3729,7 @@ mod tests {
             },
             &mut store,
             &mut save_hits,
+            &mut Vec::new(),
         );
         executor.back(
             0,
@@ -3306,18 +3789,60 @@ mod tests {
         let mut save_hits = Vec::new();
         let first_section = QuerySectionId(1);
 
-        executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("article"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let article_outer = save_hits[0].element_id;
-        executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
-        executor.next(0, &elem("p"), &doc_pos(2), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("div"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        executor.next(
+            0,
+            &elem("p"),
+            &doc_pos(2),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         executor.back(0, "p", &doc_pos(2), &mut store);
         executor.back(0, "div", &doc_pos(1), &mut store);
 
-        executor.next(0, &elem("article"), &doc_pos(1), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("article"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let article_inner = save_hits.last().expect("inner article").element_id;
         assert_ne!(article_outer, article_inner);
-        executor.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
-        executor.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
+        executor.next(
+            0,
+            &elem("div"),
+            &doc_pos(2),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        executor.next(
+            0,
+            &elem("p"),
+            &doc_pos(3),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         executor.back(0, "p", &doc_pos(3), &mut store);
         executor.back(0, "div", &doc_pos(2), &mut store);
 
@@ -3378,10 +3903,31 @@ mod tests {
 
         for _ in 0..3 {
             let before = save_hits.len();
-            executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
+            executor.next(
+                0,
+                &elem("article"),
+                &doc_pos(0),
+                &mut store,
+                &mut save_hits,
+                &mut Vec::new(),
+            );
             let article_id = save_hits[before].element_id;
-            executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
-            executor.next(0, &elem("p"), &doc_pos(2), &mut store, &mut save_hits);
+            executor.next(
+                0,
+                &elem("div"),
+                &doc_pos(1),
+                &mut store,
+                &mut save_hits,
+                &mut Vec::new(),
+            );
+            executor.next(
+                0,
+                &elem("p"),
+                &doc_pos(2),
+                &mut store,
+                &mut save_hits,
+                &mut Vec::new(),
+            );
             executor.back(0, "p", &doc_pos(2), &mut store);
             executor.back(0, "div", &doc_pos(1), &mut store);
 
@@ -3585,8 +4131,22 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
-        selection.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("p"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         assert_eq!(save_hits.len(), 1);
 
         let winner = selection
@@ -3615,7 +4175,14 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         let blocked_idx = selection
             .cursors
             .iter()
@@ -3632,8 +4199,22 @@ mod tests {
         assert!(reactivated.is_active());
         assert!(!reactivated.is_first_winner());
 
-        selection.next(0, &elem("div"), &doc_pos(0), &mut store, &mut save_hits);
-        selection.next(0, &elem("p"), &doc_pos(1), &mut store, &mut save_hits);
+        selection.next(
+            0,
+            &elem("div"),
+            &doc_pos(0),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
+        selection.next(
+            0,
+            &elem("p"),
+            &doc_pos(1),
+            &mut store,
+            &mut save_hits,
+            &mut Vec::new(),
+        );
         assert_eq!(save_hits.len(), 1);
         let winner = selection
             .cursors

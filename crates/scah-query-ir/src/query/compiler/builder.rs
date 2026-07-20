@@ -366,7 +366,7 @@ impl<'query> QueryFactory {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ClassSelections, Query, QuerySectionId, Save, SelectionKind};
+    use crate::{ClassSelections, Combinator, Query, QuerySectionId, Save, SelectionKind};
 
     #[test]
     fn test_builder_with_class_chaining() {
@@ -423,8 +423,14 @@ mod tests {
             "a > ",
             ".",
             "#",
-            " a ~ b",
-            "a + b",
+            "+ p",
+            "~ p",
+            "a +",
+            "a ~",
+            "a + ~ b",
+            "a ~ + b",
+            "a ++ b",
+            "a ~~ b",
             "a[]",
             "*",
             "a[123=\"321\"]",
@@ -435,6 +441,48 @@ mod tests {
 
         for selector in invalid {
             assert!(Query::all(selector, Save::none()).is_err(), "{selector}");
+        }
+    }
+
+    #[test]
+    fn sibling_combinators_compile_with_expected_guards() {
+        let cases = [
+            (
+                "h1 + p",
+                &[Combinator::Descendant, Combinator::NextSibling][..],
+            ),
+            ("h1+p", &[Combinator::Descendant, Combinator::NextSibling]),
+            (
+                "h1   +   p",
+                &[Combinator::Descendant, Combinator::NextSibling],
+            ),
+            (
+                "h1 ~ p",
+                &[Combinator::Descendant, Combinator::SubsequentSibling],
+            ),
+            (
+                "h1~p",
+                &[Combinator::Descendant, Combinator::SubsequentSibling],
+            ),
+            (
+                "h1   ~   p",
+                &[Combinator::Descendant, Combinator::SubsequentSibling],
+            ),
+            (
+                "main > div ~ p > span",
+                &[
+                    Combinator::Descendant,
+                    Combinator::Child,
+                    Combinator::SubsequentSibling,
+                    Combinator::Child,
+                ],
+            ),
+        ];
+
+        for (selector, expected) in cases {
+            let query = Query::all(selector, Save::none()).unwrap().build();
+            let guards: Vec<_> = query.states.iter().map(|t| t.guard.clone()).collect();
+            assert_eq!(guards, expected, "{selector}");
         }
     }
 
@@ -500,7 +548,7 @@ mod tests {
             .then(|article| {
                 Ok([
                     article.all("a[href]", Save::all())?,
-                    article.first("a + b", Save::only_text_content())?,
+                    article.first("+ b", Save::only_text_content())?,
                 ])
             })
             .unwrap_err();
@@ -564,7 +612,7 @@ mod tests {
             .unwrap()
             .then(|article| {
                 let first = article.all("section", Save::none())?;
-                let second = article.first("a + b", Save::all());
+                let second = article.first("+ b", Save::all());
                 match second {
                     Ok(second) => Ok([first, second]),
                     Err(err) => Err(err),

@@ -1,4 +1,5 @@
 use super::executor::QueryExecutor;
+use crate::Position;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
@@ -18,6 +19,18 @@ pub(crate) struct SaveHit {
     pub element_id: ElementId,
     pub save_inner_html: bool,
     pub save_text_content: bool,
+}
+
+/// Deferred close-time activation of a CSS `+` / `~` right-hand cursor.
+///
+/// Created when the left-hand transition matches; activated when that element
+/// closes (or immediately for void/self-closing sources). Lifetime is derived
+/// from the continuation transition's combinator, not stored here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SiblingCallback {
+    pub runner_index: usize,
+    pub output_parent: ElementId,
+    pub continuation: Position,
 }
 
 type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
@@ -123,17 +136,42 @@ where
         position: &DocumentPosition,
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
+        sibling_callbacks: &mut Vec<SiblingCallback>,
     ) {
         let len = store.elements.len();
         save_hits.clear();
+        sibling_callbacks.clear();
         for (runner_index, session) in self.runners.iter_mut().enumerate() {
-            session.next(runner_index, xhtml_element, position, store, save_hits);
+            session.next(
+                runner_index,
+                xhtml_element,
+                position,
+                store,
+                save_hits,
+                sibling_callbacks,
+            );
         }
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
         if len == store.elements.len() {
             xhtml_element.remove_attributes(&mut store.attributes);
         }
+    }
+
+    pub(crate) fn activate_sibling_callbacks(
+        &mut self,
+        callbacks: &mut Vec<SiblingCallback>,
+        source_depth: crate::engine::DepthSize,
+        store: &mut Store<'html, 'query>,
+    ) {
+        for callback in callbacks.drain(..) {
+            let Some(session) = self.runners.get_mut(callback.runner_index) else {
+                continue;
+            };
+            let _ = session.activate_sibling(callback.runner_index, callback, source_depth, store);
+        }
+        #[cfg(feature = "bench-internals")]
+        self.track_cursor_stats();
     }
 
     pub(crate) fn back(

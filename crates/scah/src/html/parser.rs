@@ -9,7 +9,7 @@ use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
 use crate::engine::MAX_ELEMENT_DEPTH;
-use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
+use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit, SiblingCallback};
 use crate::store::Store;
 
 #[derive(Default)]
@@ -17,6 +17,7 @@ struct ParserTempState<'html> {
     closing_elements: Vec<OpenElement<'html>>,
     implied_closes: Vec<OpenElement<'html>>,
     save_hits: Vec<SaveHit>,
+    sibling_callbacks: Vec<SiblingCallback>,
 }
 
 pub struct XHtmlParser<'html, 'query, Q> {
@@ -206,7 +207,12 @@ where
                 self.position.reader_position = tag_start_position;
                 self.open_elements
                     .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
-                self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
+                self.drain_implied_closes(
+                    reader,
+                    Some(ImpliedCloseReason::OpenTagRule),
+                    None,
+                    true,
+                );
                 self.position.reader_position = reader.get_position();
 
                 let is_self_closing = tag.is_void();
@@ -241,8 +247,15 @@ where
                     &self.position,
                     &mut self.store,
                     &mut self.temp_state.save_hits,
+                    &mut self.temp_state.sibling_callbacks,
                 );
                 if is_self_closing {
+                    let source_depth = self.position.element_depth;
+                    self.selectors.activate_sibling_callbacks(
+                        &mut self.temp_state.sibling_callbacks,
+                        source_depth,
+                        &mut self.store,
+                    );
                     early_exit = self.selectors.back(
                         self.element.name,
                         &self.position,
@@ -261,6 +274,8 @@ where
                                 .then_some(self.position.text_content_position),
                         );
                     }
+                    self.open_elements
+                        .attach_sibling_callbacks(&mut self.temp_state.sibling_callbacks);
                 }
 
                 self.element.clear();
@@ -321,11 +336,21 @@ where
         open_element: OpenElement<'html>,
         close_depth: crate::engine::DepthSize,
         reader: &Reader<'html>,
+        activate_sibling_callbacks: bool,
     ) -> bool {
         self.finalize_open_element(&open_element, reader);
         self.position.element_depth = close_depth;
-        self.selectors
-            .back(open_element.name, &self.position, reader, &mut self.store)
+        let early_exit =
+            self.selectors
+                .back(open_element.name, &self.position, reader, &mut self.store);
+
+        if activate_sibling_callbacks && !open_element.sibling_callbacks.is_empty() {
+            let mut callbacks = open_element.sibling_callbacks;
+            self.selectors
+                .activate_sibling_callbacks(&mut callbacks, close_depth, &mut self.store);
+        }
+
+        early_exit
     }
 
     /// Drain the implied-closes vector, finalizing each element, and restore
@@ -335,6 +360,7 @@ where
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
         expected_tag: Option<&'html str>,
+        activate_sibling_callbacks: bool,
     ) -> bool {
         let base_depth = self.open_elements.depth();
         let mut elems = std::mem::take(&mut self.temp_state.implied_closes);
@@ -357,7 +383,11 @@ where
                     }
                 );
             }
-            early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
+            // Only the final pop in a batch can have later siblings under its parent.
+            let parent_survives_batch = activate_sibling_callbacks && index + 1 == total;
+            early_exit =
+                self.pop_open_element(open_element, close_depth, reader, parent_survives_batch)
+                    || early_exit;
         }
 
         self.temp_state.implied_closes = elems;
@@ -412,7 +442,10 @@ where
                     }
                 );
             }
-            early_exit = self.pop_open_element(open_element, close_depth, reader) || early_exit;
+            let parent_survives_batch = index + 1 == total;
+            early_exit =
+                self.pop_open_element(open_element, close_depth, reader, parent_survives_batch)
+                    || early_exit;
         }
 
         self.temp_state.closing_elements = closing_elements;
@@ -460,7 +493,7 @@ where
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
-        self.drain_implied_closes(reader, Some(ImpliedCloseReason::EofDrain), None);
+        self.drain_implied_closes(reader, Some(ImpliedCloseReason::EofDrain), None, false);
         self.eof_drained = true;
     }
 }
