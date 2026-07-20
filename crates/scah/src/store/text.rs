@@ -66,7 +66,11 @@ impl TextTape {
         self.content.last().copied()
     }
 
+    /// Pop the last byte. The normalized text tape is append-only after content
+    /// may be referenced by finalized ranges; callers must not use this to
+    /// rewrite emitted text.
     #[inline]
+    #[allow(dead_code)]
     pub fn pop_byte(&mut self) -> Option<u8> {
         self.content.pop()
     }

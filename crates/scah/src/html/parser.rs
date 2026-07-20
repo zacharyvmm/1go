@@ -2,7 +2,8 @@ use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
 use super::text_state::{
-    ParserTextState, PendingSeparator, TextEdgePolicy, TextElementBehavior, TextElementFlags,
+    ParserTextState, PendingSeparator, TextCaptureMode, TextEdgePolicy, TextElementBehavior,
+    TextElementFlags,
 };
 use crate::ParseError;
 use crate::QuerySpec;
@@ -29,6 +30,8 @@ pub struct XHtmlParser<'html, 'query, Q> {
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
     temp_state: ParserTempState<'html>,
+    /// Hot-path capture mode (mirrors `text_state.mode` for cheaper checks).
+    capture_mode: TextCaptureMode,
     text_state: ParserTextState,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
@@ -47,7 +50,13 @@ fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
 }
 
 #[inline]
-fn element_has_hidden(element: &XHtmlElement<'_>) -> bool {
+fn element_has_hidden(element: &XHtmlElement<'_>, text_state: &mut ParserTextState) -> bool {
+    #[cfg(feature = "bench-internals")]
+    {
+        text_state.path_stats.hidden_attribute_scans += 1;
+    }
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = text_state;
     element
         .attributes
         .iter()
@@ -58,7 +67,17 @@ fn element_has_hidden(element: &XHtmlElement<'_>) -> bool {
 ///
 /// Only called when normalized text capture is enabled.
 #[inline]
-fn text_behavior_for(tag: TagFlags, has_hidden: bool) -> TextElementBehavior {
+fn text_behavior_for(
+    tag: TagFlags,
+    has_hidden: bool,
+    text_state: &mut ParserTextState,
+) -> TextElementBehavior {
+    #[cfg(feature = "bench-internals")]
+    {
+        text_state.path_stats.normalized_behavior_computations += 1;
+    }
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = text_state;
     let suppressed = tag.is_text_suppressed() || has_hidden;
     let preformatted = tag.is_text_preformatted();
     let opening_separator = if suppressed {
@@ -87,6 +106,7 @@ where
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
         let requirements = selectors.text_requirements();
+        let text_state = ParserTextState::new(requirements);
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -97,7 +117,8 @@ where
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState::default(),
-            text_state: ParserTextState::new(requirements),
+            capture_mode: text_state.mode,
+            text_state,
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
@@ -107,6 +128,7 @@ where
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
         let requirements = selectors.text_requirements();
+        let text_state = ParserTextState::new(requirements);
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -117,7 +139,8 @@ where
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState::default(),
-            text_state: ParserTextState::new(requirements),
+            capture_mode: text_state.mode,
+            text_state,
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
@@ -133,6 +156,10 @@ where
     }
 
     fn flush_source_text(&mut self, reader: &Reader<'html>, end: usize) {
+        #[cfg(feature = "bench-internals")]
+        {
+            self.text_state.path_stats.flush_calls += 1;
+        }
         let Some(start) = self.text_state.source_start.take() else {
             return;
         };
@@ -140,13 +167,22 @@ where
             return;
         }
         let slice = reader.slice(start..end);
-        if self.text_state.captures_raw() {
-            self.store.text.raw_text.push_str(slice);
-        }
-        if self.text_state.captures_text() {
-            let depth = self.position.element_depth;
-            self.text_state
-                .write_normalized_fragment(&mut self.store.text.text, slice, depth);
+        match self.text_state.mode {
+            TextCaptureMode::None => {}
+            TextCaptureMode::RawOnly => {
+                self.store.text.raw_text.push_str(slice);
+            }
+            TextCaptureMode::TextOnly => {
+                let depth = self.position.element_depth;
+                self.text_state
+                    .write_normalized_fragment(&mut self.store.text.text, slice, depth);
+            }
+            TextCaptureMode::Both => {
+                self.store.text.raw_text.push_str(slice);
+                let depth = self.position.element_depth;
+                self.text_state
+                    .write_normalized_fragment(&mut self.store.text.text, slice, depth);
+            }
         }
     }
 
@@ -173,7 +209,9 @@ where
                 if reader.match_ignore_case(close_tag)
                     && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
                 {
-                    self.flush_source_text(reader, reader.get_position());
+                    if self.capture_mode.captures_any() {
+                        self.flush_source_text(reader, reader.get_position());
+                    }
                     self.raw_text_close = None;
 
                     self.position.reader_position = reader.get_position();
@@ -182,7 +220,9 @@ where
 
                     let closing_tag = &close_tag[2..];
                     let early_exit = self.handle_close_tag(closing_tag, reader);
-                    self.text_state.mark_source_start(reader.get_position());
+                    if self.capture_mode.captures_any() {
+                        self.text_state.mark_source_start(reader.get_position());
+                    }
                     return !early_exit && !reader.eof();
                 } else {
                     reader.skip();
@@ -209,11 +249,15 @@ where
                 } else if tag.is_none() {
                     // Comment / doctype / declaration: keep preceding text,
                     // skip the markup itself, then resume at the next `<`.
-                    self.flush_source_text(reader, self.position.reader_position);
-                    if self.text_state.captures_text() {
+                    if self.capture_mode.captures_any() {
+                        self.flush_source_text(reader, self.position.reader_position);
+                    }
+                    if self.capture_mode.captures_text() {
                         self.text_state.cancel_initial_newline();
                     }
-                    self.text_state.mark_source_start(reader.get_position());
+                    if self.capture_mode.captures_any() {
+                        self.text_state.mark_source_start(reader.get_position());
+                    }
                     reader.next_until(b'<');
                     if reader.peek().is_none() {
                         self.drain_open_elements(reader);
@@ -226,7 +270,9 @@ where
         };
         let tag_start_position = self.position.reader_position;
 
-        self.flush_source_text(reader, tag_start_position);
+        if self.capture_mode.captures_any() {
+            self.flush_source_text(reader, tag_start_position);
+        }
 
         let mut early_exit = false;
 
@@ -235,16 +281,18 @@ where
                 let tag = TagFlags::classify(self.element.name);
                 // Only scan attributes / compute text behavior when normalized
                 // text is requested. Raw-only and no-text modes skip this work.
-                let text_behavior = if self.text_state.captures_text() {
-                    Some(text_behavior_for(tag, element_has_hidden(&self.element)))
+                let text_behavior = if self.capture_mode.captures_text() {
+                    let has_hidden = element_has_hidden(&self.element, &mut self.text_state);
+                    Some(text_behavior_for(tag, has_hidden, &mut self.text_state))
                 } else {
                     None
                 };
                 let text_flags = text_behavior
                     .map(TextElementBehavior::flags)
                     .unwrap_or_else(TextElementFlags::empty);
+                // Inherited preformatted context must be read before enter_element.
                 let text_edge_policy = text_behavior
-                    .map(TextElementBehavior::edge_policy)
+                    .map(|behavior| self.text_state.edge_policy_for_child(behavior))
                     .unwrap_or(TextEdgePolicy::TrimCollapsedSeparators);
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
@@ -262,7 +310,7 @@ where
 
                 // Child start tags cancel preformatted initial-newline eligibility
                 // for the current open pre/textarea (intervening token rule).
-                if self.text_state.captures_text() {
+                if self.capture_mode.captures_text() {
                     self.text_state.cancel_initial_newline();
                 }
 
@@ -353,14 +401,18 @@ where
                 }
 
                 self.element.clear();
-                self.text_state.mark_source_start(reader.get_position());
+                if self.capture_mode.captures_any() {
+                    self.text_state.mark_source_start(reader.get_position());
+                }
             }
             XHtmlTag::Close(closing_tag) => {
-                if self.text_state.captures_text() {
+                if self.capture_mode.captures_text() {
                     self.text_state.cancel_initial_newline();
                 }
                 early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
-                self.text_state.mark_source_start(reader.get_position());
+                if self.capture_mode.captures_any() {
+                    self.text_state.mark_source_start(reader.get_position());
+                }
             }
         }
 
@@ -418,7 +470,7 @@ where
         reader: &Reader<'html>,
     ) -> bool {
         self.finalize_open_element(&open_element, reader);
-        if self.text_state.captures_text() {
+        if self.capture_mode.captures_text() {
             self.text_state.after_close_element(open_element.text_flags);
             if !open_element
                 .text_flags
@@ -553,7 +605,9 @@ where
             return;
         }
 
-        self.flush_source_text(reader, reader.get_position());
+        if self.capture_mode.captures_any() {
+            self.flush_source_text(reader, reader.get_position());
+        }
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
@@ -1658,5 +1712,49 @@ mod tests {
         let store = parse(html, queries).expect("parse succeeds");
 
         assert_eq!(store.get("a").unwrap().count(), 1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn path_stats_for(html: &str, save: Save) -> crate::html::TextPathStats {
+        let queries = &[Query::all("div", save).unwrap().build()];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+        let mut reader = Reader::new(html);
+        while parser.next(&mut reader) {}
+        assert!(parser.take_parse_error().is_none());
+        parser.text_state.path_stats
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn no_content_skips_text_path_helpers() {
+        let stats = path_stats_for("<div>A&amp;B</div>", Save::none());
+        assert_eq!(stats.flush_calls, 0);
+        assert_eq!(stats.mark_start_calls, 0);
+        assert_eq!(stats.normalized_behavior_computations, 0);
+        assert_eq!(stats.hidden_attribute_scans, 0);
+        assert_eq!(stats.decoded_fragments, 0);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn inner_html_only_skips_text_path_helpers() {
+        let stats = path_stats_for("<div>A&amp;B</div>", Save::only_inner_html());
+        assert_eq!(stats.flush_calls, 0);
+        assert_eq!(stats.mark_start_calls, 0);
+        assert_eq!(stats.normalized_behavior_computations, 0);
+        assert_eq!(stats.hidden_attribute_scans, 0);
+        assert_eq!(stats.decoded_fragments, 0);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn raw_only_skips_normalized_behavior() {
+        let stats = path_stats_for("<div hidden>A&amp;B</div>", Save::only_raw_text());
+        assert!(stats.flush_calls > 0);
+        assert!(stats.mark_start_calls > 0);
+        assert_eq!(stats.normalized_behavior_computations, 0);
+        assert_eq!(stats.hidden_attribute_scans, 0);
+        assert_eq!(stats.decoded_fragments, 0);
     }
 }

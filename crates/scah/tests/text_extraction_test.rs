@@ -113,6 +113,11 @@ fn first_with_raw_text_only_skips_normalized_tape() {
     assert_eq!(title.text(&store), None);
 }
 
+/// Assert generated/collapsed separator canonicalization.
+///
+/// Do not apply this to selected `pre` / `textarea` output: literal
+/// preformatted whitespace may legally produce `" \n"` when a structural
+/// newline follows source-literal trailing spaces.
 fn assert_canonical_separators(text: &str) {
     assert!(!text.contains("\n "), "space after newline: {text:?}");
     assert!(!text.contains("\n\t"), "tab after newline: {text:?}");
@@ -353,4 +358,159 @@ fn hidden_attribute_case_insensitive() {
     ] {
         assert_eq!(text_of(html, "div"), "AB", "html={html}");
     }
+}
+
+#[test]
+fn finalized_pre_range_survives_following_block() {
+    let html = "<pre>A   </pre><div></div>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("div", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+    let pre = store.get("pre").unwrap().next().unwrap();
+    let div = store.get("div").unwrap().next().unwrap();
+    assert_eq!(pre.text(&store), Some("A   "));
+    assert_eq!(div.text(&store), Some(""));
+}
+
+#[test]
+fn finalized_pre_range_survives_following_section() {
+    let html = "<pre>A   </pre><section>B</section>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("section", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+    assert_eq!(
+        store.get("pre").unwrap().next().unwrap().text(&store),
+        Some("A   ")
+    );
+    assert_eq!(
+        store.get("section").unwrap().next().unwrap().text(&store),
+        Some("B")
+    );
+}
+
+#[test]
+fn finalized_pre_range_survives_following_hidden_block() {
+    let html = "<pre>A   </pre><div hidden><div>X</div></div>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("div", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+    let mut divs = store.get("div").unwrap();
+    let outer = divs.next().unwrap();
+    assert_eq!(
+        store.get("pre").unwrap().next().unwrap().text(&store),
+        Some("A   ")
+    );
+    assert_eq!(outer.text(&store), Some(""));
+}
+
+#[test]
+fn multiple_finalized_pre_ranges_survive_following_div() {
+    let html = "<pre>A   </pre><pre>B  </pre><div>C</div>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("div", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+
+    let mut pres = store.get("pre").unwrap();
+    let first_pre = pres.next().unwrap();
+    let second_pre = pres.next().unwrap();
+    let div = store.get("div").unwrap().next().unwrap();
+
+    // Access-order independence: read div first, then reverse pre order.
+    assert_eq!(div.text(&store), Some("C"));
+    assert_eq!(second_pre.text(&store), Some("B  "));
+    assert_eq!(first_pre.text(&store), Some("A   "));
+
+    // And again in original order.
+    assert_eq!(first_pre.text(&store), Some("A   "));
+    assert_eq!(second_pre.text(&store), Some("B  "));
+    assert_eq!(div.text(&store), Some("C"));
+}
+
+#[test]
+fn selected_span_inside_pre_preserves_whitespace() {
+    let html = "<pre><span>  A  </span></pre>";
+    assert_eq!(text_of(html, "span"), "  A  ");
+}
+
+#[test]
+fn selected_nested_strong_inside_pre_preserves_whitespace() {
+    let html = "<pre><span><strong>  A  </strong></span></pre>";
+    assert_eq!(text_of(html, "strong"), "  A  ");
+}
+
+#[test]
+fn selected_strong_inside_pre_preserves_intervening_leading_newline() {
+    let html = "<pre><strong>\n  A\n</strong></pre>";
+    assert_eq!(text_of(html, "strong"), "\n  A\n");
+}
+
+#[test]
+fn ordinary_span_outside_pre_trims_collapsed_edges() {
+    let html = "<div><span>  A  </span></div>";
+    assert_eq!(text_of(html, "span"), "A");
+}
+
+#[test]
+fn suppressed_descendant_inside_pre_stays_empty() {
+    let html = "<pre>A<span hidden>  X  </span>B</pre>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("span", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+    assert_eq!(
+        store.get("span").unwrap().next().unwrap().text(&store),
+        Some("")
+    );
+    assert_eq!(
+        store.get("pre").unwrap().next().unwrap().text(&store),
+        Some("AB")
+    );
+}
+
+#[test]
+fn parent_and_child_selected_inside_pre_preserve_whitespace() {
+    let html = "<pre><span>  A  </span></pre>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("span", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+    assert_eq!(
+        store.get("pre").unwrap().next().unwrap().text(&store),
+        Some("  A  ")
+    );
+    assert_eq!(
+        store.get("span").unwrap().next().unwrap().text(&store),
+        Some("  A  ")
+    );
+}
+
+#[test]
+fn pre_followed_by_block_keeps_literal_spaces_before_newline() {
+    // Literal preformatted trailing spaces must remain; a following structural
+    // newline may follow those spaces. The global "no space before newline"
+    // rule applies only to generated/collapsed whitespace.
+    let html = "<pre>A   </pre><div>B</div>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("div", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+    assert_eq!(
+        store.get("pre").unwrap().next().unwrap().text(&store),
+        Some("A   ")
+    );
+    assert_eq!(
+        store.get("div").unwrap().next().unwrap().text(&store),
+        Some("B")
+    );
 }

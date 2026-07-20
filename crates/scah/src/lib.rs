@@ -137,6 +137,8 @@ pub mod bench_internals {
     #[cfg(feature = "bench-internals")]
     use crate::engine::multiplexer::QueryMultiplexer;
     #[cfg(feature = "bench-internals")]
+    pub use crate::html::TextPathStats;
+    #[cfg(feature = "bench-internals")]
     use crate::store::Store;
     #[cfg(feature = "bench-internals")]
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};

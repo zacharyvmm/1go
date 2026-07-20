@@ -3,7 +3,51 @@ use crate::engine::DepthSize;
 use crate::store::TextTape;
 use scah_query_ir::TextRequirements;
 
+/// Which text representations the current parse is capturing.
+///
+/// Constructed once from [`TextRequirements`] so hot parser paths can branch
+/// on a compact mode instead of repeatedly inspecting requirement bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextCaptureMode {
+    None,
+    RawOnly,
+    TextOnly,
+    Both,
+}
+
+impl TextCaptureMode {
+    #[inline]
+    pub const fn from_requirements(requirements: TextRequirements) -> Self {
+        match (requirements.raw_text, requirements.text) {
+            (false, false) => Self::None,
+            (true, false) => Self::RawOnly,
+            (false, true) => Self::TextOnly,
+            (true, true) => Self::Both,
+        }
+    }
+
+    #[inline]
+    pub const fn captures_any(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    #[inline]
+    #[allow(dead_code)] // part of the capture-mode API surface
+    pub const fn captures_raw(self) -> bool {
+        matches!(self, Self::RawOnly | Self::Both)
+    }
+
+    #[inline]
+    pub const fn captures_text(self) -> bool {
+        matches!(self, Self::TextOnly | Self::Both)
+    }
+}
+
 /// Lazy structural/whitespace separator queued for normalized text.
+///
+/// Separators stay pending until the next visible text (or an opening boundary
+/// that must emit before a child range starts). Canonicalization happens only
+/// in this pending state — never by mutating bytes already on the tape.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PendingSeparator {
     #[default]
@@ -42,21 +86,12 @@ impl TextElementBehavior {
         }
         flags
     }
-
-    #[inline]
-    pub fn edge_policy(self) -> TextEdgePolicy {
-        if self.preformatted && !self.suppressed {
-            TextEdgePolicy::Preserve
-        } else {
-            TextEdgePolicy::TrimCollapsedSeparators
-        }
-    }
 }
 
 /// Parser-only state for streaming text capture into shared tapes.
 #[derive(Debug)]
 pub(crate) struct ParserTextState {
-    pub requirements: TextRequirements,
+    pub mode: TextCaptureMode,
     pub source_start: Option<usize>,
     pending: PendingSeparator,
     suppressed_depth: u16,
@@ -64,41 +99,81 @@ pub(crate) struct ParserTextState {
     /// Depth at which an immediate initial newline may still be stripped.
     initial_newline_depth: Option<DepthSize>,
     decode_scratch: Vec<u8>,
+    #[cfg(feature = "bench-internals")]
+    pub path_stats: TextPathStats,
+}
+
+/// Optional counters for verifying text-path isolation under `bench-internals`.
+#[cfg(feature = "bench-internals")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TextPathStats {
+    pub flush_calls: usize,
+    pub mark_start_calls: usize,
+    pub normalized_behavior_computations: usize,
+    pub hidden_attribute_scans: usize,
+    pub decoded_fragments: usize,
 }
 
 impl ParserTextState {
     pub fn new(requirements: TextRequirements) -> Self {
         Self {
-            requirements,
+            mode: TextCaptureMode::from_requirements(requirements),
             source_start: None,
             pending: PendingSeparator::None,
             suppressed_depth: 0,
             preformatted_depth: 0,
             initial_newline_depth: None,
             decode_scratch: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            path_stats: TextPathStats::default(),
         }
     }
 
     #[inline]
+    #[allow(dead_code)] // used by raw-only specialization paths / future call sites
     pub fn captures_raw(&self) -> bool {
-        self.requirements.raw_text
+        self.mode.captures_raw()
     }
 
     #[inline]
     pub fn captures_text(&self) -> bool {
-        self.requirements.text
+        self.mode.captures_text()
     }
 
     #[inline]
+    #[allow(dead_code)] // mirrored by parser.capture_mode for hot-path checks
     pub fn captures_any(&self) -> bool {
-        self.requirements.any()
+        self.mode.captures_any()
+    }
+
+    #[inline]
+    pub fn is_preformatted(&self) -> bool {
+        self.preformatted_depth > 0
+    }
+
+    /// Edge policy for a newly opened child, using inherited preformatted
+    /// context plus the child's own behavior.
+    ///
+    /// Must be evaluated before [`Self::enter_element`] so inheritance sees the
+    /// parent depth. Suppressed elements always trim (their text is empty).
+    #[inline]
+    pub fn edge_policy_for_child(&self, behavior: TextElementBehavior) -> TextEdgePolicy {
+        if behavior.suppressed {
+            TextEdgePolicy::TrimCollapsedSeparators
+        } else if self.is_preformatted() || behavior.preformatted {
+            TextEdgePolicy::Preserve
+        } else {
+            TextEdgePolicy::TrimCollapsedSeparators
+        }
     }
 
     #[inline]
     pub fn mark_source_start(&mut self, position: usize) {
-        if self.captures_any() {
-            self.source_start = Some(position);
+        #[cfg(feature = "bench-internals")]
+        {
+            self.path_stats.mark_start_calls += 1;
         }
+        self.source_start = Some(position);
     }
 
     /// Cancel pending initial-newline stripping (comment/declaration/child tag).
@@ -118,6 +193,11 @@ impl ParserTextState {
     }
 
     /// Emit a pending separator with canonical physical form.
+    ///
+    /// Append-only: never removes bytes already written to the tape. Generated
+    /// separators are resolved in pending state (`Space + LineBreak => LineBreak`,
+    /// etc.) before this runs. Literal preformatted whitespace already on the
+    /// tape is left intact.
     pub fn flush_pending(&mut self, tape: &mut TextTape) {
         let pending = std::mem::take(&mut self.pending);
         apply_separator(tape, pending);
@@ -146,6 +226,10 @@ impl ParserTextState {
             return;
         }
 
+        #[cfg(feature = "bench-internals")]
+        {
+            self.path_stats.decoded_fragments += 1;
+        }
         self.decode_scratch.clear();
         decode_character_references(source, &mut self.decode_scratch);
         // Split decode_scratch away so write helpers can borrow `&mut self`.
@@ -189,6 +273,10 @@ impl ParserTextState {
             return;
         }
 
+        #[cfg(feature = "bench-internals")]
+        {
+            self.path_stats.decoded_fragments += 1;
+        }
         self.decode_scratch.clear();
         decode_character_references(source, &mut self.decode_scratch);
         let decoded = std::mem::take(&mut self.decode_scratch);
@@ -274,6 +362,10 @@ impl ParserTextState {
     ///
     /// Suppression is decided by the caller before this runs; suppressed
     /// elements must not queue opening separators.
+    ///
+    /// Opening separators are flushed before the child's text range starts so
+    /// parent-owned structural newlines sit outside the child range. Once
+    /// flushed, those bytes are immutable.
     pub fn before_open_element(
         &mut self,
         tape: &mut TextTape,
@@ -329,11 +421,19 @@ impl ParserTextState {
     }
 }
 
-/// Apply a structural/whitespace separator with canonical physical form.
+/// Apply a structural/whitespace separator with append-only physical form.
 ///
-/// Invariants enforced for generated separators:
+/// Invariants for *generated* separators (collapsed whitespace / structural
+/// boundaries), resolved primarily via [`PendingSeparator`] ranking before
+/// flush:
 /// - no leading synthetic separator on an empty tape
-/// - no `" \n"`, `"\n "`, `"\n\t"`, or `"\n\n"` from adjacent boundaries
+/// - no `" \n"`, `"\n "`, `"\n\t"`, or `"\n\n"` from adjacent *generated*
+///   boundaries in ordinary collapsed mode
+///
+/// Literal preformatted whitespace already on the tape is never removed or
+/// rewritten. `" \n"` after selected `pre` / `textarea` content is valid when
+/// the spaces are source-literal and the newline is a following structural
+/// separator.
 fn apply_separator(tape: &mut TextTape, separator: PendingSeparator) {
     match separator {
         PendingSeparator::None => {}
@@ -350,25 +450,20 @@ fn apply_separator(tape: &mut TextTape, separator: PendingSeparator) {
             let Some(last) = tape.last_byte() else {
                 return;
             };
-            if last == b'\n' || last == b'\t' {
+            // Collapsed Space+Tab is resolved in pending state before flush, so
+            // a trailing literal space here must be left intact.
+            if matches!(last, b' ' | b'\t' | b'\n') {
                 return;
-            }
-            if last == b' ' {
-                tape.pop_byte();
             }
             tape.push_byte(b'\t');
         }
         PendingSeparator::LineBreak => {
-            loop {
-                match tape.last_byte() {
-                    Some(b' ' | b'\t') => {
-                        tape.pop_byte();
-                    }
-                    Some(b'\n') | None => return,
-                    Some(_) => break,
-                }
+            match tape.last_byte() {
+                Some(b'\n') | None => {}
+                // Do not strip trailing spaces/tabs: they may be literal
+                // preformatted content already covered by a finalized range.
+                Some(_) => tape.push_byte(b'\n'),
             }
-            tape.push_byte(b'\n');
         }
     }
 }
@@ -441,18 +536,67 @@ mod tests {
     }
 
     #[test]
-    fn canonical_linebreak_strips_trailing_spaces() {
+    fn linebreak_preserves_literal_trailing_spaces() {
         let mut tape = TextTape::new();
         tape.push_str("A  ");
         apply_separator(&mut tape, PendingSeparator::LineBreak);
+        assert_eq!(tape.slice(0..tape.len()), "A  \n");
+    }
+
+    #[test]
+    fn tab_does_not_rewrite_trailing_literal_space() {
+        let mut tape = TextTape::new();
+        tape.push_str("A ");
+        apply_separator(&mut tape, PendingSeparator::Tab);
+        assert_eq!(tape.slice(0..tape.len()), "A ");
+    }
+
+    #[test]
+    fn pending_space_upgrades_to_linebreak_without_tape_mutation() {
+        let mut state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        let mut tape = TextTape::new();
+        tape.push_str("A");
+        state.queue_separator(PendingSeparator::Space);
+        state.queue_separator(PendingSeparator::LineBreak);
+        state.flush_pending(&mut tape);
         assert_eq!(tape.slice(0..tape.len()), "A\n");
     }
 
     #[test]
-    fn canonical_tab_replaces_trailing_space() {
-        let mut tape = TextTape::new();
-        tape.push_str("A ");
-        apply_separator(&mut tape, PendingSeparator::Tab);
-        assert_eq!(tape.slice(0..tape.len()), "A\t");
+    fn edge_policy_inherits_preformatted_context() {
+        let mut state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        state.enter_element(TextElementFlags::PREFORMATTED, 1);
+        let child = TextElementBehavior {
+            suppressed: false,
+            preformatted: false,
+            opening_separator: PendingSeparator::None,
+            closing_separator: PendingSeparator::None,
+        };
+        assert_eq!(state.edge_policy_for_child(child), TextEdgePolicy::Preserve);
+    }
+
+    #[test]
+    fn edge_policy_suppressed_inside_pre_still_trims() {
+        let mut state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        state.enter_element(TextElementFlags::PREFORMATTED, 1);
+        let child = TextElementBehavior {
+            suppressed: true,
+            preformatted: false,
+            opening_separator: PendingSeparator::None,
+            closing_separator: PendingSeparator::None,
+        };
+        assert_eq!(
+            state.edge_policy_for_child(child),
+            TextEdgePolicy::TrimCollapsedSeparators
+        );
     }
 }

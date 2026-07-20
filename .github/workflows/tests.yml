@@ -32,6 +32,11 @@ jobs:
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
       - name: Test cursor instrumentation
         run: cargo test -p scah --features bench-internals
+      - name: Verify generated entity table
+        run: |
+          python3 crates/scah/scripts/generate_entities.py --self-test
+          python3 crates/scah/scripts/generate_entities.py --input crates/scah/scripts/entities.json
+          git diff --exit-code -- crates/scah/src/html/entities_table.rs
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
       - name: Check cursor-dominance benchmark
