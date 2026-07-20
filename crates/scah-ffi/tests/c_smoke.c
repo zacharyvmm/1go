@@ -33,6 +33,39 @@ static void expect_ok(ScahStatus status, ScahError **err, const char *ctx) {
     }
 }
 
+static void expect_status(ScahStatus actual, ScahStatus expected, ScahError **err,
+                          const char *ctx) {
+    if (actual != expected) {
+        fprintf(stderr, "FAIL: %s expected=%d actual=%d\n", ctx, (int)expected,
+                (int)actual);
+
+        if (err != NULL && *err != NULL) {
+            scah_error_free(*err);
+            *err = NULL;
+        }
+
+        exit(1);
+    }
+
+    if (err == NULL || *err == NULL) {
+        fprintf(stderr, "FAIL: %s expected diagnostic error\n", ctx);
+        exit(1);
+    }
+
+    ScahStringView msg = scah_error_message(*err);
+
+    if (msg.data == NULL || msg.len == 0) {
+        fprintf(stderr, "FAIL: %s expected non-empty diagnostic\n", ctx);
+
+        scah_error_free(*err);
+        *err = NULL;
+        exit(1);
+    }
+
+    scah_error_free(*err);
+    *err = NULL;
+}
+
 static ScahStringView sv(const char *s) {
     ScahStringView v;
     v.data = (const uint8_t *)s;
@@ -241,6 +274,26 @@ int main(void) {
 
         scah_element_free(input);
         scah_store_free(attr_store);
+    }
+
+    /* Invalid selector: build must fail with a diagnostic and null query. */
+    {
+        ScahQueryBuilder *invalid_builder = NULL;
+        ScahQuery *invalid_query = NULL;
+
+        expect_ok(scah_query_all(sv(""), scah_save_all(), &invalid_builder, &err), &err,
+                  "invalid_builder_create");
+
+        ScahStatus invalid_status =
+            scah_query_builder_build(invalid_builder, &invalid_query, &err);
+
+        expect_status(invalid_status, ScahStatus_InvalidSelector, &err, "invalid_selector_build");
+
+        if (invalid_query != NULL) {
+            fail("invalid build unexpectedly produced query");
+        }
+
+        scah_query_builder_free(invalid_builder);
     }
 
     puts("c_smoke ok");

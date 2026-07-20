@@ -36,6 +36,39 @@ static void expect_ok(ScahStatus status, ScahError *&err, const char *ctx) {
     }
 }
 
+static void expect_status(ScahStatus actual, ScahStatus expected, ScahError *&err,
+                          const char *ctx) {
+    if (actual != expected) {
+        std::fprintf(stderr, "FAIL: %s expected=%d actual=%d\n", ctx,
+                     static_cast<int>(expected), static_cast<int>(actual));
+
+        if (err != nullptr) {
+            scah_error_free(err);
+            err = nullptr;
+        }
+
+        std::exit(1);
+    }
+
+    if (err == nullptr) {
+        std::fprintf(stderr, "FAIL: %s expected diagnostic error\n", ctx);
+        std::exit(1);
+    }
+
+    const ScahStringView msg = scah_error_message(err);
+
+    if (msg.data == nullptr || msg.len == 0) {
+        std::fprintf(stderr, "FAIL: %s expected non-empty diagnostic\n", ctx);
+
+        scah_error_free(err);
+        err = nullptr;
+        std::exit(1);
+    }
+
+    scah_error_free(err);
+    err = nullptr;
+}
+
 int main() {
     if (scah_abi_version() != 1u) {
         std::fprintf(stderr, "bad abi\n");
@@ -122,6 +155,27 @@ int main() {
 
         scah_element_free(input);
         scah_store_free(attr_store);
+    }
+
+    // Invalid selector: build must fail with a diagnostic and null query.
+    {
+        ScahQueryBuilder *invalid_builder = nullptr;
+        ScahQuery *invalid_query = nullptr;
+
+        expect_ok(scah_query_all(sv(""), scah_save_all(), &invalid_builder, &err), err,
+                  "invalid_builder_create");
+
+        const ScahStatus invalid_status =
+            scah_query_builder_build(invalid_builder, &invalid_query, &err);
+
+        expect_status(invalid_status, ScahStatus_InvalidSelector, err, "invalid_selector_build");
+
+        if (invalid_query != nullptr) {
+            std::fprintf(stderr, "invalid build unexpectedly produced query\n");
+            return 1;
+        }
+
+        scah_query_builder_free(invalid_builder);
     }
 
     std::puts("cpp_smoke ok");
