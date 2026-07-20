@@ -71,7 +71,6 @@ pub(crate) struct TextElementBehavior {
     pub suppressed: bool,
     pub preformatted: bool,
     pub opening_separator: PendingSeparator,
-    pub closing_separator: PendingSeparator,
 }
 
 impl TextElementBehavior {
@@ -156,11 +155,21 @@ impl ParserTextState {
     ///
     /// Must be evaluated before [`Self::enter_element`] so inheritance sees the
     /// parent depth. Suppressed elements always trim (their text is empty).
+    ///
+    /// Visible table cells use [`TextEdgePolicy::Preserve`] so literal trailing
+    /// whitespace from preformatted descendants (e.g. `textarea`) remains in
+    /// the cell's own range. Ordinary collapsed cell content still lands
+    /// correctly: leading pending separators are flushed before `text_start`,
+    /// and trailing collapsed whitespace stays pending until after finalize.
     #[inline]
-    pub fn edge_policy_for_child(&self, behavior: TextElementBehavior) -> TextEdgePolicy {
+    pub fn edge_policy_for_child(
+        &self,
+        behavior: TextElementBehavior,
+        is_table_cell: bool,
+    ) -> TextEdgePolicy {
         if behavior.suppressed {
             TextEdgePolicy::TrimCollapsedSeparators
-        } else if self.is_preformatted() || behavior.preformatted {
+        } else if self.is_preformatted() || behavior.preformatted || is_table_cell {
             TextEdgePolicy::Preserve
         } else {
             TextEdgePolicy::TrimCollapsedSeparators
@@ -464,13 +473,13 @@ impl ParserTextState {
 /// boundaries), resolved primarily via [`PendingSeparator`] ranking before
 /// flush:
 /// - no leading synthetic separator on an empty tape
-/// - no `" \n"`, `"\n "`, `"\n\t"`, or `"\n\n"` from adjacent *generated*
-///   boundaries in ordinary collapsed mode
+/// - no `" \n"`, `"\n "`, or `"\n\n"` from adjacent *generated* boundaries in
+///   ordinary collapsed mode (`Space`/`Tab` vs `LineBreak` ranking collapses
+///   mixed pending separators before either is written)
 ///
 /// Literal preformatted whitespace already on the tape is never removed or
-/// rewritten. `" \n"` after selected `pre` / `textarea` content is valid when
-/// the spaces are source-literal and the newline is a following structural
-/// separator.
+/// rewritten. Trailing literal spaces/newlines followed by a structural tab
+/// (table cell boundary) or newline are valid, e.g. `"A \tB"` / `"A\n\tB"`.
 fn apply_separator(tape: &mut TextTape, separator: PendingSeparator) {
     match separator {
         PendingSeparator::None => {}
@@ -484,14 +493,13 @@ fn apply_separator(tape: &mut TextTape, separator: PendingSeparator) {
             tape.push_byte(b' ');
         }
         PendingSeparator::Tab => {
-            let Some(last) = tape.last_byte() else {
-                return;
-            };
-            // Collapsed Space+Tab is resolved in pending state before flush, so
-            // a trailing literal space here must be left intact. Consecutive
-            // tabs are allowed: each visible cell boundary may flush its own
-            // tab so empty columns remain represented as `\t\t`.
-            if matches!(last, b' ' | b'\n') {
+            // Suppress only on an empty tape (no leading synthetic separator).
+            // Do not treat a trailing physical space/newline as proof the tab
+            // is redundant: that byte may be literal preformatted content, and
+            // the cell boundary must still be represented. Collapsed Space+Tab
+            // is resolved in pending state before flush. Consecutive tabs are
+            // allowed so empty columns remain `\t\t`.
+            if tape.last_byte().is_none() {
                 return;
             }
             tape.push_byte(b'\t');
@@ -583,11 +591,26 @@ mod tests {
     }
 
     #[test]
-    fn tab_does_not_rewrite_trailing_literal_space() {
+    fn tab_preserves_trailing_literal_space_and_emits_boundary() {
         let mut tape = TextTape::new();
         tape.push_str("A ");
         apply_separator(&mut tape, PendingSeparator::Tab);
-        assert_eq!(tape.slice(0..tape.len()), "A ");
+        assert_eq!(tape.slice(0..tape.len()), "A \t");
+    }
+
+    #[test]
+    fn tab_preserves_trailing_literal_newline_and_emits_boundary() {
+        let mut tape = TextTape::new();
+        tape.push_str("A\n");
+        apply_separator(&mut tape, PendingSeparator::Tab);
+        assert_eq!(tape.slice(0..tape.len()), "A\n\t");
+    }
+
+    #[test]
+    fn tab_suppressed_on_empty_tape() {
+        let mut tape = TextTape::new();
+        apply_separator(&mut tape, PendingSeparator::Tab);
+        assert_eq!(tape.len(), 0);
     }
 
     #[test]
@@ -624,9 +647,28 @@ mod tests {
             suppressed: false,
             preformatted: false,
             opening_separator: PendingSeparator::None,
-            closing_separator: PendingSeparator::None,
         };
-        assert_eq!(state.edge_policy_for_child(child), TextEdgePolicy::Preserve);
+        assert_eq!(
+            state.edge_policy_for_child(child, false),
+            TextEdgePolicy::Preserve
+        );
+    }
+
+    #[test]
+    fn edge_policy_table_cell_preserves_literal_edges() {
+        let state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        let cell = TextElementBehavior {
+            suppressed: false,
+            preformatted: false,
+            opening_separator: PendingSeparator::None,
+        };
+        assert_eq!(
+            state.edge_policy_for_child(cell, true),
+            TextEdgePolicy::Preserve
+        );
     }
 
     #[test]
@@ -640,10 +682,9 @@ mod tests {
             suppressed: true,
             preformatted: false,
             opening_separator: PendingSeparator::None,
-            closing_separator: PendingSeparator::None,
         };
         assert_eq!(
-            state.edge_policy_for_child(child),
+            state.edge_policy_for_child(child, false),
             TextEdgePolicy::TrimCollapsedSeparators
         );
     }
@@ -665,7 +706,6 @@ mod tests {
             suppressed: false,
             preformatted: false,
             opening_separator: PendingSeparator::None,
-            closing_separator: PendingSeparator::None,
         };
 
         state.before_text_range_start(
@@ -699,7 +739,6 @@ mod tests {
             suppressed: false,
             preformatted: false,
             opening_separator: PendingSeparator::LineBreak,
-            closing_separator: PendingSeparator::LineBreak,
         };
 
         state.before_open_element(&mut tape, block_descendant, false);

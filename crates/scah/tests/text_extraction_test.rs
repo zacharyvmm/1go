@@ -737,3 +737,53 @@ fn hidden_table_cell_does_not_create_column_separator() {
     let html = "<table><tr><td>A</td><td hidden>X</td><td>B</td></tr></table>";
     assert_eq!(text_of(html, "table"), "A\tB");
 }
+
+#[test]
+fn table_cell_after_preserved_space_keeps_tab_boundary() {
+    let html = "<table><tr><td><textarea>A </textarea></td><td>B</td></tr></table>";
+    assert_eq!(text_of(html, "table"), "A \tB");
+}
+
+#[test]
+fn table_cell_after_preserved_newline_keeps_tab_boundary() {
+    // A cell that literally ends with a newline still emits the structural
+    // tab boundary, so the next cell remains distinguishable: "A\n\tB".
+    let html = "<table><tr><td><textarea>A\n</textarea></td><td>B</td></tr></table>";
+    assert_eq!(text_of(html, "table"), "A\n\tB");
+}
+
+#[test]
+fn selected_cells_after_preserved_whitespace_exclude_neighbor_tabs() {
+    let html = "<table><tr><td><textarea>A </textarea></td><td>B</td></tr></table>";
+    let queries = &[
+        Query::all("table", Save::only_text()).unwrap().build(),
+        Query::all("td", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+
+    let table = store.get("table").unwrap().next().unwrap();
+    assert_eq!(table.text(&store), Some("A \tB"));
+
+    let cells: Vec<_> = store.get("td").unwrap().collect();
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0].text(&store), Some("A "));
+    assert_eq!(cells[1].text(&store), Some("B"));
+}
+
+#[test]
+fn selected_cells_after_preserved_newline_exclude_neighbor_tabs() {
+    let html = "<table><tr><td><textarea>A\n</textarea></td><td>B</td></tr></table>";
+    let queries = &[
+        Query::all("table", Save::only_text()).unwrap().build(),
+        Query::all("td", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+
+    let table = store.get("table").unwrap().next().unwrap();
+    assert_eq!(table.text(&store), Some("A\n\tB"));
+
+    let cells: Vec<_> = store.get("td").unwrap().collect();
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0].text(&store), Some("A\n"));
+    assert_eq!(cells[1].text(&store), Some("B"));
+}

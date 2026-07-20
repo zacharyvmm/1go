@@ -87,16 +87,10 @@ fn text_behavior_for(
     } else {
         PendingSeparator::None
     };
-    let closing_separator = if suppressed {
-        PendingSeparator::None
-    } else {
-        tag.post_text_separator().unwrap_or(PendingSeparator::None)
-    };
     TextElementBehavior {
         suppressed,
         preformatted,
         opening_separator,
-        closing_separator,
     }
 }
 
@@ -292,7 +286,10 @@ where
                     .unwrap_or_else(TextElementFlags::empty);
                 // Inherited preformatted context must be read before enter_element.
                 let text_edge_policy = text_behavior
-                    .map(|behavior| self.text_state.edge_policy_for_child(behavior))
+                    .map(|behavior| {
+                        self.text_state
+                            .edge_policy_for_child(behavior, tag.is_text_cell())
+                    })
                     .unwrap_or(TextEdgePolicy::TrimCollapsedSeparators);
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
