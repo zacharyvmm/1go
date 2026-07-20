@@ -388,6 +388,12 @@ where
                     ) || early_exit;
                 } else {
                     for save_hit in &self.temp_state.save_hits {
+                        // Save::none() matches are already in the result store;
+                        // skip deferred SavedElement records when there is no
+                        // content representation to finalize at close time.
+                        if !save_hit.needs_close_finalization() {
+                            continue;
+                        }
                         self.open_elements.attach_saved(
                             save_hit.element_id,
                             save_hit
@@ -1477,6 +1483,35 @@ mod tests {
         let anchor = store.get("a").unwrap().next().unwrap();
         assert_eq!(anchor.text(&store), None);
         assert_eq!(store.text.raw_text.len() + store.text.text.len(), 0);
+    }
+
+    #[test]
+    fn save_none_leaves_no_deferred_saved_records_on_open_stack() {
+        // While non-void Save::none() matches are active, the open element must
+        // not accumulate SavedElement entries (nothing to finalize on close).
+        let html = "<section><div id=\"a\">x</div><div id=\"b\">y</div></section>";
+        let queries = &[Query::all("div", Save::none()).unwrap().build()];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+        let mut reader = Reader::new(html);
+
+        // Advance until the first matched <div> is open.
+        while parser.next(&mut reader) {
+            if let Some(open) = parser.open_elements.last()
+                && open.name.eq_ignore_ascii_case("div")
+            {
+                assert!(
+                    open.saved.is_empty(),
+                    "Save::none() must not attach SavedElement records"
+                );
+                break;
+            }
+        }
+
+        while parser.next(&mut reader) {}
+        assert!(parser.take_parse_error().is_none());
+        let store = parser.finish();
+        assert_eq!(store.get("div").unwrap().count(), 2);
     }
 
     #[test]

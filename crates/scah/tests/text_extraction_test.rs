@@ -350,6 +350,69 @@ fn no_content_skips_both_tapes() {
 }
 
 #[test]
+fn save_none_matches_remain_in_store_without_content() {
+    let html = r#"
+        <section id="s1"><p class="item">one</p></section>
+        <section id="s2"><p class="item">two</p></section>
+    "#;
+    let queries = &[Query::all("section", Save::none()).unwrap().build()];
+    let store = parse(html, queries).unwrap();
+
+    let sections: Vec<_> = store.get("section").unwrap().collect();
+    assert_eq!(sections.len(), 2);
+    assert_eq!(sections[0].id, Some("s1"));
+    assert_eq!(sections[1].id, Some("s2"));
+    for section in &sections {
+        assert!(section.inner_html.is_none());
+        assert!(section.raw_text.is_none());
+        assert!(section.text.is_none());
+    }
+}
+
+#[test]
+fn save_none_first_completes_after_element_lifecycle() {
+    let html = r#"
+        <div id="hit"><span>inside</span></div>
+        <div id="later">should not be required for First</div>
+    "#;
+    let queries = &[Query::first("div", Save::none()).unwrap().build()];
+    let store = parse(html, queries).unwrap();
+
+    let hits: Vec<_> = store.get("div").unwrap().collect();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, Some("hit"));
+    assert!(hits[0].inner_html.is_none());
+    assert!(hits[0].raw_text.is_none());
+    assert!(hits[0].text.is_none());
+}
+
+#[test]
+fn save_none_nested_first_completes_with_parent_child() {
+    let html = r#"
+        <div class="product"><h1>Product 0</h1><p>desc</p></div>
+        <div class="product"><h1>Product 1</h1></div>
+    "#;
+    let queries = &[query! {
+        first("div.product", Save::none()) => {
+            first("> h1", Save::none()),
+        }
+    }];
+    let store = parse(html, queries).unwrap();
+
+    let products: Vec<_> = store.get("div.product").unwrap().collect();
+    assert_eq!(products.len(), 1);
+    assert!(products[0].inner_html.is_none());
+    assert!(products[0].raw_text.is_none());
+    assert!(products[0].text.is_none());
+
+    let title = products[0].get(&store, "> h1").unwrap().next().unwrap();
+    assert_eq!(title.name, "h1");
+    assert!(title.inner_html.is_none());
+    assert!(title.raw_text.is_none());
+    assert!(title.text.is_none());
+}
+
+#[test]
 fn hidden_attribute_case_insensitive() {
     for html in [
         "<div>A<div HIDDEN>X</div>B</div>",

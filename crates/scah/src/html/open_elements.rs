@@ -95,6 +95,11 @@ impl<'html> OpenElementStack<'html> {
     }
 
     #[cfg(test)]
+    pub(crate) fn last(&self) -> Option<&OpenElement<'html>> {
+        self.entries.last()
+    }
+
+    #[cfg(test)]
     pub fn prepare_for_open(&mut self, name: &str) -> Vec<OpenElement<'html>> {
         let mut popped = Vec::new();
         self.prepare_for_open_into(TagFlags::classify(name), &mut popped);
