@@ -13,6 +13,7 @@ fn main() -> ExitCode {
 
     let cases = cursor_cases();
     let mut descendant_slots_at_8 = None;
+    let mut sequential_first_slots_at_8 = None;
 
     for case in cases {
         for &depth in DEPTHS {
@@ -40,6 +41,21 @@ fn main() -> ExitCode {
                     if stats.peak_resident_cursor_slots != at_8 {
                         eprintln!(
                             "error: descendant_div_p peak resident slots grew with depth: 8={at_8}, 512={}",
+                            stats.peak_resident_cursor_slots
+                        );
+                        failed = true;
+                    }
+                }
+            }
+
+            if case.name == "then_article_first_div_gt_p_sequential" {
+                if depth == 8 {
+                    sequential_first_slots_at_8 = Some(stats.peak_resident_cursor_slots);
+                } else if depth == 512 {
+                    let at_8 = sequential_first_slots_at_8.expect("depth 8 measured before 512");
+                    if stats.peak_resident_cursor_slots != at_8 {
+                        eprintln!(
+                            "error: then_article_first_div_gt_p_sequential peak resident slots grew with depth: 8={at_8}, 512={}",
                             stats.peak_resident_cursor_slots
                         );
                         failed = true;

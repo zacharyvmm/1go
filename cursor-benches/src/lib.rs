@@ -14,6 +14,7 @@ pub const DEPTHS: &[u16] = &[8, 32, 128, 512];
 pub enum QueryKind {
     All,
     ThenDivAllP,
+    ThenArticleFirstDivGtP,
 }
 
 #[derive(Clone, Copy)]
@@ -64,12 +65,49 @@ pub fn html_then_scopes(depth: u16) -> String {
     html_descendant_domination(depth)
 }
 
+/// Case 6: sequential child-scoped `First` ownership under sibling articles.
+///
+/// Trailing `<section>` content keeps the winner resident after the selected
+/// `div` closes, exercising delayed same-scope admission until `</article>`.
+pub fn html_then_first_sequential(count: u16) -> String {
+    let mut html = String::new();
+    for _ in 0..count {
+        html.push_str(
+            "<article>\
+                <div><p>x</p></div>\
+                <section>\
+                    <span>tail</span>\
+                    <span>tail</span>\
+                </section>\
+            </article>",
+        );
+    }
+    html
+}
+
+/// Case 7: nested child-scoped `First` ownership with overlapping open articles.
+pub fn html_then_first_nested(depth: u16) -> String {
+    let mut html = String::new();
+    for _ in 0..depth {
+        html.push_str("<article><div><p>x</p></div>");
+    }
+    for _ in 0..depth {
+        html.push_str("<aside>tail</aside></article>");
+    }
+    html
+}
+
 pub fn build_query(kind: QueryKind, selector: &str) -> Query<'_> {
     match kind {
         QueryKind::All => Query::all(selector, Save::none()).unwrap().build(),
         QueryKind::ThenDivAllP => Query::all("div", Save::none())
             .unwrap()
             .then(|div| Ok([div.all("p", Save::none())?]))
+            .unwrap()
+            .build(),
+        QueryKind::ThenArticleFirstDivGtP => Query::all("article", Save::none())
+            .unwrap()
+            .then(|article| Ok([article.first("div > p", Save::none())?]))
             .unwrap()
             .build(),
     }
@@ -111,6 +149,24 @@ pub fn cursor_cases() -> &'static [CursorCase] {
             html: html_then_scopes,
             query_kind: QueryKind::ThenDivAllP,
             max_resident: |_| None,
+        },
+        CursorCase {
+            name: "then_article_first_div_gt_p_sequential",
+            selector: "article",
+            html: html_then_first_sequential,
+            query_kind: QueryKind::ThenArticleFirstDivGtP,
+            // Constant across sibling article counts: one open article owns one
+            // winner plus a fixed handful of live obligations.
+            max_resident: |_| Some(5),
+        },
+        CursorCase {
+            name: "then_article_first_div_gt_p_nested",
+            selector: "article",
+            html: html_then_first_nested,
+            query_kind: QueryKind::ThenArticleFirstDivGtP,
+            // One completed winner + one article obligation per open nest, plus
+            // a small constant for root / transient peers: 2*depth + 3.
+            max_resident: |depth| Some(depth as usize * 2 + 3),
         },
     ]
 }

@@ -50,6 +50,35 @@ fn html_then_scopes(depth: u16) -> String {
     html_descendant_domination(depth)
 }
 
+/// Sequential child-scoped `First` ownership under sibling articles.
+fn html_then_first_sequential(count: u16) -> String {
+    let mut html = String::new();
+    for _ in 0..count {
+        html.push_str(
+            "<article>\
+                <div><p>x</p></div>\
+                <section>\
+                    <span>tail</span>\
+                    <span>tail</span>\
+                </section>\
+            </article>",
+        );
+    }
+    html
+}
+
+/// Nested child-scoped `First` ownership with overlapping open articles.
+fn html_then_first_nested(depth: u16) -> String {
+    let mut html = String::new();
+    for _ in 0..depth {
+        html.push_str("<article><div><p>x</p></div>");
+    }
+    for _ in 0..depth {
+        html.push_str("<aside>tail</aside></article>");
+    }
+    html
+}
+
 fn bench_case<F>(
     c: &mut Criterion,
     group_name: &str,
@@ -90,6 +119,14 @@ fn build_then_div_p(_selector: &str) -> Query<'_> {
     Query::all("div", Save::none())
         .unwrap()
         .then(|div| Ok([div.all("p", Save::none())?]))
+        .unwrap()
+        .build()
+}
+
+fn build_then_article_first_div_p(_selector: &str) -> Query<'_> {
+    Query::all("article", Save::none())
+        .unwrap()
+        .then(|article| Ok([article.first("div > p", Save::none())?]))
         .unwrap()
         .build()
 }
@@ -144,12 +181,34 @@ fn bench_then_scopes(c: &mut Criterion) {
     );
 }
 
+fn bench_then_first_sequential(c: &mut Criterion) {
+    bench_case(
+        c,
+        "cursor_domination/then_article_first_div_gt_p_sequential",
+        html_then_first_sequential,
+        "article",
+        build_then_article_first_div_p,
+    );
+}
+
+fn bench_then_first_nested(c: &mut Criterion) {
+    bench_case(
+        c,
+        "cursor_domination/then_article_first_div_gt_p_nested",
+        html_then_first_nested,
+        "article",
+        build_then_article_first_div_p,
+    );
+}
+
 criterion_group!(
     benches,
     bench_descendant_domination,
     bench_child_prefix_descendant,
     bench_mixed_main_div_p,
     bench_non_dominance,
-    bench_then_scopes
+    bench_then_scopes,
+    bench_then_first_sequential,
+    bench_then_first_nested
 );
 criterion_main!(benches);
