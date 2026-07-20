@@ -22,6 +22,38 @@ fn generate_alternating_div_p(pairs: usize) -> String {
     html
 }
 
+/// One early element retires every `First` runner; the large unmatched div tail
+/// then exercises tombstone slot scans without O(n²) distinct-selector matching.
+fn generate_retired_runner_html(tail_divs: usize) -> String {
+    let mut html = String::with_capacity(tail_divs * 11 + 48);
+    html.push_str("<main><h1 class=\"early\"></h1>");
+    for _ in 0..tail_divs {
+        html.push_str("<div></div>");
+    }
+    html.push_str("</main>");
+    html
+}
+
+fn build_retired_runner_queries(first_count: usize) -> (Vec<Query<'static>>, &'static str) {
+    // Identical First selectors intentionally: each runner still occupies a
+    // stable slot, matches once on the shared early element, then becomes a
+    // tombstone for the remainder of the parse.
+    let mut queries: Vec<Query<'static>> = (0..first_count)
+        .map(|_| {
+            Query::first(".early", Save::none())
+                .expect("first selector")
+                .build()
+        })
+        .collect();
+    let all_selector: &'static str = "div";
+    queries.push(
+        Query::all(all_selector, Save::none())
+            .expect("surviving all selector")
+            .build(),
+    );
+    (queries, all_selector)
+}
+
 fn bench_sibling_selectors(c: &mut Criterion) {
     let mut group = c.benchmark_group("sibling_combinator_hot_paths");
 
@@ -87,5 +119,42 @@ fn bench_sibling_selectors(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sibling_selectors);
+fn bench_many_retired_runners(c: &mut Criterion) {
+    let mut group = c.benchmark_group("many_retired_runners");
+    const TAIL_DIVS: usize = 5_000;
+
+    // Identical HTML for control and candidates: one early match target + tail.
+    let html = generate_retired_runner_html(TAIL_DIVS);
+    let control_queries = &[Query::all("div", Save::none())
+        .expect("control all selector")
+        .build()];
+    group.throughput(Throughput::Bytes(html.len() as u64));
+    group.bench_function("control_one_all", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&html), black_box(control_queries)).unwrap();
+            black_box(store.get("div").map(|iter| iter.count()));
+        })
+    });
+
+    for first_count in [64usize, 256, 1_024] {
+        let (queries, all_selector) = build_retired_runner_queries(first_count);
+        let queries = Box::leak(queries.into_boxed_slice());
+
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(first_count),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(queries as &[Query])).unwrap();
+                    black_box(store.get(all_selector).map(|iter| iter.count()));
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_sibling_selectors, bench_many_retired_runners);
 criterion_main!(benches);
