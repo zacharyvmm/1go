@@ -30,6 +30,12 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude scah-benches --exclude scah-cursor-benches -- -D warnings
       - name: Test
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
+      - name: Check committed scah.h is current
+        run: |
+          cargo run -p scah-ffi --bin generate_header
+          git diff --exit-code -- crates/scah-ffi/include/scah.h
+      - name: C and C++ FFI smoke tests
+        run: ./scripts/test-c-ffi.sh
       - name: Test cursor instrumentation
         run: cargo test -p scah --features bench-internals
       - name: Check escape scanner benchmark
@@ -72,3 +78,34 @@ jobs:
       - name: Run Python tests
         working-directory: crates/bindings/scah-python
         run: pytest tests/
+
+  node:
+    name: Node Binding Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install and build
+        working-directory: crates/bindings/scah-node
+        run: |
+          bun install
+          bun run build
+
+      - name: Run Node tests
+        working-directory: crates/bindings/scah-node
+        run: bun test

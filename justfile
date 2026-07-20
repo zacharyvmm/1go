@@ -3,9 +3,11 @@ set shell := ["bash", "-c"]
 default:
     @just --list
 
-build: build-rust build-node build-python
+build: build-rust build-ffi build-node build-python
 build-rust:
     cargo build --release
+build-ffi:
+    cargo build -p scah-ffi --release
 build-node:
     cd crates/bindings/scah-node && bun install && bun run build
 build-python:
@@ -19,13 +21,19 @@ dev-node:
 dev-python:
     cd crates/bindings/scah-python && cargo run --bin stub_gen && uvx maturin build
 
-test: test-rust test-node test-python
+test: test-rust test-ffi test-node test-python
 test-rust:
     cargo test --all-targets --all-features
+test-ffi:
+    cargo test -p scah-ffi
+    ./scripts/test-c-ffi.sh
 test-node:
     cd crates/bindings/scah-node && bun test
 test-python:
     source ./crates/bindings/scah-python/.venv/bin/activate && uv run pytest ./crates/bindings/scah-python/tests/
+
+ffi-header:
+    cargo run -p scah-ffi --bin generate_header
 
 format:
     cargo fmt --all
@@ -85,6 +93,7 @@ bump-rust new_version:
     sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-query-ir/Cargo.toml
     sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-macros/Cargo.toml
     sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah/Cargo.toml
+    sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/scah-ffi/Cargo.toml
     sed -E -i.bak 's/^(scah-reader = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah-query-ir/Cargo.toml
     sed -E -i.bak 's/^(scah-query-ir = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah-macros/Cargo.toml
     sed -E -i.bak 's/^(scah-reader = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
@@ -92,7 +101,7 @@ bump-rust new_version:
     sed -E -i.bak 's/^(scah-macros = \{ version = )"[^"]*"/\1"{{new_version}}"/' crates/scah/Cargo.toml
     sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' benches/Cargo.toml
     sed -i.bak 's/^scah = "[^"]*"/scah = "{{new_version}}"/' README.md
-    rm -f crates/scah-reader/Cargo.toml.bak crates/scah-query-ir/Cargo.toml.bak crates/scah-macros/Cargo.toml.bak crates/scah/Cargo.toml.bak benches/Cargo.toml.bak README.md.bak
+    rm -f crates/scah-reader/Cargo.toml.bak crates/scah-query-ir/Cargo.toml.bak crates/scah-macros/Cargo.toml.bak crates/scah/Cargo.toml.bak crates/scah-ffi/Cargo.toml.bak benches/Cargo.toml.bak README.md.bak
 bump-node new_version:
     sed -i.bak 's/^version = "[^"]*"/version = "{{new_version}}"/' crates/bindings/scah-node/Cargo.toml
     sed -i.bak 's/^  "version": "[^"]*",/  "version": "{{new_version}}",/' crates/bindings/scah-node/package.json

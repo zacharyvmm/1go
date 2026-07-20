@@ -11,8 +11,23 @@
 
 - **Streaming core**: Built on StAX; constant memory regardless of document size
 - **Familiar API**: CSS selectors (including combinators like `>`, ` `, `+` (coming soon), `~` (coming soon))
-- **Multi-language**: Rust core with Python and TypeScript/JavaScript bindings
+- **Multi-language**: Rust API, a stable C ABI (`scah-ffi`), and shallow Python / TypeScript wrappers over that ABI
 - **Composable queries**: Chain selections and nest them with closures for **structured querying**; not only more efficient than flat filtering, but a fundamentally better pattern for extracting hierarchical data relationships
+
+## Architecture
+
+```text
+Rust API
+  Native borrowed QueryBuilder and zero-copy Store
+
+C ABI
+  Owned opaque handles and explicit lifetime management
+
+Language bindings
+  Shallow wrappers over the C ABI
+```
+
+The C ABI (`crates/scah-ffi`, header `include/scah.h`) owns selector tapes, HTML, stores, and elements. Every returned handle has a matching null-safe free function. Building a query does not consume the builder; appending does not consume the child. Returned string views are borrowed from the owning handle and remain valid only while that handle is alive. Rust panics never cross the ABI.
 
 ## Quick Start
 
