@@ -135,7 +135,7 @@ pub unsafe extern "C" fn scah_parse(
                 return Err(ScahStatus::NullPointer);
             }
 
-            let html = parse_string_view(html, out_error)?.to_owned();
+            let html = parse_string_view(html, out_error)?;
 
             let mut owned_queries = Vec::with_capacity(query_count);
             for i in 0..query_count {
@@ -144,7 +144,7 @@ pub unsafe extern "C" fn scah_parse(
                 owned_queries.push(query.inner.clone());
             }
 
-            match OwnedStore::parse(&html, &owned_queries) {
+            match OwnedStore::parse(html, &owned_queries) {
                 Ok(owned) => {
                     write_ptr(
                         out_store,
@@ -897,5 +897,82 @@ mod tests {
     #[test]
     fn abi_version_is_one() {
         assert_eq!(scah_abi_version(), 1);
+    }
+
+    #[test]
+    fn store_owns_html_after_caller_buffer_destroyed() {
+        let query = build_simple_query("input");
+        let mut store: *mut ScahStore = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+
+        {
+            // Caller-owned temporary HTML that is destroyed before any store access.
+            let mut html = String::from("<input disabled value=\"\">");
+            let view = ScahStringView {
+                data: html.as_ptr(),
+                len: html.len(),
+            };
+            let queries = [query as *const ScahQuery];
+            assert_eq!(
+                unsafe { scah_parse(view, queries.as_ptr(), 1, &mut store, &mut err) },
+                ScahStatus::Ok
+            );
+            // Overwrite and drop the caller buffer; store must retain its own copy.
+            html.replace_range(.., &"X".repeat(html.len()));
+            drop(html);
+        }
+
+        unsafe {
+            scah_query_free(query);
+        }
+
+        let mut list: *mut ScahElementList = std::ptr::null_mut();
+        let mut found = 0u8;
+        assert_eq!(
+            unsafe { scah_store_get(store, view("input"), &mut list, &mut found, &mut err) },
+            ScahStatus::Ok
+        );
+        assert_eq!(found, 1);
+
+        let mut element: *mut ScahElement = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { scah_element_list_get(list, 0, &mut element, &mut err) },
+            ScahStatus::Ok
+        );
+
+        let mut name = ScahStringView::empty();
+        assert_eq!(
+            unsafe { scah_element_name(element, &mut name, &mut err) },
+            ScahStatus::Ok
+        );
+        assert_eq!(
+            unsafe { std::str::from_utf8(std::slice::from_raw_parts(name.data, name.len)) }
+                .unwrap(),
+            "input"
+        );
+
+        let mut disabled = ScahOptionalStringView::none();
+        assert_eq!(
+            unsafe {
+                scah_element_get_attribute(element, view("disabled"), &mut disabled, &mut err)
+            },
+            ScahStatus::Ok
+        );
+        // Boolean attributes without `=` have no value; presence is still queryable
+        // via attributes(), but get_attribute may return None for missing values.
+        // Here we mainly prove the store HTML survived caller destruction.
+        let mut value = ScahOptionalStringView::none();
+        assert_eq!(
+            unsafe { scah_element_get_attribute(element, view("value"), &mut value, &mut err) },
+            ScahStatus::Ok
+        );
+        assert_eq!(value.is_some, 1);
+        assert_eq!(value.value.len, 0);
+
+        unsafe {
+            scah_element_free(element);
+            scah_element_list_free(list);
+            scah_store_free(store);
+        }
     }
 }
