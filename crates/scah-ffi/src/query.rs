@@ -232,14 +232,15 @@ pub unsafe extern "C" fn scah_query_builder_current_section(
 
 /// Clone `child` under `parent` without consuming either builder.
 ///
+/// Self-append (`builder == child`) clones the current tree into an owned
+/// temporary before taking a mutable borrow of `builder`, so overlapping
+/// Rust references are never created.
+///
 /// # Safety
 ///
 /// `builder` must point to a live mutable [`ScahQueryBuilder`]. `child` must
 /// point to a live [`ScahQueryBuilder`]. When `out_error` is non-null, it must
 /// be valid for writing one `*mut ScahError`.
-///
-/// Self-append (`builder == child`) is permitted: the child tree is cloned
-/// before the mutable append begins.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scah_query_builder_append(
     builder: *mut ScahQueryBuilder,
@@ -249,9 +250,17 @@ pub unsafe extern "C" fn scah_query_builder_append(
 ) -> ScahStatus {
     unsafe {
         ffi_guard(out_error, || {
-            let builder = require_mut(builder)?;
-            let child = require_ref(child)?;
-            match builder.inner.append(QuerySectionId(parent), &child.inner) {
+            if builder.is_null() || child.is_null() {
+                return Err(ScahStatus::NullPointer);
+            }
+
+            // Complete the shared access and create an owned clone before
+            // constructing a mutable reference to `builder`.
+            let child_inner = (*child).inner.clone();
+
+            let builder = &mut *builder;
+
+            match builder.inner.append(QuerySectionId(parent), &child_inner) {
                 Ok(()) => Ok(()),
                 Err(()) => {
                     set_error(out_error, "invalid parent query section");
@@ -469,6 +478,69 @@ mod tests {
             scah_query_free(q_child);
             scah_query_builder_free(root);
             scah_query_builder_free(child);
+        }
+    }
+
+    #[test]
+    fn builder_can_append_itself_without_aliasing() {
+        let mut root: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { scah_query_all(view("div"), scah_save_all(), &mut root, &mut err) },
+            ScahStatus::Ok
+        );
+
+        let mut parent = 0usize;
+        assert_eq!(
+            unsafe { scah_query_builder_current_section(root, &mut parent, &mut err) },
+            ScahStatus::Ok
+        );
+
+        // Self-append must clone before mutably borrowing the same handle.
+        assert_eq!(
+            unsafe { scah_query_builder_append(root, parent, root, &mut err) },
+            ScahStatus::Ok
+        );
+
+        let mut query: *mut ScahQuery = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { scah_query_builder_build(root, &mut query, &mut err) },
+            ScahStatus::Ok
+        );
+        assert!(!query.is_null());
+
+        // Parse nested HTML that exercises the cloned child tree under div.
+        let html = "<div><div><span>ok</span></div></div>";
+        let mut store: *mut crate::store::ScahStore = std::ptr::null_mut();
+        let queries = [query as *const ScahQuery];
+        assert_eq!(
+            unsafe {
+                crate::store::scah_parse(view(html), queries.as_ptr(), 1, &mut store, &mut err)
+            },
+            ScahStatus::Ok
+        );
+
+        let mut list: *mut crate::store::ScahElementList = std::ptr::null_mut();
+        let mut found = 0u8;
+        assert_eq!(
+            unsafe {
+                crate::store::scah_store_get(store, view("div"), &mut list, &mut found, &mut err)
+            },
+            ScahStatus::Ok
+        );
+        assert_eq!(found, 1);
+
+        let mut len = 0usize;
+        unsafe {
+            crate::store::scah_element_list_len(list, &mut len, &mut err);
+        }
+        assert!(len >= 1);
+
+        unsafe {
+            crate::store::scah_element_list_free(list);
+            crate::store::scah_store_free(store);
+            scah_query_free(query);
+            scah_query_builder_free(root);
         }
     }
 }

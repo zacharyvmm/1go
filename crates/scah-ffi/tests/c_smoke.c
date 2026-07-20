@@ -158,6 +158,24 @@ int main(void) {
     scah_element_list_free(NULL);
     scah_error_free(NULL);
 
+    /* Self-append: clone-before-mutate must succeed without aliasing UB. */
+    {
+        ScahQueryBuilder *self_builder = NULL;
+        ScahQuery *self_query = NULL;
+        ScahQuerySectionId self_parent = 0;
+
+        expect_ok(scah_query_all(sv("div"), scah_save_all(), &self_builder, &err), err,
+                  "self_query_all");
+        expect_ok(scah_query_builder_current_section(self_builder, &self_parent, &err), err,
+                  "self_current_section");
+        expect_ok(scah_query_builder_append(self_builder, self_parent, self_builder, &err), err,
+                  "self_append");
+        expect_ok(scah_query_builder_build(self_builder, &self_query, &err), err, "self_build");
+
+        scah_query_free(self_query);
+        scah_query_builder_free(self_builder);
+    }
+
     puts("c_smoke ok");
     return 0;
 }
