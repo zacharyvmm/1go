@@ -1639,6 +1639,33 @@ mod tests {
     }
 
     #[test]
+    fn chained_void_sibling_keeps_callback_arena_empty() {
+        // div + br + p: matching <br> registers a continuation that activates
+        // immediately, so the void middle element never parks a callback range.
+        let html = "<main><div></div><br><p id='hit'></p></main>";
+        let mut reader = Reader::new(html);
+        let queries = &[Query::all("div + br + p", Save::none()).unwrap().build()];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        while parser.next(&mut reader) {}
+
+        assert!(
+            parser.temp_state.sibling_callback_arena.is_empty(),
+            "chained void activation must leave the arena empty"
+        );
+        assert!(parser.temp_state.pending_sibling_callbacks.is_empty());
+
+        let store = parser.matches();
+        let hits: Vec<_> = store
+            .get("div + br + p")
+            .unwrap()
+            .map(|element| element.id)
+            .collect();
+        assert_eq!(hits, [Some("hit")]);
+    }
+
+    #[test]
     fn same_batch_discard_truncates_callback_arena() {
         // Closing </main> pops section then div then main. Discarded callback
         // ranges must still be truncated from the arena.
