@@ -360,8 +360,10 @@ impl ParserTextState {
 
     /// Apply opening-boundary behavior for a visible (or suppressed) element.
     ///
-    /// Suppression is decided by the caller before this runs; suppressed
-    /// elements must not queue opening separators.
+    /// Elements that begin suppression (`behavior.suppressed`) and descendants
+    /// already inside a suppressed subtree (`suppressed_depth > 0`) must not
+    /// queue or flush opening separators. Direct suppression is checked here
+    /// because depth is incremented only in [`Self::after_open_element`].
     ///
     /// Opening separators are flushed before the child's text range starts so
     /// parent-owned structural newlines sit outside the child range. Once
@@ -376,7 +378,7 @@ impl ParserTextState {
         behavior: TextElementBehavior,
         is_void: bool,
     ) {
-        if !self.captures_text() || behavior.suppressed {
+        if !self.captures_text() || behavior.suppressed || self.suppressed_depth > 0 {
             return;
         }
         if !is_void && behavior.opening_separator != PendingSeparator::None {
@@ -395,8 +397,9 @@ impl ParserTextState {
     /// - the element is a visible table cell, so consecutive empty cells each
     ///   contribute their own tab boundary on the shared tape
     ///
-    /// Suppressed elements must not flush: opening a hidden/`script`/`style`/
-    /// `template` subtree must not force a parent separator onto the tape.
+    /// Suppressed elements and descendants already inside a suppressed subtree
+    /// must not flush: opening a hidden/`script`/`style`/`template` subtree
+    /// (or nesting inside one) must not force a parent separator onto the tape.
     pub fn before_text_range_start(
         &mut self,
         tape: &mut TextTape,
@@ -404,7 +407,7 @@ impl ParserTextState {
         edge_policy: TextEdgePolicy,
         is_table_cell: bool,
     ) {
-        if !self.captures_text() || behavior.suppressed {
+        if !self.captures_text() || behavior.suppressed || self.suppressed_depth > 0 {
             return;
         }
 
