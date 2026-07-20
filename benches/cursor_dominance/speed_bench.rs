@@ -1,7 +1,4 @@
-//! Adversarial nested-selector workloads for production parse throughput.
-//!
-//! Measures ordinary `scah::parse` performance on synthetic HTML at depths
-//! 8, 32, 128, and 512. Cursor-count reporting lives in `scah-cursor-benches`.
+//! Production parse benchmarks for adversarial cursor workloads.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use scah::Query;
@@ -11,7 +8,6 @@ use std::hint::black_box;
 
 const DEPTHS: &[u16] = &[8, 32, 128, 512];
 
-/// Case 1: descendant domination — `div p` with one deepest `p`.
 fn html_descendant_domination(depth: u16) -> String {
     format!(
         "{opens}<p>x</p>{closes}",
@@ -20,12 +16,10 @@ fn html_descendant_domination(depth: u16) -> String {
     )
 }
 
-/// Case 2: child prefix + descendant — `div > div p`.
 fn html_child_prefix_descendant(depth: u16) -> String {
     html_descendant_domination(depth)
 }
 
-/// Case 3: mixed — `main > div p` with deep nest under main>div.
 fn html_mixed_main_div_p(depth: u16) -> String {
     format!(
         "<main>{opens}<p>x</p>{closes}</main>",
@@ -34,7 +28,6 @@ fn html_mixed_main_div_p(depth: u16) -> String {
     )
 }
 
-/// Case 4: non-dominance control — `div > p`, each level has a direct-child `p`.
 fn html_non_dominance(depth: u16) -> String {
     let mut html = String::from("<div>");
     for _ in 0..depth {
@@ -45,12 +38,10 @@ fn html_non_dominance(depth: u16) -> String {
     html
 }
 
-/// Case 5: `.then()` output scopes with shared descendant `p` matches.
 fn html_then_scopes(depth: u16) -> String {
     html_descendant_domination(depth)
 }
 
-/// Sequential child-scoped `First` ownership under sibling articles.
 fn html_then_first_sequential(count: u16) -> String {
     let mut html = String::new();
     for _ in 0..count {
@@ -67,7 +58,6 @@ fn html_then_first_sequential(count: u16) -> String {
     html
 }
 
-/// Nested child-scoped `First` ownership with overlapping open articles.
 fn html_then_first_nested(depth: u16) -> String {
     let mut html = String::new();
     for _ in 0..depth {

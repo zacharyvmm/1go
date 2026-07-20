@@ -102,10 +102,7 @@ where
             "First scope claimed twice for section+output_parent"
         );
 
-        // One scan: discover the broadest ownership depth among same-scope peers
-        // while permanently canceling every peer except the selected cursor.
-        // Promote the winner only after the scan so it still contributes its
-        // original active/transition scope_depth to the ownership calculation.
+        // Rebind the winner only after its original scope contributes to ownership.
         let mut ownership_scope_depth = self.cursors[selected_cursor_index].scope_depth;
 
         for (index, cursor) in self.cursors.iter_mut().enumerate() {
@@ -215,7 +212,6 @@ where
         );
     }
 
-    /// Whether `(candidate.section, candidate.parent)` already has a First winner.
     #[inline]
     fn first_scope_is_claimed(&self, candidate: &ScopedCursor) -> bool {
         let section = candidate.position.selection;
@@ -226,7 +222,6 @@ where
             return false;
         }
 
-        // Check the winner flag first: almost every cursor fails immediately.
         self.cursors.iter().rev().any(|cursor| {
             cursor.is_first_winner()
                 && cursor.position.selection == section
@@ -266,9 +261,11 @@ where
         SpawnOutcome::Inserted
     }
 
-    /// For descendant steps, live cursors at the same `(parent, position)` form
-    /// an antichain on `match_base_depth`: shallower bases dominate deeper ones,
-    /// so at most one non-`end` cursor survives per obligation key.
+    /// Admit a descendant obligation unless a shallower equivalent is live.
+    ///
+    /// Live cursors cannot be deeper than a new candidate: candidates use the
+    /// current document depth, and deeper scopes are pruned before parsing
+    /// resumes at a shallower depth.
     fn try_push_descendant(
         &mut self,
         candidate: ScopedCursor,
@@ -311,9 +308,7 @@ where
         self.finish_push_cursor(candidate, runner_index, store, create_reason)
     }
 
-    /// Child obligations key on exact `(parent, position, match_base_depth)`.
-    /// Anchored and moving sources can still collide on that key, so keep the
-    /// exact-equality scan in release builds.
+    /// Admit a child obligation unless the exact obligation is already live.
     fn try_push_child(
         &mut self,
         candidate: ScopedCursor,
@@ -347,11 +342,7 @@ where
         self.finish_push_cursor(candidate, runner_index, store, create_reason)
     }
 
-    /// Push `candidate` unless an existing live cursor already dominates it
-    /// (same parent+position, antichain on match_base_depth for descendants).
-    ///
-    /// Claimed `First` scopes are rejected before combinator-specific admission
-    /// so release builds share the same ownership barrier as debug/tests.
+    /// Admit a cursor after applying `First` ownership and combinator rules.
     fn try_push_cursor(
         &mut self,
         candidate: ScopedCursor,
@@ -388,11 +379,7 @@ where
                 self.try_push_descendant(candidate, runner_index, store, create_reason)
             }
             Combinator::Child => self.try_push_child(candidate, runner_index, store, create_reason),
-            // Future sibling admission will key on more than depth:
-            // - Adjacent (+): exact key including sibling stream + SiblingsRemaining(1)
-            // - Subsequent (~): one Scope watcher per sibling stream + position + output parent
-            // - Nth countdown: sibling stream + remaining/formula state
-            // Depth-only equivalence is insufficient, so never dominate here yet.
+            // Sibling obligations need stream identity before they can be deduplicated.
             Combinator::NextSibling | Combinator::SubsequentSibling => {
                 debug_assert!(
                     false,
@@ -521,8 +508,8 @@ where
                         (output_parent, None)
                     };
 
-                    // Set lifecycle before cursor admission so spawned anchors
-                    // are not dominated by an still-active source cursor.
+                    // Update lifecycle before admitting the anchor so the
+                    // matched source does not dominate it.
                     if !terminal_all {
                         if terminal_first {
                             debug_assert!(
@@ -539,8 +526,6 @@ where
                         continue;
                     }
 
-                    // Terminal First never needs a descendant anchor; the winner
-                    // already owns the selected close boundary.
                     if !terminal_first && let Some(anchor) = anchor_candidate {
                         let _ = self.try_push_cursor(
                             anchor,
@@ -557,10 +542,7 @@ where
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
-                    // Anchored cursors are only created for non-terminal All
-                    // descendant scopes (`needs_descendant_anchor`). Their
-                    // position never advances, so they cannot occupy a terminal
-                    // First save point in production.
+                    // Anchors never advance to terminal First positions.
                     debug_assert!(
                         !(is_save_point && is_first),
                         "terminal First must be represented by a moving cursor"
@@ -1009,7 +991,6 @@ mod tests {
             &mut store,
         );
 
-        // Terminal `all()` keeps matching live without an unwind close handshake.
         assert!(!selection.cursors[0].end());
     }
 
@@ -1664,13 +1645,6 @@ mod tests {
         assert!(!remaining_scopes.contains(&3));
     }
 
-    // ── Cursor canonicalization regression tests (Commit 1) ───────────────
-    // These document expected cursor invariants before executor refactor.
-    // Cursor-invariant assertions are expected to FAIL until the fix lands.
-
-    /// Test A: child-depth regression (`main > div p`).
-    /// After the direct-child div matches, descendant cursors must keep main
-    /// depth as match base; nested div must not spawn redundant p cursors.
     #[test]
     fn test_a_child_depth_regression_main_div_p() {
         let query = Query::all("main > div p", Save::all()).unwrap().build();
@@ -1681,18 +1655,14 @@ mod tests {
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
 
-        // depth 0: <main>
         selection.next(0, &elem("main"), &doc_pos(0), &mut store, &mut save_hits);
-
-        // depth 1: direct-child <div>
         selection.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
 
         let main_depth = 0u16;
         let div_depth = 1u16;
         let output_parent = ElementId::default();
 
-        // Child-div obligation keeps main as match base after matching a direct child.
-        let child_div_state = TransitionId(1); // `main > div` transition after `main`
+        let child_div_state = TransitionId(1);
         let child_div_cursors: Vec<_> = selection
             .cursors
             .iter()
@@ -1710,7 +1680,6 @@ mod tests {
             );
         }
 
-        // Descendant-p continuation is rooted at the matched div depth.
         let p_cursors: Vec<_> = selection
             .cursors
             .iter()
@@ -1728,7 +1697,6 @@ mod tests {
             );
         }
 
-        // depth 2: nested <div> — must not fork another p obligation.
         selection.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
 
         assert_eq!(
@@ -1737,14 +1705,12 @@ mod tests {
             "nested div must not spawn duplicate live p cursors for same parent+position"
         );
 
-        // depth 3: <p>
         selection.next(0, &elem("p"), &doc_pos(3), &mut store, &mut save_hits);
 
         let ps: Vec<_> = store.get("main > div p").unwrap().collect();
         assert_eq!(ps.len(), 1, "Expected exactly one p result");
     }
 
-    /// Test B: sibling direct children still work (`main > div p`).
     #[test]
     fn test_b_sibling_direct_children_main_div_p() {
         let html = "<main><div><p>A</p></div><div><p>B</p></div></main>";
@@ -1759,7 +1725,6 @@ mod tests {
         assert_eq!(ps.len(), 2, "Both sibling p elements must match");
     }
 
-    /// Test C: overlapping nested prefixes — deeper p candidate rejected.
     #[test]
     fn test_c_overlapping_nested_prefixes() {
         let query = Query::all("main > div p", Save::all()).unwrap().build();
@@ -1788,7 +1753,6 @@ mod tests {
         assert_eq!(ps.len(), 1, "Expected exactly one p result");
     }
 
-    /// Test D: repeated child-prefix overlap (`div > div p`).
     #[test]
     fn test_d_repeated_child_prefix_overlap() {
         let query = Query::all("div > div p", Save::all()).unwrap().build();
@@ -1809,7 +1773,6 @@ mod tests {
             "only one live p cursor after first div>div match"
         );
 
-        // Third nested div must not rebased-match as another direct child.
         selection.next(0, &elem("div"), &doc_pos(2), &mut store, &mut save_hits);
         assert_eq!(
             live_moving_cursors_at(&selection, p_state, output_parent),
@@ -1823,7 +1786,6 @@ mod tests {
         assert_eq!(ps.len(), 1, "Expected exactly one p result");
     }
 
-    /// Test E: child anchors not over-pruned (`div > p`).
     #[test]
     fn test_e_child_anchors_not_over_pruned() {
         let html = "<div><p>Outer</p><div><p>Inner</p></div></div>";
@@ -1838,7 +1800,6 @@ mod tests {
         assert_eq!(ps.len(), 2, "Both direct-child p elements must match");
     }
 
-    /// Test F: terminal `all()` nested matches (`div`).
     #[test]
     fn test_f_terminal_all_nested_matches() {
         let html = "<div><div><div></div></div></div>";
@@ -1853,7 +1814,6 @@ mod tests {
         assert_eq!(divs.len(), 3, "All three nested divs must match");
     }
 
-    /// Test G: `.then()` scopes are not globally canonicalized.
     #[test]
     fn test_g_then_scopes_not_globally_canonicalized() {
         let html = "<div><div><div><p>Hello</p></div></div></div>";
@@ -1891,7 +1851,6 @@ mod tests {
         );
     }
 
-    /// Test H: `first()` behavior unchanged for flat and `.then()` child queries.
     #[test]
     fn test_h_first_behavior_flat_and_then() {
         let html = "<div><p>A</p><p>B</p></div><div><p>C</p><p>D</p></div>";
@@ -1926,8 +1885,6 @@ mod tests {
             "then first('p') must match one p per parent"
         );
 
-        // Early exit for flat first() is covered by the single global result above;
-        // verify first('div') triggers early_exit only after selected close.
         let div_only = Query::first("div", Save::all()).unwrap().build();
         let mut selection = QueryExecutor::new(&div_only);
         let mut store3 = Store::default();
@@ -1943,14 +1900,12 @@ mod tests {
         );
     }
 
-    /// Test I: malformed / implicit-close / self-closing — cursor set stays valid.
     #[test]
     fn test_i_malformed_implicit_close_self_closing_cursors_valid() {
         let query = Query::all("div > div p", Save::all()).unwrap().build();
         let query = &query;
         let p_state = terminal_state(query);
 
-        // Implicit <li> close variant.
         let html_li = "<ul><li><div><div><p>X</p></div></div><li>Y</ul>";
         let reader = &mut Reader::new(html_li);
         let queries = [query.clone()];
@@ -1961,7 +1916,6 @@ mod tests {
         let ps: Vec<_> = store.get("div > div p").unwrap().collect();
         assert_eq!(ps.len(), 1, "Implicit close must still yield one p match");
 
-        // Mismatched close + self-closing: drive manually to inspect cursors.
         let mut store2 = Store::default();
         let mut selection = QueryExecutor::new(query);
         let mut save_hits = Vec::new();
@@ -2158,7 +2112,6 @@ mod tests {
         let store = parser.matches();
         assert_eq!(store.get("div").unwrap().count(), 3);
 
-        // Sibling terminal `all()` rematches without needing a close reactivation.
         let sibling_html = "<main><section></section><section></section></main>";
         let reader = &mut Reader::new(sibling_html);
         let sibling_q = &[Query::all("main > section", Save::all()).unwrap().build()];
@@ -2180,8 +2133,6 @@ mod tests {
         let store = parser.matches();
         assert_eq!(store.get("div br").unwrap().count(), 2);
 
-        // Drive manually: void First under `.then()` completes on synthetic close
-        // (unwind must clear without rolling back cursor position).
         let query = Query::first("div", Save::none())
             .unwrap()
             .then(|div| Ok([div.first("br", Save::all())?]))
@@ -3063,14 +3014,13 @@ mod tests {
         let query = &query;
         let mut executor = QueryExecutor::new(query);
 
-        // Distinct from root's parent so the sentinel root is not a same-scope peer.
         let parent = ElementId(1);
         let position = Position {
             selection: QuerySectionId(0),
             state: TransitionId(0),
         };
 
-        // Vector order: narrower peer before selected, selected, broadest after.
+        // Put the broadest peer after the selected cursor to verify order independence.
         let peer_before = ScopedCursor::new_moving(3, parent, position);
         let selected = ScopedCursor::new_moving(4, parent, position);
         let peer_after = ScopedCursor::new_moving(1, parent, position);
@@ -3356,7 +3306,6 @@ mod tests {
         let mut save_hits = Vec::new();
         let first_section = QuerySectionId(1);
 
-        // Nested articles so both ownership tokens can be resident at once.
         executor.next(0, &elem("article"), &doc_pos(0), &mut store, &mut save_hits);
         let article_outer = save_hits[0].element_id;
         executor.next(0, &elem("div"), &doc_pos(1), &mut store, &mut save_hits);
@@ -3674,7 +3623,6 @@ mod tests {
             .expect("failed First prefix must block until </div>");
         let before_position = selection.cursors[blocked_idx].position;
 
-        // Continuation for `p` dies without matching; prefix reactivates.
         selection.back(0, "div", &doc_pos(0), &mut store);
         let reactivated = selection
             .cursors

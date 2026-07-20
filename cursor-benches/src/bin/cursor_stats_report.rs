@@ -1,7 +1,4 @@
-//! Report peak resident cursor slots and active obligations as integer counts.
-//!
-//! This is inspection / PR-documentation tooling. Structural bounds remain
-//! enforced by `scah` unit tests under `bench-internals`.
+//! Report peak resident cursor slots and active obligations.
 
 use scah_cursor_benches::{DEPTHS, cursor_cases, measure_case};
 use std::process::ExitCode;

@@ -73,12 +73,11 @@ const fn optional_unwind_depth(flags: u8, raw: super::DepthSize) -> Option<super
 #[derive(PartialEq, Clone, Debug)]
 pub enum CursorMode {
     Moving {
-        /// The Dᵢ value used to evaluate the current transition.
+        /// Depth used to evaluate the current transition.
         match_base_depth: super::DepthSize,
-        /// Depth whose close should update this cursor when [`FLAG_HAS_UNWIND`] is set.
+        /// Pending close depth when [`FLAG_HAS_UNWIND`] is set.
         unwind_depth: super::DepthSize,
-        /// Activity, unwind-presence, and mode flags; see [`FLAG_BLOCKED`],
-        /// [`FLAG_COMPLETE`], [`FLAG_HAS_UNWIND`], and [`FLAG_FIRST_WINNER`].
+        /// Packed activity and lifecycle flags.
         flags: u8,
     },
     Anchored {
@@ -191,7 +190,7 @@ impl ScopedCursor {
         }
     }
 
-    /// Depth whose close should reactivate this cursor, if any.
+    /// Depth whose close advances this cursor's lifecycle.
     pub fn unwind_depth(&self) -> Option<super::DepthSize> {
         match &self.mode {
             CursorMode::Moving {
@@ -278,7 +277,6 @@ impl ScopedCursor {
         flags_is_first_winner(self.activity_flags())
     }
 
-    /// Whether matching should skip this cursor (blocked or complete).
     pub fn end(&self) -> bool {
         !self.is_active()
     }
@@ -349,8 +347,7 @@ impl ScopedCursor {
         }
     }
 
-    /// Keep the cursor complete after its awaited close; clear pending unwind
-    /// without reactivating matching. Preserves [`FLAG_FIRST_WINNER`].
+    /// Clear a completed cursor's pending close while preserving winner ownership.
     pub fn complete_after_close(&mut self) {
         if let CursorMode::Moving {
             flags,
@@ -365,15 +362,11 @@ impl ScopedCursor {
         }
     }
 
-    /// Claim a terminal `First` selection with dual lifetimes.
+    /// Mark this cursor as the `First` winner.
     ///
-    /// * `selected_depth` becomes the unwind boundary (selected element close).
-    /// * `ownership_scope_depth` rebinds `scope_depth` to the output-parent
-    ///   lifetime so the winner remains the admission token until that scope ends.
-    ///
-    /// The cursor must be a moving, active cursor. After this transition it is
-    /// complete, carries unwind depth `selected_depth`, and is marked as the
-    /// First winner.
+    /// The selected element close finalizes its content, while
+    /// `ownership_scope_depth` keeps later matches suppressed until the output
+    /// parent closes.
     pub fn select_first_until_close(
         &mut self,
         selected_depth: super::DepthSize,
@@ -411,8 +404,7 @@ impl ScopedCursor {
         self.debug_assert_moving_invariants();
     }
 
-    /// Permanently cancel this cursor with no pending close unwind.
-    /// Used for peer First-scope cursors that did not own the selected element.
+    /// Permanently cancel a non-winning cursor in a claimed `First` scope.
     pub fn cancel_complete(&mut self) {
         match &mut self.mode {
             CursorMode::Moving {
@@ -926,7 +918,6 @@ mod tests {
 
     #[test]
     fn scoped_cursor_size_is_stable() {
-        // FLAG_HAS_UNWIND tracks pending unwind depth instead of a sentinel value.
         let cursor_size = std::mem::size_of::<ScopedCursor>();
         let mode_size = std::mem::size_of::<CursorMode>();
         let position_size = std::mem::size_of::<Position>();

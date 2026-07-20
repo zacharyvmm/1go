@@ -36,7 +36,6 @@ impl<'html> OpenElementStack<'html> {
         self.entries.len().try_into().unwrap_or(MAX_ELEMENT_DEPTH)
     }
 
-    /// Whether pushing another open element would exceed [`MAX_ELEMENT_DEPTH`].
     #[inline]
     pub(crate) const fn would_exceed_max_depth(len: usize) -> bool {
         len >= MAX_ELEMENT_DEPTH as usize

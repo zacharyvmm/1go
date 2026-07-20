@@ -5,6 +5,5 @@ pub mod multiplexer;
 
 pub(crate) type DepthSize = u16;
 
-/// Maximum real element depth. Depths at or above [`DepthSize::MAX`] are
-/// reserved for cursor sentinels such as [`cursor::SENTINEL_SCOPE`](cursor::SENTINEL_SCOPE).
+/// Maximum real element depth; [`DepthSize::MAX`] is reserved for cursor sentinels.
 pub(crate) const MAX_ELEMENT_DEPTH: DepthSize = DepthSize::MAX - 1;

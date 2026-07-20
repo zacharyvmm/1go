@@ -83,8 +83,7 @@ pub trait QuerySpec<'query> {
 
         if self.is_save_point(&position) {
             let kind = self.get_section_selection_kind(position.selection);
-            // Nested All-section matches are distinct output parents when
-            // child query sections exist.
+            // Each All match with child sections creates a distinct output scope.
             return matches!(kind, SelectionKind::All) && position.next_child(self).is_some();
         }
 
@@ -92,8 +91,7 @@ pub trait QuerySpec<'query> {
             .next_transition(self)
             .expect("non-save-point must have a next transition");
 
-        // A descendant continuation covers suffixes produced by nested
-        // rematches of the current selector. Exact relative operators do not.
+        // Descendant continuations already cover nested rematches.
         !self.is_descendant(next)
     }
 

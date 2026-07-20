@@ -123,13 +123,9 @@ pub use scah_query_ir::{
 pub use scah_reader::Reader;
 pub use store::{CapacityOptions, Element, ElementId, Store};
 
-/// Internal parser details exposed so benchmarks can measure production code
-/// instead of maintaining a duplicate implementation.
+/// Internal APIs used by benchmarks.
 ///
-/// Tag classification helpers are always available. Cursor-statistics APIs
-/// require the `bench-internals` feature and must only be used from the
-/// instrumented `scah-cursor-benches` package — never from production speed
-/// benchmarks (`scah-benches`).
+/// Cursor instrumentation is available only with `bench-internals`.
 #[doc(hidden)]
 pub mod bench_internals {
     pub use crate::html::tag::{ScopeKind, TagFlags};
@@ -145,10 +141,7 @@ pub mod bench_internals {
     #[cfg(feature = "bench-internals")]
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
 
-    /// Parse HTML while recording peak cursor statistics across all query runners.
-    ///
-    /// Statistics are sampled for the initial root cursors, after every open
-    /// event, and after every close/pruning event.
+    /// Parse HTML and return peak cursor counts with the result store.
     #[cfg(feature = "bench-internals")]
     pub fn parse_with_cursor_stats<'a: 'query, 'html: 'query, 'query: 'html, Q>(
         html: &'html str,
@@ -191,7 +184,6 @@ pub use engine::multiplexer::CursorStatsSnapshot;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     /// The query slice passed to [`parse`] is empty.
-    /// At least one query is required.
     EmptyQueries,
     /// The open-element stack exceeded [`engine::MAX_ELEMENT_DEPTH`].
     MaximumDepthExceeded,
@@ -218,9 +210,8 @@ impl std::error::Error for ParseError {}
 ///
 /// # Errors
 ///
-/// Returns [`ParseError::EmptyQueries`] if the query slice is empty.
-/// At least one query is required. Returns [`ParseError::MaximumDepthExceeded`]
-/// if open-element nesting exceeds [`engine::MAX_ELEMENT_DEPTH`].
+/// Returns [`ParseError::EmptyQueries`] for an empty query slice and
+/// [`ParseError::MaximumDepthExceeded`] when nesting exceeds the supported depth.
 ///
 /// # Parameters
 ///

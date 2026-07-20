@@ -20,7 +20,6 @@ pub(crate) struct SaveHit {
     pub save_text_content: bool,
 }
 
-//type Runner<'query, Q> = SmallVec<[QueryExecutor<'query, Q>; 1]>;
 type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
 
 #[cfg(feature = "bench-internals")]
@@ -77,10 +76,7 @@ where
         self.cursor_stats.is_some()
     }
 
-    /// Sample resident slot and active-obligation counts.
-    ///
-    /// Peaks include the initial root cursors (via an explicit sample before
-    /// parsing) and the state after every open and close/pruning event.
+    /// Update peak cursor counts from the current runner state.
     #[cfg(feature = "bench-internals")]
     #[inline]
     fn track_cursor_stats(&mut self) {
@@ -150,8 +146,7 @@ where
         let mut remove_indices = vec![];
         for (index, session) in self.runners.iter_mut().enumerate() {
             let significant_close = session.back(index, xhtml_element, position, store);
-            // Drop the runner once close handling completes a terminal `.first()`
-            // query (including void synthetic closes via `complete_after_close`).
+            // A First runner can exit only after close handling finalizes its winner.
             if significant_close && session.early_exit() {
                 remove_indices.push(index);
             }

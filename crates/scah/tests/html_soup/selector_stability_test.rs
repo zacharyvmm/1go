@@ -213,10 +213,6 @@ fn attribute_match_operators_require_equals() {
     assert!(Query::all(r#"div[class~="foo"]"#, Save::none()).is_ok());
 }
 
-// ── Cursor canonicalization regression tests (Commit 1) ─────────────────
-// Public result-count tests; cursor-invariant checks live in executor unit tests.
-
-/// Test A (public): `main > div p` nested div — one p result.
 #[test]
 fn cursor_canonicalization_a_main_div_p_single_result() {
     let html = r#"<main><div><div><p>Hello World</p></div></div></main>"#;
@@ -224,7 +220,6 @@ fn cursor_canonicalization_a_main_div_p_single_result() {
     assert_eq!(elements(&store, "main > div p").len(), 1);
 }
 
-/// Test B: sibling direct children — both p match.
 #[test]
 fn cursor_canonicalization_b_sibling_direct_children() {
     let html = r#"<main><div><p>A</p></div><div><p>B</p></div></main>"#;
@@ -232,7 +227,6 @@ fn cursor_canonicalization_b_sibling_direct_children() {
     assert_eq!(elements(&store, "main > div p").len(), 2);
 }
 
-/// Test C: overlapping nested prefixes — one p result.
 #[test]
 fn cursor_canonicalization_c_overlapping_nested_prefixes() {
     let html = r#"<main><div><main><div><p>Hello</p></div></main></div></main>"#;
@@ -240,7 +234,6 @@ fn cursor_canonicalization_c_overlapping_nested_prefixes() {
     assert_eq!(elements(&store, "main > div p").len(), 1);
 }
 
-/// Test D: repeated child-prefix overlap — one p result.
 #[test]
 fn cursor_canonicalization_d_repeated_child_prefix_overlap() {
     let html = r#"<div><div><div><p>Hello</p></div></div></div>"#;
@@ -248,7 +241,6 @@ fn cursor_canonicalization_d_repeated_child_prefix_overlap() {
     assert_eq!(elements(&store, "div > div p").len(), 1);
 }
 
-/// Test E: child anchors not over-pruned — both direct p match.
 #[test]
 fn cursor_canonicalization_e_child_anchors_not_over_pruned() {
     let html = r#"<div><p>Outer</p><div><p>Inner</p></div></div>"#;
@@ -256,7 +248,6 @@ fn cursor_canonicalization_e_child_anchors_not_over_pruned() {
     assert_eq!(elements(&store, "div > p").len(), 2);
 }
 
-/// Test F: terminal `all()` nested matches — all three divs.
 #[test]
 fn cursor_canonicalization_f_terminal_all_nested_divs() {
     let html = r#"<div><div><div></div></div></div>"#;
@@ -264,7 +255,6 @@ fn cursor_canonicalization_f_terminal_all_nested_divs() {
     assert_eq!(elements(&store, "div").len(), 3);
 }
 
-/// Test G: `.then()` scopes not globally canonicalized.
 #[test]
 fn cursor_canonicalization_g_then_scopes_distinct_parents() {
     let html = r#"<div><div><div><p>Hello</p></div></div></div>"#;
@@ -287,7 +277,6 @@ fn cursor_canonicalization_g_then_scopes_distinct_parents() {
     );
 }
 
-/// Test H: `first()` flat and `.then()` child — one match each scope.
 #[test]
 fn cursor_canonicalization_h_first_flat_and_then() {
     let html = r#"<div><p>A</p><p>B</p></div><div><p>C</p><p>D</p></div>"#;
@@ -307,7 +296,6 @@ fn cursor_canonicalization_h_first_flat_and_then() {
     assert_eq!(divs[0].get(&store2, "p").unwrap().count(), 1);
 }
 
-/// Test I: dominance-sensitive query survives implicit close and self-closing.
 #[test]
 fn cursor_canonicalization_i_implicit_close_and_self_closing() {
     let html = "<ul><li><div><div><p>X</p></div></div><li>Y</ul>";
