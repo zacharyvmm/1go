@@ -45,32 +45,20 @@ where
         }
     }
 
-    /// Broadest `scope_depth` among peers competing for `(section, output_parent)`.
+    /// Sentinel-aware broadest-scope combination for First ownership.
     ///
-    /// Continuations may narrow scope as selector prefixes advance; the section-root
-    /// obligation (or root sentinel) remains the broadest peer and is the
-    /// output-parent ownership lifetime for a claimed `First` winner.
-    fn first_ownership_scope_depth(
-        &self,
-        section: QuerySectionId,
-        output_parent: ElementId,
+    /// `SENTINEL_SCOPE` is numerically max, but semantically broader than every
+    /// ordinary element scope, so ordinary numeric `min` is incorrect.
+    #[inline(always)]
+    fn broader_scope_depth(
+        current: super::DepthSize,
+        candidate: super::DepthSize,
     ) -> super::DepthSize {
-        let mut ownership_scope = None;
-
-        for cursor in &self.cursors {
-            if cursor.position.selection != section || cursor.parent != output_parent {
-                continue;
-            }
-
-            ownership_scope = Some(match ownership_scope {
-                None => cursor.scope_depth,
-                Some(SENTINEL_SCOPE) => SENTINEL_SCOPE,
-                Some(_) if cursor.scope_depth == SENTINEL_SCOPE => SENTINEL_SCOPE,
-                Some(current) => current.min(cursor.scope_depth),
-            });
+        if current == SENTINEL_SCOPE || candidate == SENTINEL_SCOPE {
+            SENTINEL_SCOPE
+        } else {
+            current.min(candidate)
         }
-
-        ownership_scope.expect("claim_first_scope requires at least the selected cursor")
     }
 
     fn claim_first_scope(
@@ -114,21 +102,29 @@ where
             "First scope claimed twice for section+output_parent"
         );
 
-        let ownership_scope_depth = self.first_ownership_scope_depth(section, output_parent);
+        // One scan: discover the broadest ownership depth among same-scope peers
+        // while permanently canceling every peer except the selected cursor.
+        // Promote the winner only after the scan so it still contributes its
+        // original active/transition scope_depth to the ownership calculation.
+        let mut ownership_scope_depth = self.cursors[selected_cursor_index].scope_depth;
+
+        for (index, cursor) in self.cursors.iter_mut().enumerate() {
+            if cursor.position.selection != section || cursor.parent != output_parent {
+                continue;
+            }
+
+            ownership_scope_depth =
+                Self::broader_scope_depth(ownership_scope_depth, cursor.scope_depth);
+
+            if index != selected_cursor_index {
+                cursor.cancel_complete();
+            }
+        }
+
         debug_assert!(
             ownership_scope_depth == SENTINEL_SCOPE || ownership_scope_depth <= selected_depth,
             "First ownership scope must contain selected element"
         );
-
-        for (index, cursor) in self.cursors.iter_mut().enumerate() {
-            if index == selected_cursor_index {
-                continue;
-            }
-
-            if cursor.position.selection == section && cursor.parent == output_parent {
-                cursor.cancel_complete();
-            }
-        }
 
         self.cursors[selected_cursor_index]
             .select_first_until_close(selected_depth, ownership_scope_depth);
@@ -3062,6 +3058,79 @@ mod tests {
     }
 
     #[test]
+    fn claim_first_scope_finds_broadest_peer_in_one_pass() {
+        let query = Query::first("p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut executor = QueryExecutor::new(query);
+
+        // Distinct from root's parent so the sentinel root is not a same-scope peer.
+        let parent = ElementId(1);
+        let position = Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(0),
+        };
+
+        // Vector order: narrower peer before selected, selected, broadest after.
+        let peer_before = ScopedCursor::new_moving(3, parent, position);
+        let selected = ScopedCursor::new_moving(4, parent, position);
+        let peer_after = ScopedCursor::new_moving(1, parent, position);
+        executor.cursors.extend([peer_before, selected, peer_after]);
+
+        let selected_index = 2;
+        let selected_depth = 4;
+        assert_eq!(executor.cursors[selected_index].scope_depth, 4);
+
+        executor.claim_first_scope(QuerySectionId(0), parent, selected_index, selected_depth);
+
+        let winner = &executor.cursors[selected_index];
+        assert!(winner.is_first_winner());
+        assert!(winner.is_complete());
+        assert_eq!(winner.scope_depth, 1);
+        assert_eq!(winner.unwind_depth(), Some(selected_depth));
+
+        for &peer_index in &[1usize, 3] {
+            let peer = &executor.cursors[peer_index];
+            assert!(peer.is_complete(), "peer {peer_index} must be canceled");
+            assert!(!peer.is_first_winner());
+            assert_eq!(peer.unwind_depth(), None);
+        }
+    }
+
+    #[test]
+    fn claim_first_scope_sentinel_peer_after_selected_rebinds_winner() {
+        let query = Query::first("p", Save::all()).unwrap().build();
+        let query = &query;
+        let mut executor = QueryExecutor::new(query);
+
+        let parent = ElementId(1);
+        let position = Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(0),
+        };
+
+        let selected = ScopedCursor::new_moving(2, parent, position);
+        let mut sentinel_peer = ScopedCursor::new_moving(0, parent, position);
+        sentinel_peer.scope_depth = SENTINEL_SCOPE;
+        executor.cursors.extend([selected, sentinel_peer]);
+
+        let selected_index = 1;
+        let selected_depth = 2;
+        executor.claim_first_scope(QuerySectionId(0), parent, selected_index, selected_depth);
+
+        let winner = &executor.cursors[selected_index];
+        assert!(winner.is_first_winner());
+        assert!(winner.is_complete());
+        assert_eq!(winner.scope_depth, SENTINEL_SCOPE);
+        assert_eq!(winner.unwind_depth(), Some(selected_depth));
+
+        let peer = &executor.cursors[2];
+        assert!(peer.is_complete());
+        assert!(!peer.is_first_winner());
+        assert_eq!(peer.unwind_depth(), None);
+        assert_eq!(peer.scope_depth, SENTINEL_SCOPE);
+    }
+
+    #[test]
     fn first_winner_ownership_survives_prefix_close() {
         let query = Query::all("article", Save::all())
             .unwrap()
@@ -3377,9 +3446,7 @@ mod tests {
             peak_winners = peak_winners.max(winners);
             assert_eq!(winners, 1, "one open article owns one First winner");
             assert!(executor.cursors.iter().any(|cursor| {
-                cursor.is_first_winner()
-                    && cursor.parent == article_id
-                    && cursor.scope_depth == 0
+                cursor.is_first_winner() && cursor.parent == article_id && cursor.scope_depth == 0
             }));
 
             executor.back(0, "article", &doc_pos(0), &mut store);
