@@ -25,12 +25,24 @@ fn whitespace_html(blocks: usize) -> String {
     html
 }
 
-fn entity_html(count: usize) -> String {
+/// Ordinary prose with occasional character references (sparse entity workload).
+fn sparse_entities_html(count: usize) -> String {
     let mut html = String::from("<div>");
     for i in 0..count {
         html.push_str(&format!(
             "<p>A&nbsp;&amp;&#x20;B &lt;{i}&gt; &quot;quote&quot;</p>"
         ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+/// Entity-dense input that stresses ampersand detection, named lookup,
+/// numeric decoding, multi-code-point entities, and scratch-buffer reuse.
+fn dense_entities_html(count: usize) -> String {
+    let mut html = String::from("<div>");
+    for _ in 0..count {
+        html.push_str("<p>&amp;&nbsp;&copy;&#65;&#x41;&NotEqualTilde;&quot;&lt;&gt;</p>");
     }
     html.push_str("</div>");
     html
@@ -161,11 +173,11 @@ fn bench_text_modes(c: &mut Criterion) {
             },
         );
 
-        let entities = entity_html(size);
-        group.throughput(Throughput::Bytes(entities.len() as u64));
+        let sparse_entities = sparse_entities_html(size);
+        group.throughput(Throughput::Bytes(sparse_entities.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("text_only_entities", size),
-            &entities,
+            BenchmarkId::new("text_only_sparse_entities", size),
+            &sparse_entities,
             |b, html| {
                 b.iter(|| {
                     let store = parse(black_box(html), black_box(text_q)).unwrap();
@@ -189,10 +201,11 @@ fn bench_text_modes(c: &mut Criterion) {
             },
         );
 
-        let many_entities = entity_html(size);
+        let dense_entities = dense_entities_html(size);
+        group.throughput(Throughput::Bytes(dense_entities.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("text_only_many_entities", size),
-            &many_entities,
+            BenchmarkId::new("text_only_dense_entities", size),
+            &dense_entities,
             |b, html| {
                 b.iter(|| {
                     let store = parse(black_box(html), black_box(text_q)).unwrap();
