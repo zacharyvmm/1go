@@ -1,0 +1,344 @@
+//! Opaque query handles and C ABI entry points.
+
+use crate::error::{ScahError, ScahStatus, ffi_guard, ffi_guard_void, set_error};
+use crate::owned_query::{OwnedQuery, OwnedQueryBuilder};
+use crate::string::{ScahSave, ScahStringView};
+use scah::QuerySectionId;
+use std::sync::Arc;
+
+/// Opaque pending query builder handle.
+pub struct ScahQueryBuilder {
+    pub(crate) inner: OwnedQueryBuilder,
+}
+
+/// Opaque compiled query handle.
+pub struct ScahQuery {
+    pub(crate) inner: Arc<OwnedQuery>,
+}
+
+/// Section identifier within a query builder tree.
+pub type ScahQuerySectionId = usize;
+
+fn require_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, ScahStatus> {
+    if ptr.is_null() {
+        Err(ScahStatus::NullPointer)
+    } else {
+        Ok(unsafe { &mut *ptr })
+    }
+}
+
+fn require_ref<'a, T>(ptr: *const T) -> Result<&'a T, ScahStatus> {
+    if ptr.is_null() {
+        Err(ScahStatus::NullPointer)
+    } else {
+        Ok(unsafe { &*ptr })
+    }
+}
+
+fn write_ptr<T>(out: *mut *mut T, value: Box<T>) -> Result<(), ScahStatus> {
+    if out.is_null() {
+        return Err(ScahStatus::NullPointer);
+    }
+    unsafe {
+        *out = Box::into_raw(value);
+    }
+    Ok(())
+}
+
+fn parse_selector(
+    selector: ScahStringView,
+    out_error: *mut *mut ScahError,
+) -> Result<String, ScahStatus> {
+    match selector.to_str() {
+        Ok(s) => Ok(s.to_owned()),
+        Err(ScahStatus::NullPointer) => {
+            set_error(out_error, "null string pointer with nonzero length");
+            Err(ScahStatus::NullPointer)
+        }
+        Err(ScahStatus::InvalidUtf8) => {
+            set_error(out_error, "string view is not valid UTF-8");
+            Err(ScahStatus::InvalidUtf8)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Create a root builder that matches all occurrences of `selector`.
+///
+/// The selector is not validated until [`scah_query_builder_build`].
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_all(
+    selector: ScahStringView,
+    save: ScahSave,
+    out_builder: *mut *mut ScahQueryBuilder,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let selector = parse_selector(selector, out_error)?;
+        let builder = Box::new(ScahQueryBuilder {
+            inner: OwnedQueryBuilder::new_all(selector, save.to_save()),
+        });
+        write_ptr(out_builder, builder)?;
+        Ok(())
+    })
+}
+
+/// Create a root builder that matches the first occurrence of `selector`.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_first(
+    selector: ScahStringView,
+    save: ScahSave,
+    out_builder: *mut *mut ScahQueryBuilder,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let selector = parse_selector(selector, out_error)?;
+        let builder = Box::new(ScahQueryBuilder {
+            inner: OwnedQueryBuilder::new_first(selector, save.to_save()),
+        });
+        write_ptr(out_builder, builder)?;
+        Ok(())
+    })
+}
+
+/// Append a linear `all` child under the builder's current last section.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_builder_all(
+    builder: *mut ScahQueryBuilder,
+    selector: ScahStringView,
+    save: ScahSave,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let builder = require_mut(builder)?;
+        let selector = parse_selector(selector, out_error)?;
+        builder.inner.all_mut(selector, save.to_save());
+        Ok(())
+    })
+}
+
+/// Append a linear `first` child under the builder's current last section.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_builder_first(
+    builder: *mut ScahQueryBuilder,
+    selector: ScahStringView,
+    save: ScahSave,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let builder = require_mut(builder)?;
+        let selector = parse_selector(selector, out_error)?;
+        builder.inner.first_mut(selector, save.to_save());
+        Ok(())
+    })
+}
+
+/// Return the current (last) section id for subsequent [`scah_query_builder_append`] calls.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_builder_current_section(
+    builder: *const ScahQueryBuilder,
+    out_section: *mut ScahQuerySectionId,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let builder = require_ref(builder)?;
+        if out_section.is_null() {
+            return Err(ScahStatus::NullPointer);
+        }
+        match builder.inner.current_section() {
+            Some(section) => {
+                unsafe {
+                    *out_section = section.index();
+                }
+                Ok(())
+            }
+            None => {
+                set_error(out_error, "query builder has no sections");
+                Err(ScahStatus::InvalidSection)
+            }
+        }
+    })
+}
+
+/// Clone `child` under `parent` without consuming either builder.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_builder_append(
+    builder: *mut ScahQueryBuilder,
+    parent: ScahQuerySectionId,
+    child: *const ScahQueryBuilder,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let builder = require_mut(builder)?;
+        let child = require_ref(child)?;
+        match builder.inner.append(QuerySectionId(parent), &child.inner) {
+            Ok(()) => Ok(()),
+            Err(()) => {
+                set_error(out_error, "invalid parent query section");
+                Err(ScahStatus::InvalidSection)
+            }
+        }
+    })
+}
+
+/// Compile the builder into a query. Does not consume the builder.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_builder_build(
+    builder: *const ScahQueryBuilder,
+    out_query: *mut *mut ScahQuery,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let builder = require_ref(builder)?;
+        match builder.inner.build() {
+            Ok(owned) => {
+                let query = Box::new(ScahQuery {
+                    inner: Arc::new(owned),
+                });
+                write_ptr(out_query, query)?;
+                Ok(())
+            }
+            Err(err) => {
+                set_error(out_error, err.to_string());
+                Err(ScahStatus::InvalidSelector)
+            }
+        }
+    })
+}
+
+/// Deep-clone a builder handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_builder_clone(
+    builder: *const ScahQueryBuilder,
+    out_builder: *mut *mut ScahQueryBuilder,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    ffi_guard(out_error, || {
+        let builder = require_ref(builder)?;
+        let cloned = Box::new(ScahQueryBuilder {
+            inner: builder.inner.clone(),
+        });
+        write_ptr(out_builder, cloned)?;
+        Ok(())
+    })
+}
+
+/// Free a builder handle. Null is a no-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_builder_free(builder: *mut ScahQueryBuilder) {
+    ffi_guard_void(|| {
+        if builder.is_null() {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(builder));
+        }
+    });
+}
+
+/// Free a query handle. Null is a no-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn scah_query_free(query: *mut ScahQuery) {
+    ffi_guard_void(|| {
+        if query.is_null() {
+            return;
+        }
+        unsafe {
+            drop(Box::from_raw(query));
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::scah_error_free;
+    use crate::string::{scah_save_all, scah_save_none};
+
+    fn view(s: &str) -> ScahStringView {
+        ScahStringView::borrow(s)
+    }
+
+    #[test]
+    fn null_builder_returns_null_pointer() {
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        let status =
+            scah_query_builder_all(std::ptr::null_mut(), view("a"), scah_save_all(), &mut err);
+        assert_eq!(status, ScahStatus::NullPointer);
+        scah_error_free(err);
+    }
+
+    #[test]
+    fn build_invalid_selector() {
+        let mut builder: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        assert_eq!(
+            scah_query_all(view(""), scah_save_all(), &mut builder, &mut err),
+            ScahStatus::Ok
+        );
+        let mut query: *mut ScahQuery = std::ptr::null_mut();
+        let status = scah_query_builder_build(builder, &mut query, &mut err);
+        assert_eq!(status, ScahStatus::InvalidSelector);
+        assert!(!err.is_null());
+        scah_error_free(err);
+        scah_query_builder_free(builder);
+        scah_query_free(query);
+    }
+
+    #[test]
+    fn append_invalid_section() {
+        let mut builder: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut child: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        scah_query_all(view("div"), scah_save_all(), &mut builder, &mut err);
+        scah_query_all(view("span"), scah_save_none(), &mut child, &mut err);
+        let status = scah_query_builder_append(builder, 99, child, &mut err);
+        assert_eq!(status, ScahStatus::InvalidSection);
+        scah_error_free(err);
+        scah_query_builder_free(builder);
+        scah_query_builder_free(child);
+    }
+
+    #[test]
+    fn free_null_ok() {
+        scah_query_builder_free(std::ptr::null_mut());
+        scah_query_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn build_reuse_and_child_survive() {
+        let mut root: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut child: *mut ScahQueryBuilder = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        scah_query_all(view("main"), scah_save_all(), &mut root, &mut err);
+        scah_query_all(view("a"), scah_save_all(), &mut child, &mut err);
+        let mut parent = 0usize;
+        scah_query_builder_current_section(root, &mut parent, &mut err);
+        scah_query_builder_append(root, parent, child, &mut err);
+
+        let mut q1: *mut ScahQuery = std::ptr::null_mut();
+        let mut q2: *mut ScahQuery = std::ptr::null_mut();
+        assert_eq!(
+            scah_query_builder_build(root, &mut q1, &mut err),
+            ScahStatus::Ok
+        );
+        assert_eq!(
+            scah_query_builder_build(root, &mut q2, &mut err),
+            ScahStatus::Ok
+        );
+        assert!(!q1.is_null() && !q2.is_null());
+
+        // Child still usable.
+        let mut q_child: *mut ScahQuery = std::ptr::null_mut();
+        assert_eq!(
+            scah_query_builder_build(child, &mut q_child, &mut err),
+            ScahStatus::Ok
+        );
+
+        scah_query_free(q1);
+        scah_query_free(q2);
+        scah_query_free(q_child);
+        scah_query_builder_free(root);
+        scah_query_builder_free(child);
+    }
+}

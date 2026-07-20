@@ -1,0 +1,22 @@
+[package]
+name = "scah-ffi"
+version = "0.0.21"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/zacharyvmm/scah"
+publish = false
+
+[lib]
+name = "scah_ffi"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "generate_header"
+path = "src/bin/generate_header.rs"
+
+[dependencies]
+scah = { path = "../scah" }
+cbindgen = "0.29"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
