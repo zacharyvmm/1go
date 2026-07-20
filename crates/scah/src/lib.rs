@@ -123,26 +123,79 @@ pub use scah_query_ir::{
 pub use scah_reader::Reader;
 pub use store::{CapacityOptions, Element, ElementId, Store};
 
-/// Internal parser details exposed only so benchmarks can measure production
-/// code instead of maintaining a duplicate implementation.
-#[cfg(feature = "bench-internals")]
+/// Internal APIs used by benchmarks.
+///
+/// Cursor instrumentation is available only with `bench-internals`.
 #[doc(hidden)]
 pub mod bench_internals {
     pub use crate::html::tag::{ScopeKind, TagFlags};
+
+    #[cfg(feature = "bench-internals")]
+    pub use crate::engine::cursor::ScopedCursor;
+    #[cfg(feature = "bench-internals")]
+    pub use crate::engine::multiplexer::CursorStatsSnapshot;
+    #[cfg(feature = "bench-internals")]
+    use crate::engine::multiplexer::QueryMultiplexer;
+    #[cfg(feature = "bench-internals")]
+    use crate::store::Store;
+    #[cfg(feature = "bench-internals")]
+    use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
+
+    /// Parse HTML and return peak cursor counts with the result store.
+    #[cfg(feature = "bench-internals")]
+    pub fn parse_with_cursor_stats<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+        html: &'html str,
+        queries: &'a [Q],
+    ) -> Result<(Store<'html, 'query>, CursorStatsSnapshot), ParseError>
+    where
+        Q: QuerySpec<'query>,
+    {
+        if queries.is_empty() {
+            return Err(ParseError::EmptyQueries);
+        }
+
+        let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
+
+        let mut selectors = QueryMultiplexer::new_with_cursor_stats(queries);
+        selectors.sample_cursor_stats();
+
+        let mut parser = if no_extra_allocations {
+            XHtmlParser::new(selectors)
+        } else {
+            XHtmlParser::with_capacity(selectors, html.len())
+        };
+
+        let mut reader = Reader::new(html);
+        while parser.next(&mut reader) {}
+
+        if let Some(err) = parser.take_parse_error() {
+            return Err(err);
+        }
+
+        let stats = parser.selectors.cursor_stats_snapshot();
+        Ok((parser.finish(), stats))
+    }
 }
+
+#[cfg(feature = "bench-internals")]
+pub use engine::multiplexer::CursorStatsSnapshot;
 
 /// Errors that can occur during parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     /// The query slice passed to [`parse`] is empty.
-    /// At least one query is required.
     EmptyQueries,
+    /// The open-element stack exceeded [`engine::MAX_ELEMENT_DEPTH`].
+    MaximumDepthExceeded,
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ParseError::EmptyQueries => write!(f, "parse requires at least one query"),
+            ParseError::MaximumDepthExceeded => {
+                write!(f, "HTML nesting depth exceeds the maximum supported depth")
+            }
         }
     }
 }
@@ -157,8 +210,8 @@ impl std::error::Error for ParseError {}
 ///
 /// # Errors
 ///
-/// Returns [`ParseError::EmptyQueries`] if the query slice is empty.
-/// At least one query is required.
+/// Returns [`ParseError::EmptyQueries`] for an empty query slice and
+/// [`ParseError::MaximumDepthExceeded`] when nesting exceeds the supported depth.
 ///
 /// # Parameters
 ///
@@ -206,6 +259,10 @@ where
     let mut reader = Reader::new(html);
     parser.trace_parse_started(html.len(), queries.len());
     while parser.next(&mut reader) {}
+
+    if let Some(err) = parser.take_parse_error() {
+        return Err(err);
+    }
 
     Ok(parser.finish())
 }
@@ -341,5 +398,117 @@ mod tests {
         assert_eq!(a.attribute(&store, "href"), Some("x"));
         assert_eq!(a.attribute(&store, "HREF"), Some("x"));
         assert_eq!(a.attribute(&store, "Href"), Some("x"));
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn cursor_stats_disabled_for_normal_multiplexer() {
+        use crate::engine::multiplexer::QueryMultiplexer;
+
+        let query = Query::all("div", Save::none()).unwrap().build();
+        let queries = [query];
+        let selectors = QueryMultiplexer::new(&queries);
+        assert!(!selectors.cursor_stats_enabled());
+
+        let html = "<div><span></span></div>";
+        let mut reader = Reader::new(html);
+        let mut parser = XHtmlParser::new(selectors);
+        while parser.next(&mut reader) {}
+
+        assert!(!parser.selectors.cursor_stats_enabled());
+        assert_eq!(
+            parser.selectors.cursor_stats_snapshot(),
+            CursorStatsSnapshot {
+                peak_resident_cursor_slots: 0,
+                peak_active_obligations: 0,
+            }
+        );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn cursor_stats_enabled_for_instrumented_multiplexer() {
+        use crate::bench_internals::parse_with_cursor_stats;
+
+        let query = Query::all("div p", Save::none()).unwrap().build();
+        let html = "<div><div><p>x</p></div></div>";
+        let (_, stats) = parse_with_cursor_stats(html, std::slice::from_ref(&query)).unwrap();
+
+        assert!(stats.peak_resident_cursor_slots > 0);
+        assert!(stats.peak_active_obligations > 0);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn instrumented_parse_matches_production_results() {
+        use crate::bench_internals::parse_with_cursor_stats;
+
+        let html = "<article><h1 id=\"a\">A</h1><p>B</p></article>";
+        let query = Query::all("article", Save::all())
+            .unwrap()
+            .then(|article| {
+                Ok([
+                    article.first("> h1", Save::all())?,
+                    article.all("> p", Save::all())?,
+                ])
+            })
+            .unwrap()
+            .build();
+        let queries = [query];
+
+        let production = parse(html, &queries).unwrap();
+        let (instrumented, _) = parse_with_cursor_stats(html, &queries).unwrap();
+
+        assert_eq!(production.elements.len(), instrumented.elements.len());
+        for (left, right) in production.elements.iter().zip(instrumented.elements.iter()) {
+            assert_eq!(left.name, right.name);
+            assert_eq!(left.id, right.id);
+            assert_eq!(left.inner_html, right.inner_html);
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn peak_resident_cursor_slots_adversarial_depths() {
+        use crate::bench_internals::parse_with_cursor_stats;
+
+        fn nested_div_p(depth: u16) -> String {
+            format!(
+                "{opens}<p>x</p>{closes}",
+                opens = "<div>".repeat(depth as usize),
+                closes = "</div>".repeat(depth as usize),
+            )
+        }
+
+        let div_p = Query::all("div p", Save::none()).unwrap().build();
+        let stats_at_8 = parse_with_cursor_stats(&nested_div_p(8), std::slice::from_ref(&div_p))
+            .unwrap()
+            .1;
+        let stats_at_512 =
+            parse_with_cursor_stats(&nested_div_p(512), std::slice::from_ref(&div_p))
+                .unwrap()
+                .1;
+        assert_eq!(
+            stats_at_8.peak_resident_cursor_slots, stats_at_512.peak_resident_cursor_slots,
+            "div p peak resident cursor slots must not grow with nesting depth"
+        );
+        assert!(
+            stats_at_512.peak_resident_cursor_slots <= 3,
+            "div p peak resident cursor slots {} exceeds budget",
+            stats_at_512.peak_resident_cursor_slots
+        );
+
+        let div_gt_div_p = Query::all("div > div p", Save::none()).unwrap().build();
+        for depth in [8_u16, 512] {
+            let html = nested_div_p(depth);
+            let stats = parse_with_cursor_stats(&html, std::slice::from_ref(&div_gt_div_p))
+                .unwrap()
+                .1;
+            assert!(
+                stats.peak_resident_cursor_slots <= depth as usize + 3,
+                "div > div p peak resident cursor slots {} at depth {depth} exceeds budget",
+                stats.peak_resident_cursor_slots
+            );
+        }
     }
 }

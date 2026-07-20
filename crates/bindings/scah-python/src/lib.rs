@@ -47,6 +47,11 @@ fn parse(html: String, queries: Vec<PyRef<PyQuery>>) -> PyResult<PyStore> {
                 "parse requires at least one query",
             ));
         }
+        Err(scah_core::ParseError::MaximumDepthExceeded) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "HTML nesting depth exceeds the maximum supported depth",
+            ));
+        }
     };
 
     Ok(PyStore {

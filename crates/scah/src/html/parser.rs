@@ -1,12 +1,14 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
+use crate::ParseError;
 use crate::QuerySpec;
 use crate::Reader;
 use crate::XHtmlElement;
 use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
+use crate::engine::MAX_ELEMENT_DEPTH;
 use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
 use crate::store::Store;
 
@@ -27,6 +29,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     capture_text_content: bool,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
+    parse_error: Option<ParseError>,
 }
 
 /// A raw-text end tag is only "appropriate" when the tag name is immediately
@@ -60,6 +63,7 @@ where
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
+            parse_error: None,
             store: Store::default(),
         }
     }
@@ -80,6 +84,7 @@ where
             capture_text_content,
             raw_text_close: None,
             eof_drained: false,
+            parse_error: None,
             store: Store::with_capacity_options(
                 capacity,
                 crate::CapacityOptions {
@@ -91,6 +96,9 @@ where
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
+        if self.parse_error.is_some() {
+            return false;
+        }
         if let Some(close_tag) = self.raw_text_close {
             loop {
                 reader.next_until(b'<');
@@ -204,9 +212,17 @@ where
                 let is_self_closing = tag.is_void();
                 self.position.self_closing = is_self_closing;
                 if is_self_closing {
-                    self.position.element_depth = self.open_elements.depth().saturating_add(1);
+                    let depth = self.open_elements.depth().saturating_add(1);
+                    if depth > MAX_ELEMENT_DEPTH {
+                        self.record_parse_error(ParseError::MaximumDepthExceeded);
+                        return false;
+                    }
+                    self.position.element_depth = depth;
+                } else if let Err(err) = self.open_elements.push_classified(self.element.name, tag)
+                {
+                    self.record_parse_error(err);
+                    return false;
                 } else {
-                    self.open_elements.push_classified(self.element.name, tag);
                     self.position.element_depth = self.open_elements.depth();
                 }
 
@@ -226,7 +242,14 @@ where
                     &mut self.store,
                     &mut self.temp_state.save_hits,
                 );
-                if !is_self_closing {
+                if is_self_closing {
+                    early_exit = self.selectors.back(
+                        self.element.name,
+                        &self.position,
+                        reader,
+                        &mut self.store,
+                    ) || early_exit;
+                } else {
                     for save_hit in &self.temp_state.save_hits {
                         self.open_elements.attach_saved(
                             save_hit.element_id,
@@ -266,6 +289,16 @@ where
                 query_count,
             }
         );
+    }
+
+    pub fn take_parse_error(&mut self) -> Option<ParseError> {
+        self.parse_error.take()
+    }
+
+    fn record_parse_error(&mut self, err: ParseError) {
+        if self.parse_error.is_none() {
+            self.parse_error = Some(err);
+        }
     }
 
     pub fn finish(

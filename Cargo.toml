@@ -7,6 +7,7 @@ members = [
     "crates/bindings/scah-python",
     "crates/bindings/scah-node",
     "benches",
+    "cursor-benches",
 ]
 default-members = ["crates/scah"]
 resolver = "3"

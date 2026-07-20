@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-scah = { path = "../crates/scah", features = ["bench-internals"] }
+scah = { path = "../crates/scah" }
 
 # Benchmarking Tools
 criterion = { version = "0.8.1", features = ["html_reports"] }
@@ -77,6 +77,11 @@ harness = false
 [[bench]]
 name = "speed_bench_tag_classification"
 path = "tag_classification/speed_bench.rs"
+harness = false
+
+[[bench]]
+name = "speed_bench_cursor_dominance"
+path = "cursor_dominance/speed_bench.rs"
 harness = false
 
 [[bench]]

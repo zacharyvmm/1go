@@ -142,6 +142,15 @@ pub enum TraceEvent<'html, 'query> {
         selector: &'query str,
         section: QuerySectionId,
     },
+    CursorSuppressed {
+        runner_index: usize,
+        parent: ElementId,
+        selection: QuerySectionId,
+        state: TransitionId,
+        candidate_base_depth: u16,
+        dominating_base_depth: u16,
+        reason: CursorSuppressionReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +177,14 @@ pub enum ImpliedCloseReason {
 pub enum TransitionRejectReason {
     DepthGuardFailed,
     PredicateFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorSuppressionReason {
+    DescendantDominated,
+    ExactDuplicate,
+    /// A completed First winner already owns this `(section, output parent)`.
+    FirstScopeClaimed,
 }
 
 impl<'html, 'query> TraceEvent<'html, 'query> {
@@ -347,6 +364,24 @@ impl<'html, 'query> TraceEvent<'html, 'query> {
                     "\"event\":\"EarlyExit\",\"runner_index\":{runner_index},\"selector\":{},\"section\":{}",
                     JsonString(selector),
                     section.index()
+                )
+                .unwrap();
+            }
+            Self::CursorSuppressed {
+                runner_index,
+                parent,
+                selection,
+                state,
+                candidate_base_depth,
+                dominating_base_depth,
+                reason,
+            } => {
+                write!(
+                    output,
+                    "\"event\":\"CursorSuppressed\",\"runner_index\":{runner_index},\"parent\":{},\"selection\":{},\"state\":{},\"candidate_base_depth\":{candidate_base_depth},\"dominating_base_depth\":{dominating_base_depth},\"reason\":\"{reason:?}\"",
+                    parent.index(),
+                    selection.index(),
+                    state.index()
                 )
                 .unwrap();
             }

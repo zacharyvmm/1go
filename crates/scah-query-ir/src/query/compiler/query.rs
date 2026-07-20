@@ -76,6 +76,25 @@ pub trait QuerySpec<'query> {
         self.get_transition(state).guard == Combinator::Descendant
     }
 
+    fn needs_descendant_anchor(&self, position: Position) -> bool {
+        if !self.is_descendant(position.state) {
+            return false;
+        }
+
+        if self.is_save_point(&position) {
+            let kind = self.get_section_selection_kind(position.selection);
+            // Each All match with child sections creates a distinct output scope.
+            return matches!(kind, SelectionKind::All) && position.next_child(self).is_some();
+        }
+
+        let next = position
+            .next_transition(self)
+            .expect("non-save-point must have a next transition");
+
+        // Descendant continuations already cover nested rematches.
+        !self.is_descendant(next)
+    }
+
     fn is_save_point(&self, position: &Position) -> bool {
         debug_assert!(
             self.get_selection(position.selection)

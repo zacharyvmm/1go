@@ -1,0 +1,12 @@
+[package]
+name = "scah-cursor-benches"
+version = "0.0.21"
+edition = "2024"
+publish = false
+
+[dependencies]
+scah = { path = "../crates/scah", features = ["bench-internals"] }
+
+[[bin]]
+name = "cursor_stats_report"
+path = "src/bin/cursor_stats_report.rs"

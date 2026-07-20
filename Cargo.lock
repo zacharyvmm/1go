@@ -1655,6 +1655,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scah-cursor-benches"
+version = "0.0.21"
+dependencies = [
+ "scah",
+]
+
+[[package]]
 name = "scah-macros"
 version = "0.0.21"
 dependencies = [

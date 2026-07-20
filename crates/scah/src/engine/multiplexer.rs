@@ -20,25 +20,95 @@ pub(crate) struct SaveHit {
     pub save_text_content: bool,
 }
 
-//type Runner<'query, Q> = SmallVec<[QueryExecutor<'query, Q>; 1]>;
 type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
+
+#[cfg(feature = "bench-internals")]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CursorStats {
+    peak_resident_cursor_slots: usize,
+    peak_active_obligations: usize,
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorStatsSnapshot {
+    pub peak_resident_cursor_slots: usize,
+    pub peak_active_obligations: usize,
+}
 
 pub struct QueryMultiplexer<'query, Q> {
     runners: Runner<'query, Q>,
+    #[cfg(feature = "bench-internals")]
+    cursor_stats: Option<CursorStats>,
 }
 
 impl<'html, 'query: 'html, Q> QueryMultiplexer<'query, Q>
 where
     Q: QuerySpec<'query>,
 {
+    fn build_runners(queries: &'query [Q]) -> Runner<'query, Q> {
+        #[allow(clippy::redundant_closure)]
+        queries
+            .iter()
+            .map(|query| QueryExecutor::new(query))
+            .collect()
+    }
+
     pub fn new(queries: &'query [Q]) -> Self {
         Self {
-            #[allow(clippy::redundant_closure)]
-            runners: queries
-                .iter()
-                .map(|query| QueryExecutor::new(query))
-                .collect::<Runner<'query, Q>>(),
+            runners: Self::build_runners(queries),
+            #[cfg(feature = "bench-internals")]
+            cursor_stats: None,
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn new_with_cursor_stats(queries: &'query [Q]) -> Self {
+        Self {
+            runners: Self::build_runners(queries),
+            cursor_stats: Some(CursorStats::default()),
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[allow(dead_code)]
+    pub(crate) fn cursor_stats_enabled(&self) -> bool {
+        self.cursor_stats.is_some()
+    }
+
+    /// Update peak cursor counts from the current runner state.
+    #[cfg(feature = "bench-internals")]
+    #[inline]
+    fn track_cursor_stats(&mut self) {
+        let Some(stats) = self.cursor_stats.as_mut() else {
+            return;
+        };
+
+        let resident = self.runners.iter().map(|runner| runner.cursors.len()).sum();
+
+        let active = self
+            .runners
+            .iter()
+            .flat_map(|runner| runner.cursors.iter())
+            .filter(|cursor| cursor.is_active())
+            .count();
+
+        stats.peak_resident_cursor_slots = stats.peak_resident_cursor_slots.max(resident);
+        stats.peak_active_obligations = stats.peak_active_obligations.max(active);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn cursor_stats_snapshot(&self) -> CursorStatsSnapshot {
+        let stats = self.cursor_stats.unwrap_or_default();
+        CursorStatsSnapshot {
+            peak_resident_cursor_slots: stats.peak_resident_cursor_slots,
+            peak_active_obligations: stats.peak_active_obligations,
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn sample_cursor_stats(&mut self) {
+        self.track_cursor_stats();
     }
 
     pub(crate) fn requires_text_content(&self) -> bool {
@@ -59,6 +129,8 @@ where
         for (runner_index, session) in self.runners.iter_mut().enumerate() {
             session.next(runner_index, xhtml_element, position, store, save_hits);
         }
+        #[cfg(feature = "bench-internals")]
+        self.track_cursor_stats();
         if len == store.elements.len() {
             xhtml_element.remove_attributes(&mut store.attributes);
         }
@@ -73,13 +145,9 @@ where
     ) -> bool {
         let mut remove_indices = vec![];
         for (index, session) in self.runners.iter_mut().enumerate() {
-            let early_exit_previous = session.early_exit();
-            let back = session.back(index, xhtml_element, position, store);
-
-            // Remove a first-match runner only when it had already completed
-            // before close handling; `back()` can move a child section into
-            // the exit section while parent content still needs to be saved.
-            if back && early_exit_previous {
+            let significant_close = session.back(index, xhtml_element, position, store);
+            // A First runner can exit only after close handling finalizes its winner.
+            if significant_close && session.early_exit() {
                 remove_indices.push(index);
             }
         }
@@ -87,6 +155,9 @@ where
         for idx in remove_indices.into_iter().rev() {
             self.runners.remove(idx);
         }
+
+        #[cfg(feature = "bench-internals")]
+        self.track_cursor_stats();
 
         self.runners.is_empty()
     }
