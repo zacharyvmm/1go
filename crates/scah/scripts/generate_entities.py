@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Generate the Rust lookup table from WHATWG's entities.json.
 
+By default, generation is offline and deterministic from the committed
+fixture. Pass --update-fixture to download the upstream dataset, validate it,
+and update both the fixture and generated table from the same bytes. Each file
+is replaced atomically, but the two-file update is not transactional.
+
 Usage:
   python crates/scah/scripts/generate_entities.py
   python crates/scah/scripts/generate_entities.py --update-fixture
-
-By default, reads the committed fixture next to this script so regeneration is
-offline and deterministic. Pass --update-fixture to download from WHATWG and
-replace both the fixture and the generated Rust table from the same bytes.
 """
 
 from __future__ import annotations
@@ -230,8 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         "--update-fixture",
         action="store_true",
         help=(
-            f"Download {SOURCE_URL} and atomically update both the committed "
-            "fixture and generated Rust table from those bytes"
+            f"Download {SOURCE_URL} and update the committed fixture and generated "
+            "Rust table from the same validated bytes"
         ),
     )
     parser.add_argument(

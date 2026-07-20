@@ -32,7 +32,7 @@ jobs:
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
       - name: Test cursor instrumentation
         run: cargo test -p scah --features bench-internals
-      - name: Verify generated entity table
+      - name: Verify generated entity table and provenance
         run: |
           python3 crates/scah/scripts/generate_entities.py --self-test
           python3 -m unittest crates/scah/scripts/test_generate_entities.py

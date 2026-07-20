@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,24 @@ def load_generator():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def find_repo_root(start: Path) -> Path:
+    for parent in [start, *start.parents]:
+        if (parent / "Cargo.toml").exists() and (parent / ".github").exists():
+            return parent
+    raise RuntimeError("repository root not found")
+
+
+def extract_single_sha256(text: str, source: str) -> str:
+    hashes = sorted(set(re.findall(r"\b[a-f0-9]{64}\b", text)))
+
+    if len(hashes) != 1:
+        raise AssertionError(
+            f"{source} must contain exactly one unique SHA-256; got {hashes}"
+        )
+
+    return hashes[0]
 
 
 class RustStringLiteralTests(unittest.TestCase):
@@ -106,6 +125,62 @@ class GenerationTests(unittest.TestCase):
     def test_fetch_alias_fails_with_message(self) -> None:
         code = self.gen.main(["--fetch"])
         self.assertEqual(code, 2)
+
+
+class ProvenanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.gen = load_generator()
+        cls.repo_root = find_repo_root(SCRIPT.resolve())
+
+    def test_recorded_fixture_hashes_match(self) -> None:
+        fixture = self.gen.DEFAULT_INPUT.read_bytes()
+        fixture_hash = hashlib.sha256(fixture).hexdigest()
+        source = self.gen.validate_source(fixture)
+        entry_count = len(source)
+
+        generated_table = self.gen.DESTINATION.read_text(encoding="utf-8")
+        root_notice = (
+            self.repo_root / "THIRD_PARTY_LICENSES" / "WHATWG-HTML.txt"
+        ).read_text(encoding="utf-8")
+        package_notice = (
+            self.repo_root
+            / "crates"
+            / "scah"
+            / "THIRD_PARTY_LICENSES"
+            / "WHATWG-HTML.txt"
+        ).read_text(encoding="utf-8")
+        readme = (
+            self.repo_root / "crates" / "scah" / "scripts" / "README.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(root_notice, package_notice)
+        self.assertEqual(
+            extract_single_sha256(generated_table, "generated table"),
+            fixture_hash,
+        )
+        self.assertEqual(
+            extract_single_sha256(root_notice, "root notice"),
+            fixture_hash,
+        )
+        self.assertEqual(
+            extract_single_sha256(package_notice, "package notice"),
+            fixture_hash,
+        )
+        self.assertEqual(
+            extract_single_sha256(readme, "generator README"),
+            fixture_hash,
+        )
+        self.assertIn(f"Source SHA-256: {fixture_hash}", generated_table)
+        self.assertIn(f"// Entry count: {entry_count}", generated_table)
+        self.assertIn(f"Entry count: {entry_count}", readme)
+        self.assertIn("https://creativecommons.org/licenses/by/4.0/", root_notice)
+        self.assertIn(
+            "Creative Commons Attribution 4.0 International Public License",
+            root_notice,
+        )
+        self.assertIn("BSD 3-Clause License", root_notice)
+        self.assertIn("https://html.spec.whatwg.org/entities.json", root_notice)
 
 
 if __name__ == "__main__":

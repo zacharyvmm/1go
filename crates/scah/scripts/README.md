@@ -7,6 +7,13 @@ The fixture and generator scripts under this directory are intentionally
 excluded from the published `scah` crate. Runtime code uses only the
 generated Rust table in `src/html/entities_table.rs`.
 
+The raw fixture is redistributed under the licensing terms recorded in:
+
+- `THIRD_PARTY_LICENSES/WHATWG-HTML.txt`
+- `crates/scah/THIRD_PARTY_LICENSES/WHATWG-HTML.txt`
+
+The package-local copy is included in published `scah` crates.
+
 ## Regenerate from the committed fixture
 
 ```bash
@@ -25,6 +32,11 @@ python crates/scah/scripts/generate_entities.py --update-fixture
 This downloads the upstream dataset and updates both the committed
 fixture and generated Rust table from the same downloaded bytes.
 
+The command validates and prepares both outputs before replacing either file.
+Each individual file replacement is atomic, but the two replacements do not
+form a filesystem transaction. If the second replacement fails, rerun the
+command to restore consistency.
+
 After updating:
 
 ```bash
@@ -38,6 +50,7 @@ cargo test -p scah
 * Source: `https://html.spec.whatwg.org/entities.json`
 * Committed source SHA-256:
   `d741d877ac77c4194c4ad526b5b4a19aef8dfe411ab840a466891cdbb9f362e6`
+* Entry count: 2231
 * Third-party license:
   `THIRD_PARTY_LICENSES/WHATWG-HTML.txt`
   (mirrored for packaging at
