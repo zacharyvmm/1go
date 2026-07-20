@@ -17,7 +17,12 @@ struct ParserTempState<'html> {
     closing_elements: Vec<OpenElement<'html>>,
     implied_closes: Vec<OpenElement<'html>>,
     save_hits: Vec<SaveHit>,
-    sibling_callbacks: Vec<SiblingCallback>,
+
+    // Reused scratch output from the current open-tag query dispatch.
+    pending_sibling_callbacks: Vec<SiblingCallback>,
+
+    // Persistent storage for callbacks belonging to currently open elements.
+    sibling_callback_arena: Vec<SiblingCallback>,
 }
 
 pub struct XHtmlParser<'html, 'query, Q> {
@@ -247,12 +252,12 @@ where
                     &self.position,
                     &mut self.store,
                     &mut self.temp_state.save_hits,
-                    &mut self.temp_state.sibling_callbacks,
+                    &mut self.temp_state.pending_sibling_callbacks,
                 );
                 if is_self_closing {
                     let source_depth = self.position.element_depth;
                     self.selectors.activate_sibling_callbacks(
-                        &mut self.temp_state.sibling_callbacks,
+                        &mut self.temp_state.pending_sibling_callbacks,
                         source_depth,
                         &mut self.store,
                     );
@@ -274,8 +279,10 @@ where
                                 .then_some(self.position.text_content_position),
                         );
                     }
-                    self.open_elements
-                        .attach_sibling_callbacks(&mut self.temp_state.sibling_callbacks);
+                    self.open_elements.attach_sibling_callbacks(
+                        &mut self.temp_state.pending_sibling_callbacks,
+                        &mut self.temp_state.sibling_callback_arena,
+                    );
                 }
 
                 self.element.clear();
@@ -344,13 +351,38 @@ where
             self.selectors
                 .back(open_element.name, &self.position, reader, &mut self.store);
 
-        if activate_sibling_callbacks && !open_element.sibling_callbacks.is_empty() {
-            let mut callbacks = open_element.sibling_callbacks;
-            self.selectors
-                .activate_sibling_callbacks(&mut callbacks, close_depth, &mut self.store);
-        }
+        self.finish_sibling_callback_range(
+            open_element.sibling_callback_start(),
+            close_depth,
+            activate_sibling_callbacks,
+        );
 
         early_exit
+    }
+
+    fn finish_sibling_callback_range(
+        &mut self,
+        callback_start: Option<usize>,
+        source_depth: crate::engine::DepthSize,
+        activate: bool,
+    ) {
+        let Some(start) = callback_start else {
+            return;
+        };
+
+        let end = self.temp_state.sibling_callback_arena.len();
+
+        debug_assert!(start <= end, "invalid sibling callback arena range");
+
+        if activate {
+            for index in start..end {
+                let callback = self.temp_state.sibling_callback_arena[index];
+                self.selectors
+                    .activate_sibling_callback(callback, source_depth, &mut self.store);
+            }
+        }
+
+        self.temp_state.sibling_callback_arena.truncate(start);
     }
 
     /// Drain the implied-closes vector, finalizing each element, and restore
@@ -494,6 +526,10 @@ where
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
         self.drain_implied_closes(reader, Some(ImpliedCloseReason::EofDrain), None, false);
+        debug_assert!(
+            self.temp_state.sibling_callback_arena.is_empty(),
+            "sibling callback arena leaked callbacks after EOF"
+        );
         self.eof_drained = true;
     }
 }
@@ -1549,5 +1585,95 @@ mod tests {
         let store = parse(html, queries).expect("parse succeeds");
 
         assert_eq!(store.get("a").unwrap().count(), 1);
+    }
+
+    #[test]
+    fn sibling_callback_arena_empty_after_eof_drain() {
+        let html = "<main><h1></h1>";
+        let mut reader = Reader::new(html);
+        let queries = &[
+            Query::all("h1 + p", Save::none()).unwrap().build(),
+            Query::all("h1 ~ p", Save::none()).unwrap().build(),
+        ];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        while parser.next(&mut reader) {}
+
+        assert!(
+            parser.temp_state.sibling_callback_arena.is_empty(),
+            "EOF must truncate every callback range"
+        );
+        assert!(parser.temp_state.pending_sibling_callbacks.is_empty());
+    }
+
+    #[test]
+    fn void_sibling_source_bypasses_callback_arena() {
+        let html = "<main><br><p id='hit'></p></main>";
+        let mut reader = Reader::new(html);
+        let queries = &[Query::all("br + p", Save::none()).unwrap().build()];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        // Open <main>
+        assert!(parser.next(&mut reader));
+        assert!(parser.temp_state.sibling_callback_arena.is_empty());
+
+        // Void <br>: callback activates immediately and must not enter the arena.
+        assert!(parser.next(&mut reader));
+        assert!(
+            parser.temp_state.sibling_callback_arena.is_empty(),
+            "void sources must not append callbacks to the arena"
+        );
+        assert!(parser.temp_state.pending_sibling_callbacks.is_empty());
+
+        while parser.next(&mut reader) {}
+
+        let store = parser.matches();
+        let hits: Vec<_> = store
+            .get("br + p")
+            .unwrap()
+            .map(|element| element.id)
+            .collect();
+        assert_eq!(hits, [Some("hit")]);
+    }
+
+    #[test]
+    fn same_batch_discard_truncates_callback_arena() {
+        // Closing </main> pops section then div then main. Discarded callback
+        // ranges must still be truncated from the arena.
+        let html = r#"
+        <main>
+          <div>
+            <section>
+        </main>
+        <p id="outside-miss"></p>
+        "#;
+        let mut reader = Reader::new(html);
+        let queries = &[
+            Query::all("section + p", Save::none()).unwrap().build(),
+            Query::all("div ~ p", Save::none()).unwrap().build(),
+        ];
+        let manager = QueryMultiplexer::new(queries);
+        let mut parser = XHtmlParser::new(manager);
+
+        while parser.next(&mut reader) {}
+
+        assert!(
+            parser.temp_state.sibling_callback_arena.is_empty(),
+            "same-batch discards must still truncate arena ranges"
+        );
+        let store = parser.matches();
+        assert_eq!(
+            store
+                .get("section + p")
+                .map(|iter| iter.count())
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            store.get("div ~ p").map(|iter| iter.count()).unwrap_or(0),
+            0
+        );
     }
 }

@@ -88,3 +88,8 @@ harness = false
 name = "speed_bench_escape_scanner"
 path = "escape_scanner/speed_bench.rs"
 harness = false
+
+[[bench]]
+name = "speed_bench_sibling"
+path = "sibling/speed_bench.rs"
+harness = false
