@@ -120,7 +120,7 @@ Control what data is captured per selector:
 
 | Constructor | `inner_html` | `raw_text` | `text` | Use case |
 |-------------|:---:|:---:|:---:|----------|
-| `Save::all()` | Yes | Yes | Yes | Full extraction |
+| `Save::all()` | Yes | Yes | Yes | Full extraction (captures both text modes; more work than the old two-field `Save::all()`) |
 | `Save::only_inner_html()` | Yes | No | No | Raw markup only |
 | `Save::only_raw_text()` | No | Yes | No | Source-preserving text |
 | `Save::only_text()` | No | No | Yes | Normalized text scraping |
@@ -259,3 +259,7 @@ Rust and Python retain `Save::only_raw_text()` / `Save.only_raw_text()` style co
 | No raw equivalent | `raw_text` / `rawText` |
 
 Old `text_content` output was already a normalized join, so it maps conceptually to the new `text`, not `raw_text`.
+
+`Save::all()` now captures both `raw_text` and normalized `text` (plus `inner_html`), which can perform more work than the old two-field `Save::all()`. Prefer `Save::only_text()` or `Save::only_raw_text()` when only one representation is needed.
+
+`Store::with_capacity` reserves capacity for both text representations by default. Query-aware `parse` construction reserves only the representations required by the supplied queries.

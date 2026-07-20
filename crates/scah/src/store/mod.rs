@@ -128,6 +128,11 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     /// derive conservative reservations for the element and attribute arenas
     /// using the default [`CapacityOptions`].
     ///
+    /// By default this reserves capacity for **both** text representations
+    /// (`raw_text` and normalized `text`). Query-aware [`crate::parse`]
+    /// construction reserves only the representations required by the
+    /// supplied queries via [`CapacityOptions`].
+    ///
     /// This is the non-breaking public API. For advanced tuning (e.g.
     /// skipping text-content reservation or adjusting element/attribute
     /// ratios), use [`Store::with_capacity_options`].
