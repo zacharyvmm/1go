@@ -514,3 +514,175 @@ fn pre_followed_by_block_keeps_literal_spaces_before_newline() {
         Some("B")
     );
 }
+
+// --- Range ownership: parent separators must not leak into Preserve ranges ---
+
+#[test]
+fn textarea_range_excludes_parent_collapsed_space() {
+    let html = "<div>A <textarea>B</textarea></div>";
+    assert_eq!(text_of(html, "textarea"), "B");
+}
+
+#[test]
+fn textarea_range_excludes_parent_break() {
+    let html = "<div>A<br><textarea>B</textarea></div>";
+    assert_eq!(text_of(html, "textarea"), "B");
+}
+
+#[test]
+fn selected_inline_child_inside_pre_excludes_previous_break() {
+    let html = "<pre>A<br><span>B</span></pre>";
+    assert_eq!(text_of(html, "span"), "B");
+}
+
+#[test]
+fn parent_still_contains_separator_excluded_from_child() {
+    let html = "<pre>A<br><span>B</span></pre>";
+    let queries = &[
+        Query::all("pre", Save::only_text()).unwrap().build(),
+        Query::all("span", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+
+    let pre = store.get("pre").unwrap().next().unwrap();
+    let span = store.get("span").unwrap().next().unwrap();
+
+    assert_eq!(pre.text(&store), Some("A\nB"));
+    assert_eq!(span.text(&store), Some("B"));
+}
+
+#[test]
+fn selected_preformatted_descendant_excludes_previous_block_separator() {
+    let html = "<pre><div>A</div><span>B</span></pre>";
+    assert_eq!(text_of(html, "span"), "B");
+}
+
+// --- Nested pre/textarea each own the initial-newline rule ---
+
+#[test]
+fn textarea_inside_pre_strips_its_own_initial_newline() {
+    assert_eq!(
+        text_of("<pre><textarea>\nB</textarea></pre>", "textarea"),
+        "B"
+    );
+}
+
+#[test]
+fn nested_pre_strips_its_own_initial_newline() {
+    let html = "<pre>A<pre>\nB</pre>C</pre>";
+    let query = Query::all("pre", Save::only_text()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+
+    let mut pres = store.get("pre").unwrap();
+    let outer = pres.next().unwrap();
+    let inner = pres.next().unwrap();
+
+    assert_eq!(inner.text(&store), Some("B"));
+    assert_eq!(outer.text(&store), Some("AB\nC"));
+}
+
+#[test]
+fn child_inside_nested_pre_cancels_initial_newline() {
+    // textarea is a rawtext element, so markup inside it is literal text and
+    // cannot cancel eligibility. Nested pre does parse children/comments.
+    let html = "<pre><pre><span></span>\nB</pre></pre>";
+    let query = Query::all("pre", Save::only_text()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    let mut pres = store.get("pre").unwrap();
+    let _outer = pres.next().unwrap();
+    let inner = pres.next().unwrap();
+    assert_eq!(inner.text(&store), Some("\nB"));
+}
+
+#[test]
+fn comment_inside_nested_pre_cancels_initial_newline() {
+    let html = "<pre><pre><!--x-->\nB</pre></pre>";
+    let query = Query::all("pre", Save::only_text()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    let mut pres = store.get("pre").unwrap();
+    let _outer = pres.next().unwrap();
+    let inner = pres.next().unwrap();
+    assert_eq!(inner.text(&store), Some("\nB"));
+}
+
+#[test]
+fn nested_textarea_strips_initial_crlf() {
+    assert_eq!(
+        text_of("<pre><textarea>\r\nB</textarea></pre>", "textarea"),
+        "B"
+    );
+}
+
+#[test]
+fn nested_textarea_strips_initial_cr() {
+    assert_eq!(
+        text_of("<pre><textarea>\rB</textarea></pre>", "textarea"),
+        "B"
+    );
+}
+
+// --- Empty table cells must preserve column boundaries ---
+
+#[test]
+fn empty_table_cell_preserves_column_boundary() {
+    let html = "<table><tr><td>A</td><td></td><td>B</td></tr></table>";
+    assert_eq!(text_of(html, "table"), "A\t\tB");
+}
+
+#[test]
+fn consecutive_empty_table_cells_preserve_all_boundaries() {
+    let html = "<table><tr><td>A</td><td></td><td></td><td>B</td></tr></table>";
+    assert_eq!(text_of(html, "table"), "A\t\t\tB");
+}
+
+#[test]
+fn leading_empty_table_cell_preserves_boundary() {
+    // Leading synthetic tabs are intentionally suppressed (no leading separator
+    // on an empty tape). A leading empty cell therefore contributes no visible
+    // tab; only internal empty cells create extra column boundaries.
+    let html = "<table><tr><td></td><td>B</td></tr></table>";
+    assert_eq!(text_of(html, "table"), "B");
+}
+
+#[test]
+fn selected_table_cells_exclude_neighbor_separators() {
+    let html = "<table><tr><td>A</td><td></td><td>B</td></tr></table>";
+    let queries = &[
+        Query::all("table", Save::only_text()).unwrap().build(),
+        Query::all("td", Save::only_text()).unwrap().build(),
+    ];
+    let store = parse(html, queries).unwrap();
+
+    let table = store.get("table").unwrap().next().unwrap();
+    assert_eq!(table.text(&store), Some("A\t\tB"));
+
+    let cells: Vec<_> = store.get("td").unwrap().collect();
+    assert_eq!(cells.len(), 3);
+    assert_eq!(cells[0].text(&store), Some("A"));
+    assert_eq!(cells[1].text(&store), Some(""));
+    assert_eq!(cells[2].text(&store), Some("B"));
+}
+
+#[test]
+fn indented_empty_table_cells_preserve_boundaries() {
+    let html = r#"
+        <table>
+          <tr>
+            <td>A</td>
+            <td></td>
+            <td>B</td>
+          </tr>
+        </table>
+    "#;
+
+    assert_eq!(text_of(html, "table"), "A\t\tB");
+}
+
+#[test]
+fn hidden_table_cell_does_not_create_column_separator() {
+    let html = "<table><tr><td>A</td><td hidden>X</td><td>B</td></tr></table>";
+    assert_eq!(text_of(html, "table"), "A\tB");
+}
