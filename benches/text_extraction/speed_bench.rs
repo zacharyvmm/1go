@@ -115,6 +115,7 @@ fn consume_text(store: &scah::Store<'_, '_>, selector: &str) {
 
 fn bench_text_modes(c: &mut Criterion) {
     let mut group = c.benchmark_group("text_extraction_modes");
+    group.sample_size(100);
 
     for size in [100usize, 1_000].iter().copied() {
         let prose = prose_html(size);
