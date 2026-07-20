@@ -2,8 +2,8 @@
 #include "scah.h"
 
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 
 static ScahStringView sv(const char *s) {
     ScahStringView v;
@@ -12,11 +12,27 @@ static ScahStringView sv(const char *s) {
     return v;
 }
 
-static void expect_ok(ScahStatus status, ScahError *err, const char *ctx) {
+static void expect_ok(ScahStatus status, ScahError *&err, const char *ctx) {
     if (status != ScahStatus_Ok) {
-        std::fprintf(stderr, "FAIL: %s status=%d\n", ctx, static_cast<int>(status));
-        scah_error_free(err);
+        if (err != nullptr) {
+            const ScahStringView msg = scah_error_message(err);
+
+            std::fprintf(stderr, "FAIL: %s status=%d msg=%.*s\n", ctx,
+                         static_cast<int>(status), static_cast<int>(msg.len),
+                         reinterpret_cast<const char *>(msg.data));
+
+            scah_error_free(err);
+            err = nullptr;
+        } else {
+            std::fprintf(stderr, "FAIL: %s status=%d\n", ctx, static_cast<int>(status));
+        }
+
         std::exit(1);
+    }
+
+    if (err != nullptr) {
+        scah_error_free(err);
+        err = nullptr;
     }
 }
 
@@ -57,7 +73,8 @@ int main() {
         ScahElement *input = nullptr;
         uint8_t found = 0;
 
-        expect_ok(scah_query_all(sv("input"), scah_save_all(), &attr_builder, &err), err, "attr_all");
+        expect_ok(scah_query_all(sv("input"), scah_save_all(), &attr_builder, &err), err,
+                  "attr_all");
         expect_ok(scah_query_builder_build(attr_builder, &attr_query, &err), err, "attr_build");
         scah_query_builder_free(attr_builder);
 
@@ -66,7 +83,8 @@ int main() {
                   err, "attr_parse");
         scah_query_free(attr_query);
 
-        expect_ok(scah_store_get(attr_store, sv("input"), &attr_list, &found, &err), err, "attr_get");
+        expect_ok(scah_store_get(attr_store, sv("input"), &attr_list, &found, &err), err,
+                  "attr_get");
         expect_ok(scah_element_list_get(attr_list, 0, &input, &err), err, "attr_el");
         scah_element_list_free(attr_list);
 

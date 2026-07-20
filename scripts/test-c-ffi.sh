@@ -26,12 +26,14 @@ fi
 # Prefer the shared library when present (self-contained); fall back to static.
 export LD_LIBRARY_PATH="$LIB_DIR:${LD_LIBRARY_PATH:-}"
 
-cc -O2 -I"$INCLUDE" "$TEST_DIR/c_smoke.c" \
+cc -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror \
+  -I"$INCLUDE" "$TEST_DIR/c_smoke.c" \
   -L"$LIB_DIR" -lscah_ffi -lpthread -ldl -lm \
   -o "$OUT_DIR/c_smoke"
 "$OUT_DIR/c_smoke"
 
-c++ -O2 -I"$INCLUDE" "$TEST_DIR/cpp_smoke.cpp" \
+c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
+  -I"$INCLUDE" "$TEST_DIR/cpp_smoke.cpp" \
   -L"$LIB_DIR" -lscah_ffi -lpthread -ldl -lm \
   -o "$OUT_DIR/cpp_smoke"
 "$OUT_DIR/cpp_smoke"
