@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-use std::num::NonZeroU16;
 
 use crate::{Position, QuerySpec, XHtmlElement};
 use smallvec::SmallVec;
@@ -17,8 +16,9 @@ const FLAG_FIRST_WINNER: u8 = 1 << 3;
 /// Adjacent-sibling (`+`) watcher: expire after the next same-depth element.
 ///
 /// Packed into moving-cursor flags so ordinary `Scope` cursors stay 32 bytes.
-/// `CursorLifetime::SiblingsRemaining(n)` for `n > 1` is reserved for a later
-/// `:nth-*` countdown and is not stored on this flag today.
+/// The adjacent-sibling watcher consumes the first future element opened at its
+/// sibling depth. A future `:nth-*` implementation may generalize this
+/// representation after its state and performance requirements are known.
 const FLAG_ADJACENT_REMAINING: u8 = 1 << 4;
 
 /// Bounds how long a cursor remains eligible to match.
@@ -27,17 +27,15 @@ pub(crate) enum CursorLifetime {
     /// Lives until normal scope pruning or explicit lifecycle completion.
     Scope,
 
-    /// Consumes one count for every future element opened at
-    /// `match_base_depth`.
-    SiblingsRemaining(NonZeroU16),
+    /// Adjacent-sibling (`+`) watcher: consumes the first future element opened
+    /// at `match_base_depth`, then expires.
+    AdjacentSibling,
 }
 
-/// Result of attempting to consume a sibling-stream lifetime tick.
+/// Result of attempting to consume an adjacent-sibling lifetime tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SiblingLifetimeResult {
     NotApplicable,
-    #[allow(dead_code)] // Used when SiblingsRemaining(n > 1) is stored for nth-child.
-    StillAlive,
     /// The current same-depth element is the final candidate; process it, then
     /// remove the watcher.
     ExpiresAfterCurrentElement,
@@ -157,8 +155,8 @@ impl ScopedCursor {
     /// - `parent_scope_depth` is `D - 1` (the common parent)
     /// - `sibling_depth` is `D` (later siblings open at this depth)
     ///
-    /// Lifetime is packed into moving-cursor flags: `Scope` for `~`, and a
-    /// single-tick adjacent flag for `+` (`SiblingsRemaining(1)`).
+    /// Lifetime is packed into moving-cursor flags: `Scope` for `~`, and
+    /// `AdjacentSibling` for `+`.
     pub(crate) fn new_sibling(
         parent_scope_depth: super::DepthSize,
         sibling_depth: super::DepthSize,
@@ -174,12 +172,7 @@ impl ScopedCursor {
         let mut flags = CursorActivity::Active.to_flags();
         match lifetime {
             CursorLifetime::Scope => {}
-            CursorLifetime::SiblingsRemaining(count) => {
-                debug_assert_eq!(
-                    count.get(),
-                    1,
-                    "only SiblingsRemaining(1) is packed today; higher counts need nth-child storage"
-                );
+            CursorLifetime::AdjacentSibling => {
                 flags |= FLAG_ADJACENT_REMAINING;
             }
         }
@@ -381,13 +374,13 @@ impl ScopedCursor {
 
     /// Logical lifetime for sibling-stream watchers.
     ///
-    /// Adjacent (`+`) countdown is packed into moving-cursor flags so ordinary
+    /// Adjacent (`+`) state is packed into moving-cursor flags so ordinary
     /// selectors keep a 32-byte [`ScopedCursor`].
     #[inline]
     pub(crate) fn lifetime(&self) -> CursorLifetime {
         match &self.mode {
             CursorMode::Moving { flags, .. } if *flags & FLAG_ADJACENT_REMAINING != 0 => {
-                CursorLifetime::SiblingsRemaining(NonZeroU16::new(1).unwrap())
+                CursorLifetime::AdjacentSibling
             }
             _ => CursorLifetime::Scope,
         }
@@ -1022,6 +1015,32 @@ mod tests {
         assert!(cursor.end());
         assert_eq!(cursor.unwind_depth(), None);
         assert_eq!(cursor.match_base_depth(), 2);
+    }
+
+    #[test]
+    fn adjacent_sibling_lifetime_packs_and_expires_once() {
+        use super::{CursorLifetime, SiblingLifetimeResult};
+
+        let mut cursor = ScopedCursor::new_sibling(
+            1,
+            2,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            CursorLifetime::AdjacentSibling,
+        );
+        assert_eq!(cursor.lifetime(), CursorLifetime::AdjacentSibling);
+        assert_eq!(
+            cursor.consume_sibling_at(2),
+            SiblingLifetimeResult::ExpiresAfterCurrentElement
+        );
+        assert_eq!(cursor.lifetime(), CursorLifetime::Scope);
+        assert_eq!(
+            cursor.consume_sibling_at(2),
+            SiblingLifetimeResult::NotApplicable
+        );
     }
 
     #[test]

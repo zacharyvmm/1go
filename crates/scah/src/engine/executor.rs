@@ -9,7 +9,6 @@ use crate::{
     Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement,
 };
 use smallvec::SmallVec;
-use std::num::NonZeroU16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpawnOutcome {
@@ -359,7 +358,7 @@ where
         debug_assert!(
             matches!(
                 candidate.lifetime(),
-                CursorLifetime::Scope | CursorLifetime::SiblingsRemaining(_)
+                CursorLifetime::Scope | CursorLifetime::AdjacentSibling
             ),
             "sibling admission requires a sibling-compatible lifetime"
         );
@@ -499,7 +498,7 @@ where
         let guard = &self.query.get_transition(callback.continuation.state).guard;
         let (lifetime, reason) = match guard {
             Combinator::NextSibling => (
-                CursorLifetime::SiblingsRemaining(NonZeroU16::new(1).unwrap()),
+                CursorLifetime::AdjacentSibling,
                 ScopedCursorReason::AdjacentSiblingActivated,
             ),
             Combinator::SubsequentSibling => (
