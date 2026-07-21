@@ -36,6 +36,19 @@ jobs:
           git diff --exit-code -- crates/scah-ffi/include/scah.h
       - name: C and C++ FFI smoke tests
         run: ./scripts/test-c-ffi.sh
+      - name: Benchmark harness unit tests
+        run: python3 scripts/test_bench_harness.py
+      - name: Compile C ABI benchmark
+        run: |
+          cargo build -p scah-ffi --release
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c "import sys,json; print(json.load(sys.stdin)['target_directory'])")"
+          cc -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror \
+            -Icrates/scah-ffi/include \
+            crates/scah-ffi/benches/c_abi_bench.c \
+            -L"$TARGET_DIR/release" -lscah_ffi -lpthread -ldl -lm \
+            -o /tmp/scah-c-abi-bench
+          LD_LIBRARY_PATH="$TARGET_DIR/release" /tmp/scah-c-abi-bench --smoke > /tmp/scah-c-abi-smoke.json
+          python3 -c "import json; d=json.load(open('/tmp/scah-c-abi-smoke.json')); assert d['results'], d"
       - name: Test cursor instrumentation
         run: cargo test -p scah --features bench-internals
       - name: Check escape scanner benchmark
@@ -78,6 +91,8 @@ jobs:
       - name: Run Python tests
         working-directory: crates/bindings/scah-python
         run: pytest tests/
+      - name: Smoke result-access benchmark harness
+        run: python3 scripts/bench-result-access.py --smoke --output /tmp/scah-python-bench-smoke.json
 
   node:
     name: Node Binding Tests
@@ -109,3 +124,5 @@ jobs:
       - name: Run Node tests
         working-directory: crates/bindings/scah-node
         run: bun test
+      - name: Smoke result-access benchmark harness
+        run: bun scripts/bench-result-access.ts --smoke --output /tmp/scah-node-bench-smoke.json

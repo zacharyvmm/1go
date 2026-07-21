@@ -32,16 +32,22 @@ typedef enum ScahStatus {
 
 // Opaque list of element ids sharing a store.
 //
+// Match results are stored as a linked-list span (`first` + `len`) rather than
+// an eagerly copied ID vector. [`scah_element_list_fill_ids`] and
+// [`scah_store_get_ids_fill`] copy IDs into a caller buffer. [`scah_element_list_ids`]
+// lazily materializes a cache on first use for C callers that need a borrowed
+// pointer.
+//
 // # Lifetime invariants
 //
-// - [`scah_element_list_ids`] returns a pointer into this list's immutable
-//   `ids` vector. The pointer remains valid until the list is freed.
-// - IDs never mutate after list creation.
+// - [`scah_element_list_ids`] returns a pointer into this list's lazily
+//   materialized ID cache. The pointer remains valid until the list is freed.
 // - String views obtained via element getters remain valid while this list
 //   (which retains the [`OwnedStore`]) remains alive.
 // - Freeing the original [`ScahStore`] does not invalidate elements accessed
 //   through this list.
-// - An element ID must not be used with a different list owner.
+// - An element ID may only be used with this list, or a descendant list
+//   returned from [`scah_element_get`] on an element from this owner.
 typedef struct ScahElementList ScahElementList;
 
 // Owned diagnostic message allocated by the FFI layer.
@@ -74,9 +80,12 @@ typedef struct ScahSave {
 // Section identifier within a query builder tree.
 typedef size_t ScahQuerySectionId;
 
-// Store-local element identifier. Valid only with the [`ScahElementList`] that
-// produced it (or another list retaining the same store for bounds-checked
-// access). Not a heap handle.
+// Store-local element identifier.
+//
+// An element ID may only be used with the [`ScahElementList`] that produced
+// it, or a descendant list returned from an element belonging to the same
+// owner. Not a heap handle. Do not exchange IDs between arbitrary lists even
+// when they happen to share a store.
 typedef size_t ScahElementId;
 
 // Optional string view. Distinguish missing values from empty strings with
@@ -290,6 +299,9 @@ enum ScahStatus scah_store_len(const struct ScahStore *store,
 // Look up elements matched by `query`.
 //
 // When the selector is absent, `*out_found` is set to 0 and this is not an error.
+// The returned list stores a match span (`first` + `len`) rather than an
+// eagerly copied ID vector. Use [`scah_element_list_fill_ids`] or
+// [`scah_store_get_ids_fill`] to copy IDs into a caller buffer.
 //
 // # Safety
 //
@@ -303,6 +315,31 @@ enum ScahStatus scah_store_get(const struct ScahStore *store,
                                struct ScahElementList **out_elements,
                                uint8_t *out_found,
                                struct ScahError **out_error);
+
+// Look up matches and copy IDs into a caller-provided buffer in one pass.
+//
+// When `capacity` is smaller than the match count, returns
+// [`ScahStatus::BufferTooSmall`] and writes the required count to
+// `*out_written`. On success with `*out_found == 1` and a non-null
+// `out_elements`, the caller also owns a span-based list for lifetime/
+// nested access and must free it with [`scah_element_list_free`].
+//
+// Pass `out_elements == NULL` to only fill IDs (caller must keep the store
+// alive for subsequent element access).
+//
+// # Safety
+//
+// Same string/store requirements as [`scah_store_get`]. When `capacity > 0`,
+// `out_ids` must point to a writable array of `capacity` IDs. `out_written`
+// and `out_found` must be non-null.
+enum ScahStatus scah_store_get_ids_fill(const struct ScahStore *store,
+                                        struct ScahStringView query,
+                                        ScahElementId *out_ids,
+                                        size_t capacity,
+                                        size_t *out_written,
+                                        struct ScahElementList **out_elements,
+                                        uint8_t *out_found,
+                                        struct ScahError **out_error);
 
 // Free a store handle. Null is a no-op.
 //
@@ -324,10 +361,28 @@ enum ScahStatus scah_element_list_len(const struct ScahElementList *list,
                                       size_t *out_len,
                                       struct ScahError **out_error);
 
+// Fill a caller-provided buffer with the list's element IDs.
+//
+// When `capacity` is smaller than the list length, returns
+// [`ScahStatus::BufferTooSmall`] and writes the required count to
+// `*out_written`.
+//
+// # Safety
+//
+// `list` must point to a live [`ScahElementList`]. When `capacity > 0`,
+// `out_ids` must point to a writable array of `capacity` IDs. `out_written`
+// must be non-null.
+enum ScahStatus scah_element_list_fill_ids(const struct ScahElementList *list,
+                                           ScahElementId *out_ids,
+                                           size_t capacity,
+                                           size_t *out_written,
+                                           struct ScahError **out_error);
+
 // Borrow the complete ID slice for a result list.
 //
-// The returned pointer remains valid until the list is freed. IDs never mutate
-// after list creation.
+// Lazily materializes an ID cache on first call. Prefer
+// [`scah_element_list_fill_ids`] or [`scah_store_get_ids_fill`] to avoid the
+// cache allocation. The returned pointer remains valid until the list is freed.
 //
 // # Safety
 //
@@ -493,6 +548,23 @@ enum ScahStatus scah_element_get(const struct ScahElementList *owner,
                                  struct ScahElementList **out_elements,
                                  uint8_t *out_found,
                                  struct ScahError **out_error);
+
+// Nested lookup that copies child IDs into a caller buffer in one pass.
+//
+// # Safety
+//
+// Same requirements as [`scah_element_get`]. When `capacity > 0`, `out_ids`
+// must be writable for `capacity` IDs. `out_written` and `out_found` must be
+// non-null.
+enum ScahStatus scah_element_get_ids_fill(const struct ScahElementList *owner,
+                                          ScahElementId element,
+                                          struct ScahStringView query,
+                                          ScahElementId *out_ids,
+                                          size_t capacity,
+                                          size_t *out_written,
+                                          struct ScahElementList **out_elements,
+                                          uint8_t *out_found,
+                                          struct ScahError **out_error);
 
 // Capture neither inner HTML nor text content.
 struct ScahSave scah_save_none(void);

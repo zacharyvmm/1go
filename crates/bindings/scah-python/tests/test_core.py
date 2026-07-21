@@ -162,6 +162,19 @@ def test_element_survives_store_destruction():
     assert el.text_content == "x"
 
 
+def test_nested_element_survives_parent_list_destruction():
+    """Child elements retain the store via their own result-list owner."""
+    def make_child():
+        q = Query.all("div", Save.all()).all("a", Save.all()).build()
+        store = parse("<div><a href='nested'>n</a></div>", [q])
+        parents = store.get("div")
+        return parents[0].get("a")[0]
+
+    child = make_child()
+    assert child.name == "a"
+    assert child.get_attribute("href") == "nested"
+
+
 # ── Exception mapping ──────────────────────────────────────────────────────
 
 

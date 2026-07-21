@@ -20,11 +20,11 @@
 Rust API
   Native borrowed QueryBuilder and zero-copy Store
 
-C ABI
-  Owned opaque handles and explicit lifetime management
+C ABI implementation
+  Owned selectors, stores, result-list owners, and borrowed element IDs
 
-Language bindings
-  Shallow wrappers over the C ABI
+Python / Node / future bindings
+  Shallow wrappers over exported C ABI
 ```
 
 The C ABI (`crates/scah-ffi`, header `include/scah.h`) owns selector tapes, HTML, stores, and element lists. Result elements are borrowed store-local IDs exposed through a list owner (no per-result C heap allocation). Every returned handle has a matching null-safe free function. Building a query does not consume the builder; appending does not consume the child. Section IDs are append tokens, not permanent random-access mutation handles. Returned string views are borrowed from the owning handle and remain valid only while that handle is alive. Rust panics never cross the ABI. Regenerate the committed header with `cargo run -p scah-ffi --features header-gen --bin generate_header`.

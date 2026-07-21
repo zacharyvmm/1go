@@ -1,6 +1,13 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use scah_ffi::{ScahError, ScahStatus, ScahStringView, scah_error_free, scah_error_message};
+use scah_ffi::{
+    ScahAttributeView, ScahElementId, ScahElementList, ScahError, ScahOptionalStringView,
+    ScahStatus, ScahStringView, scah_element_attribute_count, scah_element_attributes_fill,
+    scah_element_list_free, scah_error_free, scah_error_message,
+};
+use std::mem::MaybeUninit;
+use std::ptr::NonNull;
+use std::sync::Arc;
 
 #[inline]
 pub fn string_view(s: &str) -> ScahStringView {
@@ -27,6 +34,16 @@ pub unsafe fn view_as_str<'a>(view: ScahStringView) -> &'a str {
     unsafe { std::str::from_utf8_unchecked(bytes) }
 }
 
+#[inline]
+pub fn optional_view_to_option<'a>(view: ScahOptionalStringView) -> Option<&'a str> {
+    if view.is_some == 0 {
+        None
+    } else {
+        // SAFETY: successful optional views borrow store-owned UTF-8.
+        Some(unsafe { view_as_str(view.value) })
+    }
+}
+
 pub fn take_error_message(err: *mut ScahError) -> String {
     if err.is_null() {
         return String::new();
@@ -51,20 +68,7 @@ pub fn map_status(status: ScahStatus, err: *mut ScahError) -> PyResult<()> {
     }
 
     let msg = take_error_message(err);
-    let fallback = match status {
-        ScahStatus::InvalidSelector => "invalid selector",
-        ScahStatus::EmptyQueries => "parse requires at least one query",
-        ScahStatus::MaximumDepthExceeded => {
-            "HTML nesting depth exceeds the maximum supported depth"
-        }
-        ScahStatus::InvalidSection => "invalid query section",
-        ScahStatus::IndexOutOfBounds => "index out of bounds",
-        ScahStatus::BufferTooSmall => "buffer too small",
-        ScahStatus::NullPointer => "null pointer",
-        ScahStatus::InvalidUtf8 => "invalid UTF-8",
-        ScahStatus::InternalPanic => "internal panic in scah-ffi",
-        ScahStatus::Ok => unreachable!(),
-    };
+    let fallback = status_fallback(status);
     let message = if msg.is_empty() {
         fallback.to_string()
     } else {
@@ -72,10 +76,6 @@ pub fn map_status(status: ScahStatus, err: *mut ScahError) -> PyResult<()> {
     };
 
     Err(status_err_message(status, message))
-}
-
-pub fn status_err(status: ScahStatus) -> PyErr {
-    status_err_message(status, status_fallback(status).to_string())
 }
 
 fn status_fallback(status: ScahStatus) -> &'static str {
@@ -105,4 +105,208 @@ fn status_err_message(status: ScahStatus, message: String) -> PyErr {
         | ScahStatus::BufferTooSmall => PyValueError::new_err(message),
         _ => PyRuntimeError::new_err(message),
     }
+}
+
+/// Shared owner for one C ABI result list (one allocation, one ID vector).
+pub struct ElementListOwner {
+    handle: NonNull<ScahElementList>,
+}
+
+impl ElementListOwner {
+    #[inline]
+    pub fn as_ptr(&self) -> *const ScahElementList {
+        self.handle.as_ptr()
+    }
+}
+
+impl Drop for ElementListOwner {
+    fn drop(&mut self) {
+        // SAFETY: handle was returned by scah-ffi and is freed exactly once.
+        unsafe {
+            scah_element_list_free(self.handle.as_ptr());
+        }
+    }
+}
+
+// SAFETY: exclusive Arc ownership; C ABI element access is read-only.
+unsafe impl Send for ElementListOwner {}
+unsafe impl Sync for ElementListOwner {}
+
+/// One-pass store lookup: fill IDs into a binding buffer and retain a span list owner.
+pub fn take_store_get<T>(
+    store: *const scah_ffi::ScahStore,
+    query: &str,
+    mut make: impl FnMut(Arc<ElementListOwner>, ScahElementId) -> T,
+) -> PyResult<Option<Vec<T>>> {
+    use scah_ffi::{scah_store_get_ids_fill, scah_store_len};
+
+    let mut hint = 0usize;
+    let mut error = std::ptr::null_mut();
+    let status = unsafe { scah_store_len(store, &mut hint, &mut error) };
+    map_status(status, error)?;
+
+    let mut ids = vec![0usize; hint];
+    let mut written = 0usize;
+    let mut list: *mut ScahElementList = std::ptr::null_mut();
+    let mut found = 0u8;
+    let mut error = std::ptr::null_mut();
+    let status = unsafe {
+        scah_store_get_ids_fill(
+            store,
+            string_view(query),
+            ids.as_mut_ptr(),
+            ids.len(),
+            &mut written,
+            &mut list,
+            &mut found,
+            &mut error,
+        )
+    };
+    if status == ScahStatus::BufferTooSmall {
+        // Exact retry with the reported count.
+        if !error.is_null() {
+            unsafe {
+                scah_error_free(error);
+            }
+        }
+        ids.resize(written, 0);
+        error = std::ptr::null_mut();
+        let status = unsafe {
+            scah_store_get_ids_fill(
+                store,
+                string_view(query),
+                ids.as_mut_ptr(),
+                ids.len(),
+                &mut written,
+                &mut list,
+                &mut found,
+                &mut error,
+            )
+        };
+        map_status(status, error)?;
+    } else {
+        map_status(status, error)?;
+    }
+
+    if found == 0 {
+        return Ok(None);
+    }
+
+    let handle = NonNull::new(list)
+        .ok_or_else(|| PyRuntimeError::new_err("successful lookup returned null element list"))?;
+    let owner = Arc::new(ElementListOwner { handle });
+    ids.truncate(written);
+    Ok(Some(
+        ids.into_iter().map(|id| make(owner.clone(), id)).collect(),
+    ))
+}
+
+/// Nested element lookup with one-pass ID fill.
+///
+/// Child elements share `parent_owner` (same store lifetime) instead of
+/// allocating a new C list per nested query.
+pub fn take_element_get<T>(
+    parent_owner: &Arc<ElementListOwner>,
+    element: ScahElementId,
+    query: &str,
+    mut make: impl FnMut(Arc<ElementListOwner>, ScahElementId) -> T,
+) -> PyResult<Option<Vec<T>>> {
+    use scah_ffi::scah_element_get_ids_fill;
+
+    let mut ids = vec![0usize; 8];
+    let mut written = 0usize;
+    let mut found = 0u8;
+    let mut error = std::ptr::null_mut();
+    let status = unsafe {
+        scah_element_get_ids_fill(
+            parent_owner.as_ptr(),
+            element,
+            string_view(query),
+            ids.as_mut_ptr(),
+            ids.len(),
+            &mut written,
+            std::ptr::null_mut(),
+            &mut found,
+            &mut error,
+        )
+    };
+    if status == ScahStatus::BufferTooSmall {
+        if !error.is_null() {
+            unsafe {
+                scah_error_free(error);
+            }
+        }
+        ids.resize(written.max(1), 0);
+        error = std::ptr::null_mut();
+        let status = unsafe {
+            scah_element_get_ids_fill(
+                parent_owner.as_ptr(),
+                element,
+                string_view(query),
+                ids.as_mut_ptr(),
+                ids.len(),
+                &mut written,
+                std::ptr::null_mut(),
+                &mut found,
+                &mut error,
+            )
+        };
+        map_status(status, error)?;
+    } else {
+        map_status(status, error)?;
+    }
+
+    if found == 0 {
+        return Ok(None);
+    }
+
+    ids.truncate(written);
+    Ok(Some(
+        ids.into_iter()
+            .map(|id| make(parent_owner.clone(), id))
+            .collect(),
+    ))
+}
+
+/// Fetch all attributes into a borrowed FFI buffer.
+///
+/// Returned views remain valid while `owner` remains alive.
+pub fn fetch_attributes(
+    owner: *const ScahElementList,
+    id: ScahElementId,
+) -> PyResult<Vec<ScahAttributeView>> {
+    let mut count = 0usize;
+    let mut error = std::ptr::null_mut();
+    let status = unsafe { scah_element_attribute_count(owner, id, &mut count, &mut error) };
+    map_status(status, error)?;
+
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut buf: Vec<MaybeUninit<ScahAttributeView>> = Vec::with_capacity(count);
+    // SAFETY: capacity is exact; fill writes `count` initialized views.
+    unsafe {
+        buf.set_len(count);
+    }
+    let mut written = 0usize;
+    let mut error = std::ptr::null_mut();
+    let status = unsafe {
+        scah_element_attributes_fill(
+            owner,
+            id,
+            buf.as_mut_ptr() as *mut ScahAttributeView,
+            count,
+            &mut written,
+            &mut error,
+        )
+    };
+    map_status(status, error)?;
+
+    Ok(buf
+        .into_iter()
+        .take(written)
+        // SAFETY: fill initialized the first `written` entries.
+        .map(|slot| unsafe { slot.assume_init() })
+        .collect())
 }

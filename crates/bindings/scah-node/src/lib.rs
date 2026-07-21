@@ -1,13 +1,14 @@
 use napi::Result;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use scah_ffi::{BindingStore, ParseError, ScahQuery};
+use scah_ffi::{ScahError, ScahQuery, ScahStore, scah_parse};
 
 mod elements;
 mod ffi;
 mod query;
 mod store;
 
+use ffi::{map_status, string_view};
 use query::JsQuery;
 use store::JSStore;
 
@@ -26,17 +27,18 @@ fn parse(html: String, queries: Vec<Reference<JsQuery>>) -> Result<JSStore> {
         .map(|q| q.handle.as_ptr() as *const ScahQuery)
         .collect();
 
-    // SAFETY: query handles remain live for the duration of parse.
-    let store = unsafe { BindingStore::parse(&html, &query_ptrs) }.map_err(|err| match err {
-        ParseError::EmptyQueries => Error::new(
-            Status::ArrayExpected,
-            "parse requires at least one query".to_owned(),
-        ),
-        ParseError::MaximumDepthExceeded => Error::new(
-            Status::GenericFailure,
-            "HTML nesting depth exceeds the maximum supported depth".to_owned(),
-        ),
-    })?;
-
-    Ok(JSStore { store })
+    let mut out_store: *mut ScahStore = std::ptr::null_mut();
+    let mut out_error: *mut ScahError = std::ptr::null_mut();
+    // SAFETY: query handles remain live; html bytes borrow the local String.
+    let status = unsafe {
+        scah_parse(
+            string_view(&html),
+            query_ptrs.as_ptr(),
+            query_ptrs.len(),
+            &mut out_store,
+            &mut out_error,
+        )
+    };
+    map_status(status, out_error)?;
+    JSStore::from_handle(out_store)
 }

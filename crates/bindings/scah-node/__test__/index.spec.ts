@@ -231,6 +231,30 @@ test('element remains valid after store is dropped', () => {
   expect(element.textContent).toBe('hi')
 })
 
+test('nested element remains valid after parent list is dropped', () => {
+  const child = (() => {
+    const q = Query.all('div', { textContent: true }).all('a', { textContent: true }).build()
+    const store = parse('<div><a href="nested">n</a></div>', [q])
+    const parents = store.get('div')!
+    return parents[0]!.get('a')[0]!
+  })()
+  expect(child.name).toBe('a')
+  expect(child.getAttribute('href')).toBe('nested')
+})
+
+test('JsonElement typing is exported', () => {
+  // Compile-time shape check via structural typing against the public interface.
+  const q = Query.all('a', { textContent: true }).build()
+  const store = parse('<a id="x" class="c">hi</a>', [q])
+  const json = store.get('a')![0]!.toJson()
+  const typed: import('../index').JsonElement = json
+  expect(typed.name).toBe('a')
+  expect(typed.id).toBe('x')
+  expect(typed.class).toBe('c')
+  expect(typed.textContent).toBe('hi')
+  expect(typed.attributes).toEqual({})
+})
+
 test('parse with empty queries throws', () => {
   expect(() => parse('<a></a>', [])).toThrow(/parse requires at least one query/)
 })

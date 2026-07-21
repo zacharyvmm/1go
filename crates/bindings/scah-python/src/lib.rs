@@ -8,9 +8,10 @@ mod query;
 mod save;
 
 use crate::element::{PyElement, PyStore};
+use crate::ffi_util::{map_status, string_view};
 use crate::query::{PyQuery, PyQueryBuilder, PyQueryFactory, PyQueryStatic};
 use crate::save::PySave;
-use scah_ffi::{BindingStore, ScahQuery};
+use scah_ffi::{ScahError, ScahQuery, ScahStore, scah_parse};
 
 #[gen_stub_pyfunction]
 #[pyfunction]
@@ -24,17 +25,20 @@ fn parse(html: String, queries: Vec<PyRef<PyQuery>>) -> PyResult<PyStore> {
         .map(|q| q.handle.as_ptr() as *const ScahQuery)
         .collect();
 
-    // SAFETY: query handles remain live for the duration of parse.
-    let store = unsafe { BindingStore::parse(&html, &ptrs) }.map_err(|err| match err {
-        scah_ffi::ParseError::EmptyQueries => {
-            PyValueError::new_err("parse requires at least one query")
-        }
-        scah_ffi::ParseError::MaximumDepthExceeded => {
-            PyValueError::new_err("HTML nesting depth exceeds the maximum supported depth")
-        }
-    })?;
-
-    Ok(PyStore { store })
+    let mut out_store: *mut ScahStore = std::ptr::null_mut();
+    let mut out_error: *mut ScahError = std::ptr::null_mut();
+    // SAFETY: query handles remain live; html bytes borrow the local String.
+    let status = unsafe {
+        scah_parse(
+            string_view(&html),
+            ptrs.as_ptr(),
+            ptrs.len(),
+            &mut out_store,
+            &mut out_error,
+        )
+    };
+    map_status(status, out_error)?;
+    PyStore::from_handle(out_store)
 }
 
 #[pymodule]

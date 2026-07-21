@@ -3,11 +3,14 @@
 //! Architecture:
 //!
 //! ```text
-//! scah-query-ir / scah
-//!         │
-//!         ▼
-//!     scah-ffi
-//! owned handles + C ABI
+//! Rust API
+//!   Native borrowed QueryBuilder and zero-copy Store
+//!
+//! C ABI implementation
+//!   Owned selectors, stores, result-list owners, and borrowed element IDs
+//!
+//! Python / Node / future bindings
+//!   Shallow wrappers over exported C ABI
 //! ```
 //!
 //! Foreign callers never see Rust lifetimes. Query builders own selector
@@ -15,7 +18,6 @@
 //! and query backing storage; element lists retain their store and expose
 //! borrowed element IDs (no per-result C heap allocation).
 
-mod binding;
 mod error;
 mod owned_query;
 mod owned_store;
@@ -23,7 +25,6 @@ mod query;
 mod store;
 mod string;
 
-pub use binding::BindingStore;
 pub use error::{ScahError, ScahStatus, scah_error_free, scah_error_message};
 pub use query::{
     ScahQuery, ScahQueryBuilder, ScahQuerySectionId, scah_query_all, scah_query_builder_all,
@@ -36,9 +37,11 @@ pub use store::{
     ScahAttributeView, ScahElementId, ScahElementList, ScahElementView, ScahStore,
     scah_abi_version, scah_element_attribute_at, scah_element_attribute_count,
     scah_element_attributes_fill, scah_element_class_name, scah_element_get,
-    scah_element_get_attribute, scah_element_id, scah_element_inner_html, scah_element_list_free,
+    scah_element_get_attribute, scah_element_get_ids_fill, scah_element_id,
+    scah_element_inner_html, scah_element_list_fill_ids, scah_element_list_free,
     scah_element_list_ids, scah_element_list_len, scah_element_name, scah_element_text_content,
-    scah_element_view, scah_parse, scah_store_free, scah_store_get, scah_store_len,
+    scah_element_view, scah_parse, scah_store_free, scah_store_get, scah_store_get_ids_fill,
+    scah_store_len,
 };
 pub use string::{
     ScahOptionalStringView, ScahSave, ScahStringView, scah_save_all, scah_save_none,
