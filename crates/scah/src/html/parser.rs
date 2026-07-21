@@ -365,6 +365,11 @@ where
                 );
                 if is_self_closing {
                     for save_hit in &self.temp_state.save_hits {
+                        // Save::none() voids are already in the result store with
+                        // None content fields; skip redundant set_content.
+                        if !save_hit.needs_close_finalization() {
+                            continue;
+                        }
                         self.store.set_content(
                             save_hit.element_id,
                             None,

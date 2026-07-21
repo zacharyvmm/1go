@@ -899,3 +899,55 @@ fn multi_row_table_still_uses_row_newlines() {
     let html = "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>";
     assert_eq!(text_of(html, "table"), "A\tB\nC\tD");
 }
+
+// --- Void Save::none() must not require content finalization ---
+
+#[test]
+fn void_save_none_still_stores_match() {
+    let html = "<div><br><br></div>";
+    let query = Query::all("br", Save::none()).unwrap().build();
+    let queries = [query];
+
+    let store = parse(html, &queries).unwrap();
+    let breaks: Vec<_> = store.get("br").unwrap().collect();
+
+    assert_eq!(breaks.len(), 2);
+    assert_eq!(breaks[0].text(&store), None);
+    assert_eq!(breaks[0].raw_text(&store), None);
+}
+
+#[test]
+fn void_text_capture_still_finalizes_empty_range() {
+    let html = "<br>";
+    let query = Query::all("br", Save::only_text()).unwrap().build();
+    let queries = [query];
+
+    let store = parse(html, &queries).unwrap();
+    let br = store.get("br").unwrap().next().unwrap();
+
+    assert_eq!(br.text(&store), Some(""));
+    assert_eq!(br.raw_text(&store), None);
+}
+
+#[test]
+fn void_raw_capture_still_finalizes_empty_range() {
+    let html = "<br>";
+    let query = Query::all("br", Save::only_raw_text()).unwrap().build();
+    let queries = [query];
+
+    let store = parse(html, &queries).unwrap();
+    let br = store.get("br").unwrap().next().unwrap();
+
+    assert_eq!(br.raw_text(&store), Some(""));
+    assert_eq!(br.text(&store), None);
+}
+
+#[test]
+fn first_void_save_none_completes_at_synthetic_close() {
+    let html = "<br><br><br>";
+    let query = Query::first("br", Save::none()).unwrap().build();
+    let queries = [query];
+
+    let store = parse(html, &queries).unwrap();
+    assert_eq!(store.get("br").unwrap().count(), 1);
+}
