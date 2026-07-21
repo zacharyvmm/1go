@@ -39,9 +39,9 @@ pub use store::{
     scah_element_attributes_fill, scah_element_class_name, scah_element_get,
     scah_element_get_attribute, scah_element_get_ids_fill, scah_element_id,
     scah_element_inner_html, scah_element_list_fill_ids, scah_element_list_free,
-    scah_element_list_ids, scah_element_list_len, scah_element_name, scah_element_text_content,
-    scah_element_view, scah_parse, scah_store_free, scah_store_get, scah_store_get_ids_fill,
-    scah_store_len,
+    scah_element_list_ids, scah_element_list_len, scah_element_name, scah_element_names_fill,
+    scah_element_text_content, scah_element_view, scah_parse, scah_store_free, scah_store_get,
+    scah_store_get_ids_fill, scah_store_len,
 };
 pub use string::{
     ScahOptionalStringView, ScahSave, ScahStringView, scah_save_all, scah_save_none,

@@ -209,14 +209,44 @@ fn resolve_element(
         .ok_or(ScahStatus::IndexOutOfBounds)
 }
 
-/// Walk a match linked-list, optionally writing IDs into a caller buffer.
+#[inline(always)]
+unsafe fn leaf_name_status(
+    owner: *const ScahElementList,
+    element: ScahElementId,
+    out_name: *mut ScahStringView,
+) -> ScahStatus {
+    if out_name.is_null() {
+        return ScahStatus::NullPointer;
+    }
+    // Always clear so failed calls leave a defined empty view.
+    unsafe {
+        *out_name = ScahStringView::empty();
+    }
+    if owner.is_null() {
+        return ScahStatus::NullPointer;
+    }
+    // SAFETY: caller guarantees a live list when non-null.
+    let list = unsafe { &*owner };
+    match list.store.store().elements.get(element) {
+        Some(el) => {
+            unsafe {
+                *out_name = ScahStringView::borrow(el.name);
+            }
+            ScahStatus::Ok
+        }
+        None => ScahStatus::IndexOutOfBounds,
+    }
+}
+
+/// Walk a match linked-list, optionally writing IDs and/or names into caller buffers.
 ///
 /// Returns `(first_id, total_len)`. When `out_ids` is null or `capacity == 0`,
-/// only counts. Writes at most `capacity` IDs when the buffer is provided.
+/// only counts. Writes at most `capacity` IDs/names when buffers are provided.
 fn walk_match_ids(
     store: &OwnedStore,
     query: &str,
     out_ids: *mut ScahElementId,
+    out_names: *mut ScahStringView,
     capacity: usize,
 ) -> Option<(Option<ScahElementId>, usize)> {
     store.store().get(query).map(|iter| {
@@ -229,9 +259,16 @@ fn walk_match_ids(
             if first.is_none() {
                 first = Some(idx);
             }
-            if !out_ids.is_null() && len < capacity {
-                unsafe {
-                    *out_ids.add(len) = idx;
+            if len < capacity {
+                if !out_ids.is_null() {
+                    unsafe {
+                        *out_ids.add(len) = idx;
+                    }
+                }
+                if !out_names.is_null() {
+                    unsafe {
+                        *out_names.add(len) = ScahStringView::borrow(e.name);
+                    }
                 }
             }
             len += 1;
@@ -447,7 +484,7 @@ pub unsafe extern "C" fn scah_store_get(
             }
             let query = parse_string_view(query, out_error)?;
             let owned = store.inner.clone();
-            match walk_match_ids(&owned, query, std::ptr::null_mut(), 0) {
+            match walk_match_ids(&owned, query, std::ptr::null_mut(), std::ptr::null_mut(), 0) {
                 None => {
                     *out_found = 0;
                     *out_elements = std::ptr::null_mut();
@@ -463,7 +500,7 @@ pub unsafe extern "C" fn scah_store_get(
     }
 }
 
-/// Look up matches and copy IDs into a caller-provided buffer in one pass.
+/// Look up matches and copy IDs (and optionally names) into caller buffers.
 ///
 /// When `capacity` is smaller than the match count, returns
 /// [`ScahStatus::BufferTooSmall`] and writes the required count to
@@ -472,7 +509,8 @@ pub unsafe extern "C" fn scah_store_get(
 /// nested access and must free it with [`scah_element_list_free`].
 ///
 /// Pass `out_elements == NULL` to only fill IDs (caller must keep the store
-/// alive for subsequent element access).
+/// alive for subsequent element access). Pass `out_names == NULL` to skip
+/// name materialization; when non-null it must have `capacity` slots.
 ///
 /// # Safety
 ///
@@ -484,6 +522,7 @@ pub unsafe extern "C" fn scah_store_get_ids_fill(
     store: *const ScahStore,
     query: ScahStringView,
     out_ids: *mut ScahElementId,
+    out_names: *mut ScahStringView,
     capacity: usize,
     out_written: *mut usize,
     out_elements: *mut *mut ScahElementList,
@@ -494,7 +533,8 @@ pub unsafe extern "C" fn scah_store_get_ids_fill(
         clear_out_usize(out_written);
         clear_out_u8(out_found);
         clear_out_ptr(out_elements);
-        ffi_guard(out_error, || {
+        // Release: skip catch_unwind — walk + optional Box must not unwind.
+        ffi_guard_leaf(out_error, || {
             let store = require_ref(store)?;
             if out_written.is_null() || out_found.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -504,7 +544,7 @@ pub unsafe extern "C" fn scah_store_get_ids_fill(
             }
             let query = parse_string_view(query, out_error)?;
             let owned = store.inner.clone();
-            match walk_match_ids(&owned, query, out_ids, capacity) {
+            match walk_match_ids(&owned, query, out_ids, out_names, capacity) {
                 None => {
                     *out_found = 0;
                     *out_written = 0;
@@ -694,17 +734,83 @@ pub unsafe extern "C" fn scah_element_name(
     out_name: *mut ScahStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    unsafe {
-        clear_out_string_view(out_name);
-        ffi_guard_leaf(out_error, || {
-            let list = require_ref(owner)?;
-            if out_name.is_null() {
-                return Err(ScahStatus::NullPointer);
+    if cfg!(debug_assertions) {
+        unsafe {
+            clear_out_string_view(out_name);
+            ffi_guard_leaf(out_error, || {
+                let list = require_ref(owner)?;
+                if out_name.is_null() {
+                    return Err(ScahStatus::NullPointer);
+                }
+                let el = resolve_element(list, element)?;
+                *out_name = ScahStringView::borrow(el.name);
+                Ok(())
+            })
+        }
+    } else {
+        // Hot path: no catch_unwind, no out-clear beyond the write below.
+        let _ = out_error;
+        unsafe { leaf_name_status(owner, element, out_name) }
+    }
+}
+
+/// Fill tag names for many element IDs in one call.
+///
+/// Writes `count` borrowed name views into `out_names`. Prefer this over
+/// repeated [`scah_element_name`] when materializing a large result list.
+///
+/// # Safety
+///
+/// `owner` must point to a live [`ScahElementList`]. `ids` and `out_names` must
+/// each be valid for `count` elements. Returned views remain valid while
+/// `owner` remains alive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scah_element_names_fill(
+    owner: *const ScahElementList,
+    ids: *const ScahElementId,
+    count: usize,
+    out_names: *mut ScahStringView,
+    out_error: *mut *mut ScahError,
+) -> ScahStatus {
+    if cfg!(debug_assertions) {
+        unsafe {
+            ffi_guard_leaf(out_error, || {
+                let list = require_ref(owner)?;
+                if count > 0 && (ids.is_null() || out_names.is_null()) {
+                    return Err(ScahStatus::NullPointer);
+                }
+                for i in 0..count {
+                    let id = *ids.add(i);
+                    let el = resolve_element(list, id)?;
+                    *out_names.add(i) = ScahStringView::borrow(el.name);
+                }
+                Ok(())
+            })
+        }
+    } else {
+        let _ = out_error;
+        unsafe {
+            if count > 0 && (owner.is_null() || ids.is_null() || out_names.is_null()) {
+                return ScahStatus::NullPointer;
             }
-            let el = resolve_element(list, element)?;
-            *out_name = ScahStringView::borrow(el.name);
-            Ok(())
-        })
+            if owner.is_null() {
+                return ScahStatus::NullPointer;
+            }
+            let list = &*owner;
+            for i in 0..count {
+                let id = *ids.add(i);
+                match list.store.store().elements.get(id) {
+                    Some(el) => *out_names.add(i) = ScahStringView::borrow(el.name),
+                    None => {
+                        for j in 0..=i {
+                            *out_names.add(j) = ScahStringView::empty();
+                        }
+                        return ScahStatus::IndexOutOfBounds;
+                    }
+                }
+            }
+            ScahStatus::Ok
+        }
     }
 }
 
@@ -1085,7 +1191,8 @@ pub unsafe extern "C" fn scah_element_get_ids_fill(
         clear_out_usize(out_written);
         clear_out_u8(out_found);
         clear_out_ptr(out_elements);
-        ffi_guard(out_error, || {
+        // Release: skip catch_unwind — nested ID fill must not unwind.
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_written.is_null() || out_found.is_null() {
                 return Err(ScahStatus::NullPointer);

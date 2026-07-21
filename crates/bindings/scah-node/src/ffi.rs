@@ -110,14 +110,20 @@ unsafe impl Sync for ElementListOwner {}
 pub fn take_store_get<T>(
     store: *const scah_ffi::ScahStore,
     query: &str,
+    capacity_hint: Option<usize>,
     mut make: impl FnMut(Arc<ElementListOwner>, ScahElementId) -> T,
 ) -> Result<Option<Vec<T>>> {
     use scah_ffi::{scah_error_free, scah_store_get_ids_fill, scah_store_len};
 
-    let mut hint = 0usize;
-    let mut error = std::ptr::null_mut();
-    let status = unsafe { scah_store_len(store, &mut hint, &mut error) };
-    map_status(status, error)?;
+    let hint = if let Some(hint) = capacity_hint {
+        hint
+    } else {
+        let mut hint = 0usize;
+        let mut error = std::ptr::null_mut();
+        let status = unsafe { scah_store_len(store, &mut hint, &mut error) };
+        map_status(status, error)?;
+        hint
+    };
 
     let mut ids = Vec::with_capacity(hint);
     // SAFETY: get_ids_fill writes every slot up to `written` (<= hint on success).
@@ -133,6 +139,7 @@ pub fn take_store_get<T>(
             store,
             string_view(query),
             ids.as_mut_ptr(),
+            std::ptr::null_mut(),
             ids.len(),
             &mut written,
             &mut list,
@@ -156,6 +163,7 @@ pub fn take_store_get<T>(
                 store,
                 string_view(query),
                 ids.as_mut_ptr(),
+                std::ptr::null_mut(),
                 ids.len(),
                 &mut written,
                 &mut list,
@@ -188,12 +196,11 @@ pub fn take_element_get<T>(
     query: &str,
     mut make: impl FnMut(Arc<ElementListOwner>, ScahElementId) -> T,
 ) -> Result<Option<Vec<T>>> {
-    use scah_ffi::{scah_element_get_ids_fill, scah_error_free};
+    use scah_ffi::scah_element_get_ids_fill;
 
     let mut stack = [0usize; 4];
     let mut written = 0usize;
     let mut found = 0u8;
-    let mut error = std::ptr::null_mut();
     let status = unsafe {
         scah_element_get_ids_fill(
             parent_owner.as_ptr(),
@@ -204,20 +211,14 @@ pub fn take_element_get<T>(
             &mut written,
             std::ptr::null_mut(),
             &mut found,
-            &mut error,
+            std::ptr::null_mut(),
         )
     };
     if status == ScahStatus::BufferTooSmall {
-        if !error.is_null() {
-            unsafe {
-                scah_error_free(error);
-            }
-        }
         let mut ids = Vec::with_capacity(written);
         unsafe {
             ids.set_len(written);
         }
-        error = std::ptr::null_mut();
         let status = unsafe {
             scah_element_get_ids_fill(
                 parent_owner.as_ptr(),
@@ -228,10 +229,10 @@ pub fn take_element_get<T>(
                 &mut written,
                 std::ptr::null_mut(),
                 &mut found,
-                &mut error,
+                std::ptr::null_mut(),
             )
         };
-        map_status(status, error)?;
+        map_status(status, std::ptr::null_mut())?;
         if found == 0 {
             return Ok(None);
         }
@@ -242,7 +243,7 @@ pub fn take_element_get<T>(
                 .collect(),
         ));
     }
-    map_status(status, error)?;
+    map_status(status, std::ptr::null_mut())?;
     if found == 0 {
         return Ok(None);
     }
@@ -259,38 +260,54 @@ pub fn fetch_attributes(
     owner: *const ScahElementList,
     id: ScahElementId,
 ) -> Result<Vec<ScahAttributeView>> {
-    let mut capacity = 8usize;
-    loop {
-        let mut buf: Vec<MaybeUninit<ScahAttributeView>> = Vec::with_capacity(capacity);
-        unsafe {
-            buf.set_len(capacity);
-        }
-        let mut written = 0usize;
-        let mut error = std::ptr::null_mut();
-        let status = unsafe {
-            scah_element_attributes_fill(
-                owner,
-                id,
-                buf.as_mut_ptr() as *mut ScahAttributeView,
-                capacity,
-                &mut written,
-                &mut error,
-            )
-        };
-        if status == ScahStatus::BufferTooSmall {
-            if !error.is_null() {
-                unsafe {
-                    scah_error_free(error);
-                }
-            }
-            capacity = written.max(1);
-            continue;
-        }
+    let mut stack: [MaybeUninit<ScahAttributeView>; 8] =
+        [const { MaybeUninit::uninit() }; 8];
+    let mut written = 0usize;
+    let mut error = std::ptr::null_mut();
+    let status = unsafe {
+        scah_element_attributes_fill(
+            owner,
+            id,
+            stack.as_mut_ptr() as *mut ScahAttributeView,
+            stack.len(),
+            &mut written,
+            &mut error,
+        )
+    };
+    if status != ScahStatus::BufferTooSmall {
         map_status(status, error)?;
-        return Ok(buf
+        return Ok(stack
             .into_iter()
             .take(written)
             .map(|slot| unsafe { slot.assume_init() })
             .collect());
     }
+    if !error.is_null() {
+        unsafe {
+            scah_error_free(error);
+        }
+    }
+    let capacity = written.max(1);
+    let mut buf: Vec<MaybeUninit<ScahAttributeView>> = Vec::with_capacity(capacity);
+    unsafe {
+        buf.set_len(capacity);
+    }
+    written = 0;
+    error = std::ptr::null_mut();
+    let status = unsafe {
+        scah_element_attributes_fill(
+            owner,
+            id,
+            buf.as_mut_ptr() as *mut ScahAttributeView,
+            capacity,
+            &mut written,
+            &mut error,
+        )
+    };
+    map_status(status, error)?;
+    Ok(buf
+        .into_iter()
+        .take(written)
+        .map(|slot| unsafe { slot.assume_init() })
+        .collect())
 }

@@ -330,11 +330,13 @@ enum ScahStatus scah_store_get(const struct ScahStore *store,
 // # Safety
 //
 // Same string/store requirements as [`scah_store_get`]. When `capacity > 0`,
-// `out_ids` must point to a writable array of `capacity` IDs. `out_written`
-// and `out_found` must be non-null.
+// `out_ids` must point to a writable array of `capacity` IDs. `out_names` may
+// be NULL; when non-null it must have `capacity` slots. `out_written` and
+// `out_found` must be non-null.
 enum ScahStatus scah_store_get_ids_fill(const struct ScahStore *store,
                                         struct ScahStringView query,
                                         ScahElementId *out_ids,
+                                        struct ScahStringView *out_names,
                                         size_t capacity,
                                         size_t *out_written,
                                         struct ScahElementList **out_elements,
@@ -416,6 +418,22 @@ enum ScahStatus scah_element_name(const struct ScahElementList *owner,
                                   ScahElementId element,
                                   struct ScahStringView *out_name,
                                   struct ScahError **out_error);
+
+// Fill tag names for many element IDs in one call.
+//
+// Writes `count` borrowed name views into `out_names`. Prefer this over
+// repeated [`scah_element_name`] when materializing a large result list.
+//
+// # Safety
+//
+// `owner` must point to a live [`ScahElementList`]. `ids` and `out_names` must
+// each be valid for `count` elements. Returned views remain valid while
+// `owner` remains alive.
+enum ScahStatus scah_element_names_fill(const struct ScahElementList *owner,
+                                        const ScahElementId *ids,
+                                        size_t count,
+                                        struct ScahStringView *out_names,
+                                        struct ScahError **out_error);
 
 // Element `id` attribute, if present.
 //

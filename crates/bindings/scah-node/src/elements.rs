@@ -2,7 +2,7 @@ use napi::Result;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use scah_ffi::{
-    ScahElementId, ScahElementList, ScahError, ScahOptionalStringView, ScahStatus, ScahStringView,
+    ScahElementId, ScahElementList, ScahOptionalStringView, ScahStatus, ScahStringView,
     scah_element_class_name, scah_element_get_attribute, scah_element_id, scah_element_inner_html,
     scah_element_name, scah_element_text_content, scah_element_view,
 };
@@ -37,32 +37,12 @@ pub struct JsElement {
 }
 
 impl JsElement {
+    pub(crate) fn new(owner: Arc<ElementListOwner>, id: ScahElementId) -> Self {
+        Self { owner, id }
+    }
+
     fn list_ptr(&self) -> *const ScahElementList {
         self.owner.as_ptr()
-    }
-
-    fn read_name(&self) -> Result<&str> {
-        let mut out = ScahStringView::empty();
-        let mut error = std::ptr::null_mut();
-        let status = unsafe { scah_element_name(self.list_ptr(), self.id, &mut out, &mut error) };
-        map_status(status, error)?;
-        Ok(unsafe { view_as_str(out) })
-    }
-
-    fn read_optional(
-        &self,
-        f: unsafe extern "C" fn(
-            *const ScahElementList,
-            ScahElementId,
-            *mut ScahOptionalStringView,
-            *mut *mut ScahError,
-        ) -> ScahStatus,
-    ) -> Result<Option<&str>> {
-        let mut out = ScahOptionalStringView::none();
-        let mut error = std::ptr::null_mut();
-        let status = unsafe { f(self.list_ptr(), self.id, &mut out, &mut error) };
-        map_status(status, error)?;
-        Ok(optional_view_to_option(out))
     }
 }
 
@@ -106,33 +86,53 @@ impl JsElement {
 
     #[napi(getter)]
     pub fn name(&self) -> Result<&str> {
-        self.read_name()
+        let mut out = ScahStringView::empty();
+        let status =
+            unsafe { scah_element_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
+        if status != ScahStatus::Ok {
+            map_status(status, std::ptr::null_mut())?;
+        }
+        Ok(unsafe { view_as_str(out) })
     }
 
     #[napi(getter)]
     pub fn class_name(&self) -> Result<Option<&str>> {
-        self.read_optional(scah_element_class_name)
+        let mut out = ScahOptionalStringView::none();
+        let status = unsafe {
+            scah_element_class_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+        };
+        if status != ScahStatus::Ok {
+            map_status(status, std::ptr::null_mut())?;
+        }
+        Ok(optional_view_to_option(out))
     }
 
     #[napi(getter)]
     pub fn id(&self) -> Result<Option<&str>> {
-        self.read_optional(scah_element_id)
+        let mut out = ScahOptionalStringView::none();
+        let status =
+            unsafe { scah_element_id(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
+        if status != ScahStatus::Ok {
+            map_status(status, std::ptr::null_mut())?;
+        }
+        Ok(optional_view_to_option(out))
     }
 
     #[napi]
     pub fn get_attribute(&self, key: String) -> Result<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
-        let mut error = std::ptr::null_mut();
         let status = unsafe {
             scah_element_get_attribute(
                 self.list_ptr(),
                 self.id,
                 string_view(&key),
                 &mut out,
-                &mut error,
+                std::ptr::null_mut(),
             )
         };
-        map_status(status, error)?;
+        if status != ScahStatus::Ok {
+            map_status(status, std::ptr::null_mut())?;
+        }
         Ok(optional_view_to_option(out))
     }
 
@@ -150,20 +150,31 @@ impl JsElement {
 
     #[napi(getter)]
     pub fn inner_html(&self) -> Result<Option<&str>> {
-        self.read_optional(scah_element_inner_html)
+        let mut out = ScahOptionalStringView::none();
+        let status = unsafe {
+            scah_element_inner_html(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+        };
+        if status != ScahStatus::Ok {
+            map_status(status, std::ptr::null_mut())?;
+        }
+        Ok(optional_view_to_option(out))
     }
 
     #[napi(getter)]
     pub fn text_content(&self) -> Result<Option<&str>> {
-        self.read_optional(scah_element_text_content)
+        let mut out = ScahOptionalStringView::none();
+        let status = unsafe {
+            scah_element_text_content(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+        };
+        if status != ScahStatus::Ok {
+            map_status(status, std::ptr::null_mut())?;
+        }
+        Ok(optional_view_to_option(out))
     }
 
     #[napi]
     pub fn get(&self, query: String) -> Result<Vec<JsElement>> {
-        match take_element_get(&self.owner, self.id, &query, |owner, id| JsElement {
-            owner,
-            id,
-        })? {
+        match take_element_get(&self.owner, self.id, &query, JsElement::new)? {
             None => Err(Error::new(
                 Status::GenericFailure,
                 format!("This Element does not have children selected with `{query}`"),

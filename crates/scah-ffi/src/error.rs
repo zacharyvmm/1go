@@ -95,11 +95,11 @@ where
     }
 }
 
-/// Hot-path guard for leaf getters that are written to be unwind-free.
+/// Hot-path guard for unwind-free ABI entry points.
 ///
 /// In release builds this skips `catch_unwind` so per-call overhead stays close
 /// to a direct field read. Debug builds still catch panics. Call only from
-/// trivial accessors (null checks + option lookups; no allocation).
+/// paths that must not unwind in release (leaf getters, ID fills).
 ///
 /// # Safety
 ///
