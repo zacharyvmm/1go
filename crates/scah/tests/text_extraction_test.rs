@@ -1014,8 +1014,16 @@ fn save_combinations_populate_only_requested_fields() {
         let filled = paragraphs[0];
         let empty = paragraphs[1];
 
-        assert_eq!(filled.inner_html.is_some(), *expect_inner, "{label} filled inner");
-        assert_eq!(filled.has_raw_text(&store), *expect_raw, "{label} filled raw");
+        assert_eq!(
+            filled.inner_html.is_some(),
+            *expect_inner,
+            "{label} filled inner"
+        );
+        assert_eq!(
+            filled.has_raw_text(&store),
+            *expect_raw,
+            "{label} filled raw"
+        );
         assert_eq!(filled.has_text(&store), *expect_text, "{label} filled text");
 
         if *expect_inner {

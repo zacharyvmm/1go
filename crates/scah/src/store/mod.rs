@@ -371,8 +371,8 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
         self.elements[element_id].inner_html = inner_html;
         if raw_text.is_some() || text.is_some() {
             self.ensure_element_text_ranges();
-            let ranges = &mut self.element_text_ranges.as_mut().expect("text ranges")
-                [element_id.index()];
+            let ranges =
+                &mut self.element_text_ranges.as_mut().expect("text ranges")[element_id.index()];
             ranges.raw_text = raw_text;
             ranges.text = text;
         }
@@ -514,7 +514,6 @@ mod tests {
         assert_eq!(ranges.len(), store.elements.len());
         assert_eq!(store.elements.len(), 3);
     }
-
 
     #[test]
     fn element_layout_drops_inactive_text_range_fields() {

@@ -322,12 +322,7 @@ where
                             0,
                         )
                     } else {
-                        (
-                            None,
-                            TextEdgePolicy::TrimCollapsedSeparators,
-                            0,
-                            0,
-                        )
+                        (None, TextEdgePolicy::TrimCollapsedSeparators, 0, 0)
                     };
                 let text_flags = text_behavior
                     .map(TextElementBehavior::flags)
