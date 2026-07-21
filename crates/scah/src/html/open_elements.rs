@@ -1,11 +1,7 @@
 use crate::ParseError;
-use crate::engine::multiplexer::SiblingCallback;
 use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
 use crate::store::ElementId;
-
-/// Sentinel meaning this open element has no sibling callbacks in the arena.
-const NO_SIBLING_CALLBACKS: usize = usize::MAX;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SavedElement {
@@ -19,26 +15,6 @@ pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
     tag: TagFlags,
     pub saved: Vec<SavedElement>,
-    /// Start index into the parser-owned sibling callback arena, or
-    /// [`NO_SIBLING_CALLBACKS`] when this element owns no callbacks.
-    sibling_callback_start: usize,
-}
-
-impl OpenElement<'_> {
-    #[inline(always)]
-    pub(crate) fn sibling_callback_start(&self) -> Option<usize> {
-        (self.sibling_callback_start != NO_SIBLING_CALLBACKS).then_some(self.sibling_callback_start)
-    }
-
-    #[inline(always)]
-    fn set_sibling_callback_start(&mut self, start: usize) {
-        debug_assert_eq!(
-            self.sibling_callback_start, NO_SIBLING_CALLBACKS,
-            "callbacks attached to one open element more than once"
-        );
-
-        self.sibling_callback_start = start;
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -73,7 +49,6 @@ impl<'html> OpenElementStack<'html> {
             name,
             tag,
             saved: Vec::new(),
-            sibling_callback_start: NO_SIBLING_CALLBACKS,
         });
         Ok(())
     }
@@ -96,27 +71,6 @@ impl<'html> OpenElementStack<'html> {
                 text_content_start,
             });
         }
-    }
-
-    /// Move pending sibling callbacks into the parser-owned arena and record
-    /// the start index on the current open element.
-    pub(crate) fn attach_sibling_callbacks(
-        &mut self,
-        pending: &mut Vec<SiblingCallback>,
-        arena: &mut Vec<SiblingCallback>,
-    ) {
-        if pending.is_empty() {
-            return;
-        }
-
-        let open_element = self
-            .entries
-            .last_mut()
-            .expect("non-void matched element must be on the open stack");
-
-        let start = arena.len();
-        open_element.set_sibling_callback_start(start);
-        arena.append(pending);
     }
 
     #[cfg(test)]
@@ -237,22 +191,13 @@ impl<'html> OpenElementStack<'html> {
 
 #[cfg(test)]
 mod tests {
-    use super::OpenElementStack;
-    use crate::Position;
+    use super::{OpenElement, OpenElementStack};
     use crate::engine::MAX_ELEMENT_DEPTH;
-    use crate::engine::multiplexer::{RunnerId, SiblingCallback};
-    use crate::store::ElementId;
-    use crate::{QuerySectionId, TransitionId};
 
-    fn sample_callback(runner: usize) -> SiblingCallback {
-        SiblingCallback {
-            runner: RunnerId(runner),
-            output_parent: ElementId::default(),
-            continuation: Position {
-                selection: QuerySectionId(0),
-                state: TransitionId(0),
-            },
-        }
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn open_element_size_is_compact() {
+        assert_eq!(std::mem::size_of::<OpenElement<'_>>(), 48);
     }
 
     #[test]
@@ -263,47 +208,6 @@ mod tests {
         assert!(OpenElementStack::would_exceed_max_depth(
             MAX_ELEMENT_DEPTH as usize
         ));
-    }
-
-    #[test]
-    fn sibling_callback_arena_nested_range_discipline() {
-        let mut stack = OpenElementStack::default();
-        let mut pending = Vec::new();
-        let mut arena = Vec::new();
-
-        stack.push("parent").unwrap();
-        pending.push(sample_callback(1));
-        pending.push(sample_callback(2));
-        stack.attach_sibling_callbacks(&mut pending, &mut arena);
-        assert!(pending.is_empty());
-        assert_eq!(arena.len(), 2);
-        assert_eq!(
-            stack.entries.last().unwrap().sibling_callback_start(),
-            Some(0)
-        );
-
-        stack.push("child").unwrap();
-        pending.push(sample_callback(3));
-        stack.attach_sibling_callbacks(&mut pending, &mut arena);
-        assert_eq!(arena.len(), 3);
-        let child_start = stack
-            .entries
-            .last()
-            .unwrap()
-            .sibling_callback_start()
-            .unwrap();
-        assert_eq!(child_start, 2);
-
-        // Close child: truncate to child start; parent callbacks remain.
-        arena.truncate(child_start);
-        assert_eq!(arena.len(), 2);
-        assert_eq!(arena[0].runner, RunnerId(1));
-        assert_eq!(arena[1].runner, RunnerId(2));
-
-        let parent_start = stack.entries[0].sibling_callback_start().unwrap();
-        assert_eq!(parent_start, 0);
-        arena.truncate(parent_start);
-        assert!(arena.is_empty());
     }
 
     #[test]

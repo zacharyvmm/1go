@@ -20,6 +20,10 @@ const FLAG_FIRST_WINNER: u8 = 1 << 3;
 /// sibling depth. A future `:nth-*` implementation may generalize this
 /// representation after its state and performance requirements are known.
 const FLAG_ADJACENT_REMAINING: u8 = 1 << 4;
+/// Adjacent watcher consumed by the current element. It remains present until
+/// the executor finishes its snapshot loop so the current element can match,
+/// but must not dominate a replacement watcher spawned by that element.
+const FLAG_ADJACENT_EXPIRING: u8 = 1 << 5;
 
 /// Bounds how long a cursor remains eligible to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,7 +408,16 @@ impl ScopedCursor {
             return SiblingLifetimeResult::NotApplicable;
         }
         *flags &= !FLAG_ADJACENT_REMAINING;
+        *flags |= FLAG_ADJACENT_EXPIRING;
         SiblingLifetimeResult::ExpiresAfterCurrentElement
+    }
+
+    #[inline]
+    pub(crate) fn is_adjacent_expiring(&self) -> bool {
+        matches!(
+            self.mode,
+            CursorMode::Moving { flags, .. } if flags & FLAG_ADJACENT_EXPIRING != 0
+        )
     }
 
     /// Pause matching until the element at `depth` closes.
