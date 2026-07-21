@@ -2,6 +2,59 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use scah::{Query, Save, parse};
 use std::hint::black_box;
 
+fn generate_flat_nonmatching_html(count: usize) -> String {
+    let mut html = String::with_capacity(count * 11 + 16);
+    html.push_str("<main>");
+    for _ in 0..count {
+        html.push_str("<div></div>");
+    }
+    html.push_str("</main>");
+    html
+}
+
+fn build_nonmatching_queries(runner_count: usize) -> Vec<Query<'static>> {
+    (0..runner_count)
+        .map(|_| {
+            Query::all("never-matches", Save::none())
+                .expect("nonmatching selector")
+                .build()
+        })
+        .collect()
+}
+
+fn generate_nested_div_html(depth: usize) -> String {
+    let mut html = String::with_capacity(depth * 11 + 16);
+    html.push_str("<main>");
+    html.push_str(&"<div>".repeat(depth));
+    html.push_str(&"</div>".repeat(depth));
+    html.push_str("</main>");
+    html
+}
+
+fn build_descendant_obligation_query() -> Query<'static> {
+    // Every nested `div` advances a non-terminal descendant cursor, but the
+    // terminal predicate never matches, so this isolates cursor pressure from
+    // result-store writes.
+    Query::all("div never-matches", Save::none())
+        .expect("descendant obligation selector")
+        .build()
+}
+
+fn build_sibling_obligation_query() -> Query<'static> {
+    Query::all("main", Save::none())
+        .expect("sibling obligation parent selector")
+        .then(|main| {
+            Ok([
+                main.all("div ~ p.never-one", Save::none())?,
+                main.all("div ~ p.never-two", Save::none())?,
+                main.all("div ~ p.never-three", Save::none())?,
+                main.all("div ~ p.never-four", Save::none())?,
+            ])
+        })
+        .expect("sibling obligation continuations")
+        .build()
+}
+
 fn generate_flat_divs_then_p(div_count: usize) -> String {
     let mut html = String::with_capacity(div_count * 12 + 32);
     html.push_str("<main>");
@@ -20,6 +73,29 @@ fn generate_alternating_div_p(pairs: usize) -> String {
     }
     html.push_str("</main>");
     html
+}
+
+fn generate_large_source_subtree(depth: usize) -> String {
+    let mut html = String::with_capacity(depth * 19 + 48);
+    html.push_str("<main><div>");
+    html.push_str(&"<section>".repeat(depth));
+    html.push_str(&"</section>".repeat(depth));
+    html.push_str("</div><p></p></main>");
+    html
+}
+
+fn generate_simultaneous_retirement_html() -> &'static str {
+    "<main><h1 class=\"early\"></h1></main>"
+}
+
+fn build_first_queries(first_count: usize) -> Vec<Query<'static>> {
+    (0..first_count)
+        .map(|_| {
+            Query::first(".early", Save::none())
+                .expect("first selector")
+                .build()
+        })
+        .collect()
 }
 
 /// One early element retires every `First` runner; the large unmatched div tail
@@ -119,6 +195,171 @@ fn bench_sibling_selectors(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_ordinary_hot_path(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ordinary_hot_path");
+
+    for size in [1_000usize, 10_000] {
+        let html = generate_flat_nonmatching_html(size);
+        let queries = build_nonmatching_queries(1);
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("no_match_one_runner", size),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(&queries)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    let html = generate_flat_nonmatching_html(10_000);
+    for runner_count in [8usize, 64] {
+        let queries = build_nonmatching_queries(runner_count);
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new(format!("no_match_{runner_count}_runners"), 10_000),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(&queries)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_cursor_obligations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cursor_obligation_hot_paths");
+    group.sample_size(10);
+
+    let flat_html = generate_flat_nonmatching_html(10_000);
+    let one_cursor_queries = build_nonmatching_queries(1);
+    group.throughput(Throughput::Bytes(flat_html.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("one_active_cursor", 10_000),
+        &flat_html,
+        |b, html| {
+            b.iter(|| {
+                let store = parse(black_box(html), black_box(&one_cursor_queries)).unwrap();
+                black_box(store);
+            })
+        },
+    );
+
+    for depth in [64usize, 256, 1_024] {
+        let html = generate_nested_div_html(depth);
+        let query = build_descendant_obligation_query();
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("descendant_obligations", depth),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse(black_box(html), black_box(std::slice::from_ref(&query))).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    for source_count in [1_000usize, 10_000] {
+        let html = generate_flat_divs_then_p(source_count);
+        let query = build_sibling_obligation_query();
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("sibling_obligations", source_count),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse(black_box(html), black_box(std::slice::from_ref(&query))).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_simultaneous_first_retirement(c: &mut Criterion) {
+    let mut group = c.benchmark_group("simultaneous_first_retirement");
+    group.sample_size(10);
+    let html = generate_simultaneous_retirement_html();
+    group.throughput(Throughput::Bytes(html.len() as u64));
+
+    for first_count in [64usize, 256, 1_024] {
+        let queries = build_first_queries(first_count);
+        group.bench_with_input(
+            BenchmarkId::from_parameter(first_count),
+            &first_count,
+            |b, _| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(&queries)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_redundant_general_sibling_sources(c: &mut Criterion) {
+    let mut group = c.benchmark_group("redundant_general_sibling_sources");
+
+    for source_count in [1_000usize, 10_000] {
+        let html = generate_flat_divs_then_p(source_count);
+        let queries = &[Query::all("div ~ p", Save::none())
+            .expect("redundant general-sibling source selector")
+            .build()];
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("div_tilde_p", source_count),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(queries)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_large_source_subtree(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_source_subtree_sibling");
+    group.sample_size(10);
+
+    for depth in [128usize, 1_024, 4_096] {
+        let html = generate_large_source_subtree(depth);
+        let queries = &[Query::all("div + p", Save::none())
+            .expect("large source-subtree sibling selector")
+            .build()];
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("adjacent_div_plus_p", depth),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(queries)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_many_retired_runners(c: &mut Criterion) {
     let mut group = c.benchmark_group("many_retired_runners");
     const TAIL_DIVS: usize = 5_000;
@@ -156,5 +397,14 @@ fn bench_many_retired_runners(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sibling_selectors, bench_many_retired_runners);
+criterion_group!(
+    benches,
+    bench_sibling_selectors,
+    bench_ordinary_hot_path,
+    bench_cursor_obligations,
+    bench_many_retired_runners,
+    bench_simultaneous_first_retirement,
+    bench_redundant_general_sibling_sources,
+    bench_large_source_subtree,
+);
 criterion_main!(benches);
