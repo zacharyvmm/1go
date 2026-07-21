@@ -163,16 +163,45 @@ def test_element_survives_store_destruction():
 
 
 def test_nested_element_survives_parent_list_destruction():
-    """Child elements retain the store via their own result-list owner."""
+    """Child elements share the parent owner and remain usable after parents drop."""
     def make_child():
         q = Query.all("div", Save.all()).all("a", Save.all()).build()
         store = parse("<div><a href='nested'>n</a></div>", [q])
         parents = store.get("div")
-        return parents[0].get("a")[0]
+        child = parents[0].get("a")[0]
+        del parents
+        del store
+        return child
 
     child = make_child()
     assert child.name == "a"
     assert child.get_attribute("href") == "nested"
+
+
+def test_selective_lookup_cardinality():
+    """Selective queries return exact ordered matches without depending on store size."""
+    html = "".join(
+        ["<s1>x</s1>"]
+        + ["<s10>x</s10>"] * 10
+        + ["<a>x</a>"] * 100
+    )
+    store = parse(
+        html,
+        [
+            Query.all("s1", Save.all()).build(),
+            Query.all("s10", Save.all()).build(),
+            Query.all("a", Save.all()).build(),
+        ],
+    )
+    one = store.get("s1")
+    ten = store.get("s10")
+    all_a = store.get("a")
+    assert one is not None and len(one) == 1
+    assert ten is not None and len(ten) == 10
+    assert all_a is not None and len(all_a) == 100
+    assert one[0].name == "s1"
+    assert ten[0].name == "s10"
+    assert ten[-1].name == "s10"
 
 
 # ── Exception mapping ──────────────────────────────────────────────────────

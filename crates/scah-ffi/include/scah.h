@@ -316,23 +316,25 @@ enum ScahStatus scah_store_get(const struct ScahStore *store,
                                uint8_t *out_found,
                                struct ScahError **out_error);
 
-// Look up matches and copy IDs into a caller-provided buffer in one pass.
+// Look up matches and copy IDs (and optionally names) into caller buffers.
 //
 // When `capacity` is smaller than the match count, returns
 // [`ScahStatus::BufferTooSmall`] and writes the required count to
-// `*out_written`. On success with `*out_found == 1` and a non-null
-// `out_elements`, the caller also owns a span-based list for lifetime/
-// nested access and must free it with [`scah_element_list_free`].
+// `*out_written`. When `out_elements` is non-null, a span list is still
+// returned so the caller can finish with [`scah_element_list_fill_ids`]
+// without re-running the query. On success with `*out_found == 1` and a
+// non-null `out_elements`, the caller owns that list and must free it with
+// [`scah_element_list_free`].
 //
 // Pass `out_elements == NULL` to only fill IDs (caller must keep the store
-// alive for subsequent element access).
+// alive for subsequent element access). Pass `out_names == NULL` to skip
+// name materialization; when non-null it must have `capacity` slots.
 //
 // # Safety
 //
 // Same string/store requirements as [`scah_store_get`]. When `capacity > 0`,
-// `out_ids` must point to a writable array of `capacity` IDs. `out_names` may
-// be NULL; when non-null it must have `capacity` slots. `out_written` and
-// `out_found` must be non-null.
+// `out_ids` must point to a writable array of `capacity` IDs. `out_written`
+// and `out_found` must be non-null.
 enum ScahStatus scah_store_get_ids_fill(const struct ScahStore *store,
                                         struct ScahStringView query,
                                         ScahElementId *out_ids,

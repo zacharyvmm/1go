@@ -38,12 +38,9 @@ impl JSStore {
 impl JSStore {
     #[napi]
     pub fn get(&self, query: String) -> Result<Option<Vec<JsElement>>> {
-        take_store_get(
-            self.handle.as_ptr(),
-            &query,
-            Some(self.len),
-            JsElement::new,
-        )
+        // Lookup uses a small stack buffer + exact retry; `len` is for
+        // `length` only and must not size query result buffers.
+        take_store_get(self.handle.as_ptr(), &query, JsElement::new)
     }
 
     #[napi(getter)]

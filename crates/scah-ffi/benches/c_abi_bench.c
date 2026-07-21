@@ -140,6 +140,42 @@ static void bench_store_get(void *ctx) {
   scah_element_list_free(list);
 }
 
+static void bench_store_get_ids_fill(void *ctx) {
+  BenchCtx *b = ctx;
+  ScahError *err = NULL;
+  ScahStringView q = {.data = (const uint8_t *)"a", .len = 1};
+  ScahElementId stack[16];
+  size_t written = 0;
+  uint8_t found = 0;
+  ScahElementList *list = NULL;
+  ScahStatus st = scah_store_get_ids_fill(b->store, q, stack, NULL, 16, &written, &list, &found, &err);
+  if (st == ScahStatus_BufferTooSmall) {
+    ScahElementId *ids = malloc(written * sizeof(ScahElementId));
+    if (!ids) abort();
+    size_t capacity = written;
+    written = 0;
+    found = 0;
+    list = NULL;
+    st = scah_store_get_ids_fill(b->store, q, ids, NULL, capacity, &written, &list, &found, &err);
+    free(ids);
+  }
+  if (st != ScahStatus_Ok || !found) die("store_get_ids_fill");
+  scah_element_list_free(list);
+}
+
+static void bench_list_fill_ids(void *ctx) {
+  BenchCtx *b = ctx;
+  ScahError *err = NULL;
+  ScahElementId *buf = malloc(b->len * sizeof(ScahElementId));
+  if (!buf) abort();
+  size_t written = 0;
+  if (scah_element_list_fill_ids(b->list, buf, b->len, &written, &err) != ScahStatus_Ok)
+    die("list_fill_ids");
+  volatile size_t sink = written;
+  (void)sink;
+  free(buf);
+}
+
 static void bench_list_ids(void *ctx) {
   BenchCtx *b = ctx;
   const ScahElementId *ids = NULL;
@@ -162,6 +198,19 @@ static void bench_names(void *ctx) {
     sink += name.len;
   }
   (void)sink;
+}
+
+static void bench_names_fill(void *ctx) {
+  BenchCtx *b = ctx;
+  ScahError *err = NULL;
+  ScahStringView *names = malloc(b->len * sizeof(ScahStringView));
+  if (!names) abort();
+  if (scah_element_names_fill(b->list, b->ids, b->len, names, &err) != ScahStatus_Ok)
+    die("names_fill");
+  volatile size_t sink = 0;
+  for (size_t i = 0; i < b->len; i++) sink += names[i].len;
+  (void)sink;
+  free(names);
 }
 
 static void bench_attrs(void *ctx) {
@@ -212,6 +261,30 @@ typedef struct {
   const ScahElementId *ids;
   size_t len;
 } NestedCtx;
+
+static void bench_element_get_ids_fill(void *ctx) {
+  NestedCtx *c = ctx;
+  ScahError *e = NULL;
+  ScahStringView q = {.data = (const uint8_t *)"span", .len = 4};
+  ScahElementId stack[16];
+  for (size_t i = 0; i < c->len; i++) {
+    size_t written = 0;
+    uint8_t found = 0;
+    ScahStatus st = scah_element_get_ids_fill(c->list, c->ids[i], q, stack, 16, &written, NULL,
+                                              &found, &e);
+    if (st == ScahStatus_BufferTooSmall) {
+      ScahElementId *ids = malloc(written * sizeof(ScahElementId));
+      if (!ids) abort();
+      size_t capacity = written;
+      written = 0;
+      found = 0;
+      st = scah_element_get_ids_fill(c->list, c->ids[i], q, ids, capacity, &written, NULL, &found,
+                                     &e);
+      free(ids);
+    }
+    if (st != ScahStatus_Ok || !found) die("element_get_ids_fill");
+  }
+}
 
 static void bench_nested(void *ctx) {
   NestedCtx *c = ctx;
@@ -270,11 +343,15 @@ int main(int argc, char **argv) {
     scah_query_free(query);
 
     BenchCtx ctx = {.store = store};
-    char name[64];
+    char name[80];
     snprintf(name, sizeof(name), "c_store_get_%zu", n);
     SampleStats s = measure(name, bench_store_get, &ctx, samples, fixed_iters, smoke);
     print_stat(&s, first);
     first = 0;
+
+    snprintf(name, sizeof(name), "c_store_get_ids_fill_%zu", n);
+    s = measure(name, bench_store_get_ids_fill, &ctx, samples, fixed_iters, smoke);
+    print_stat(&s, 0);
 
     ScahElementList *list = NULL;
     uint8_t found = 0;
@@ -282,17 +359,46 @@ int main(int argc, char **argv) {
     if (scah_store_get(store, q, &list, &found, &err) != ScahStatus_Ok || !found) die("prep get");
     const ScahElementId *ids = NULL;
     size_t len = 0;
-    if (scah_element_list_ids(list, &ids, &len, &err) != ScahStatus_Ok) die("prep ids");
+    /* First call may populate OnceLock cache; measure that separately. */
+    snprintf(name, sizeof(name), "c_list_ids_first_%zu", n);
+    {
+      const ScahElementId *first_ids = NULL;
+      size_t first_len = 0;
+      double t0 = now_ns();
+      if (scah_element_list_ids(list, &first_ids, &first_len, &err) != ScahStatus_Ok) die("ids1");
+      double first_ns = now_ns() - t0;
+      ids = first_ids;
+      len = first_len;
+      SampleStats first_ids_stat = {
+          .name = name,
+          .median_ns = first_ns,
+          .min_ns = first_ns,
+          .p25_ns = first_ns,
+          .p75_ns = first_ns,
+          .mad_ns = 0.0,
+          .iterations = 1,
+          .samples = 1,
+      };
+      print_stat(&first_ids_stat, 0);
+    }
     ctx.list = list;
     ctx.ids = ids;
     ctx.len = len;
 
-    snprintf(name, sizeof(name), "c_list_ids_%zu", n);
+    snprintf(name, sizeof(name), "c_list_ids_cached_%zu", n);
     s = measure(name, bench_list_ids, &ctx, samples, fixed_iters, smoke);
+    print_stat(&s, 0);
+
+    snprintf(name, sizeof(name), "c_list_fill_ids_%zu", n);
+    s = measure(name, bench_list_fill_ids, &ctx, samples, fixed_iters, smoke);
     print_stat(&s, 0);
 
     snprintf(name, sizeof(name), "c_element_name_%zu", n);
     s = measure(name, bench_names, &ctx, samples, fixed_iters, smoke);
+    print_stat(&s, 0);
+
+    snprintf(name, sizeof(name), "c_element_names_fill_%zu", n);
+    s = measure(name, bench_names_fill, &ctx, samples, fixed_iters, smoke);
     print_stat(&s, 0);
 
     if (n >= 1000) {
@@ -356,6 +462,9 @@ int main(int argc, char **argv) {
 
     NestedCtx nctx = {.list = list, .ids = ids, .len = len};
     SampleStats s = measure("c_nested_element_get", bench_nested, &nctx, samples, fixed_iters, smoke);
+    print_stat(&s, 0);
+    s = measure("c_nested_element_get_ids_fill", bench_element_get_ids_fill, &nctx, samples,
+                fixed_iters, smoke);
     print_stat(&s, 0);
 
     scah_element_list_free(list);

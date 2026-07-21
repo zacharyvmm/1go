@@ -255,6 +255,21 @@ test('JsonElement typing is exported', () => {
   expect(typed.attributes).toEqual({})
 })
 
+test('selective lookup cardinality', () => {
+  const html =
+    '<s1>x</s1>' +
+    Array.from({ length: 10 }, () => '<s10>x</s10>').join('') +
+    Array.from({ length: 100 }, () => '<a>x</a>').join('')
+  const store = parse(html, [
+    Query.all('s1', { textContent: true }).build(),
+    Query.all('s10', { textContent: true }).build(),
+    Query.all('a', { textContent: true }).build(),
+  ])
+  expect(store.get('s1')).toHaveLength(1)
+  expect(store.get('s10')).toHaveLength(10)
+  expect(store.get('a')).toHaveLength(100)
+})
+
 test('parse with empty queries throws', () => {
   expect(() => parse('<a></a>', [])).toThrow(/parse requires at least one query/)
 })

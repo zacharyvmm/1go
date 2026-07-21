@@ -5,7 +5,8 @@
 //! bindings keep one list owner and copy integer IDs.
 
 use crate::error::{
-    ScahError, ScahStatus, ffi_guard, ffi_guard_leaf, ffi_guard_value, ffi_guard_void, set_error,
+    ScahError, ScahStatus, clear_out_error, ffi_guard, ffi_guard_leaf, ffi_guard_value,
+    ffi_guard_void, set_error,
 };
 use crate::owned_store::OwnedStore;
 use crate::query::ScahQuery;
@@ -504,9 +505,11 @@ pub unsafe extern "C" fn scah_store_get(
 ///
 /// When `capacity` is smaller than the match count, returns
 /// [`ScahStatus::BufferTooSmall`] and writes the required count to
-/// `*out_written`. On success with `*out_found == 1` and a non-null
-/// `out_elements`, the caller also owns a span-based list for lifetime/
-/// nested access and must free it with [`scah_element_list_free`].
+/// `*out_written`. When `out_elements` is non-null, a span list is still
+/// returned so the caller can finish with [`scah_element_list_fill_ids`]
+/// without re-running the query. On success with `*out_found == 1` and a
+/// non-null `out_elements`, the caller owns that list and must free it with
+/// [`scah_element_list_free`].
 ///
 /// Pass `out_elements == NULL` to only fill IDs (caller must keep the store
 /// alive for subsequent element access). Pass `out_names == NULL` to skip
@@ -533,8 +536,8 @@ pub unsafe extern "C" fn scah_store_get_ids_fill(
         clear_out_usize(out_written);
         clear_out_u8(out_found);
         clear_out_ptr(out_elements);
-        // Release: skip catch_unwind — walk + optional Box must not unwind.
-        ffi_guard_leaf(out_error, || {
+        // Allocates a list owner and parses the query — always catch_unwind.
+        ffi_guard(out_error, || {
             let store = require_ref(store)?;
             if out_written.is_null() || out_found.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -554,6 +557,11 @@ pub unsafe extern "C" fn scah_store_get_ids_fill(
                     *out_found = 1;
                     *out_written = len;
                     if len > capacity {
+                        // Still return the span list so callers can
+                        // `scah_element_list_fill_ids` without re-running the query.
+                        if !out_elements.is_null() {
+                            write_ptr(out_elements, Box::new(new_element_list(owned, first, len)))?;
+                        }
                         set_error(out_error, "ID buffer capacity is smaller than match count");
                         return Err(ScahStatus::BufferTooSmall);
                     }
@@ -734,23 +742,11 @@ pub unsafe extern "C" fn scah_element_name(
     out_name: *mut ScahStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    if cfg!(debug_assertions) {
-        unsafe {
-            clear_out_string_view(out_name);
-            ffi_guard_leaf(out_error, || {
-                let list = require_ref(owner)?;
-                if out_name.is_null() {
-                    return Err(ScahStatus::NullPointer);
-                }
-                let el = resolve_element(list, element)?;
-                *out_name = ScahStringView::borrow(el.name);
-                Ok(())
-            })
-        }
-    } else {
-        // Hot path: no catch_unwind, no out-clear beyond the write below.
-        let _ = out_error;
-        unsafe { leaf_name_status(owner, element, out_name) }
+    // Audited panic-free leaf: no allocation, no indexing panic, no UTF-8
+    // parse, no OnceLock. Other getters stay behind catch_unwind.
+    unsafe {
+        clear_out_error(out_error);
+        leaf_name_status(owner, element, out_name)
     }
 }
 
@@ -772,45 +768,20 @@ pub unsafe extern "C" fn scah_element_names_fill(
     out_names: *mut ScahStringView,
     out_error: *mut *mut ScahError,
 ) -> ScahStatus {
-    if cfg!(debug_assertions) {
-        unsafe {
-            ffi_guard_leaf(out_error, || {
-                let list = require_ref(owner)?;
-                if count > 0 && (ids.is_null() || out_names.is_null()) {
-                    return Err(ScahStatus::NullPointer);
-                }
-                for i in 0..count {
-                    let id = *ids.add(i);
-                    let el = resolve_element(list, id)?;
-                    *out_names.add(i) = ScahStringView::borrow(el.name);
-                }
-                Ok(())
-            })
-        }
-    } else {
-        let _ = out_error;
-        unsafe {
-            if count > 0 && (owner.is_null() || ids.is_null() || out_names.is_null()) {
-                return ScahStatus::NullPointer;
+    // Iteration over caller IDs — always catch_unwind.
+    unsafe {
+        ffi_guard(out_error, || {
+            let list = require_ref(owner)?;
+            if count > 0 && (ids.is_null() || out_names.is_null()) {
+                return Err(ScahStatus::NullPointer);
             }
-            if owner.is_null() {
-                return ScahStatus::NullPointer;
-            }
-            let list = &*owner;
             for i in 0..count {
                 let id = *ids.add(i);
-                match list.store.store().elements.get(id) {
-                    Some(el) => *out_names.add(i) = ScahStringView::borrow(el.name),
-                    None => {
-                        for j in 0..=i {
-                            *out_names.add(j) = ScahStringView::empty();
-                        }
-                        return ScahStatus::IndexOutOfBounds;
-                    }
-                }
+                let el = resolve_element(list, id)?;
+                *out_names.add(i) = ScahStringView::borrow(el.name);
             }
-            ScahStatus::Ok
-        }
+            Ok(())
+        })
     }
 }
 
@@ -1191,8 +1162,8 @@ pub unsafe extern "C" fn scah_element_get_ids_fill(
         clear_out_usize(out_written);
         clear_out_u8(out_found);
         clear_out_ptr(out_elements);
-        // Release: skip catch_unwind — nested ID fill must not unwind.
-        ffi_guard_leaf(out_error, || {
+        // Query parse + optional list allocation — always catch_unwind.
+        ffi_guard(out_error, || {
             let list = require_ref(owner)?;
             if out_written.is_null() || out_found.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -1832,5 +1803,110 @@ mod tests {
         unsafe {
             scah_error_free(err);
         }
+    }
+
+    /// Caller-buffer contract: only `written` prefix slots are initialized.
+    #[test]
+    fn ids_fill_exposes_only_written_prefix() {
+        let html = "<a>1</a><a>2</a><b>x</b>";
+        let q = build_simple_query("a");
+        let mut store: *mut ScahStore = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        let queries = [q as *const ScahQuery];
+        assert_eq!(
+            unsafe { scah_parse(view(html), queries.as_ptr(), 1, &mut store, &mut err) },
+            ScahStatus::Ok
+        );
+
+        // Capacity 16, but only 2 matches — caller must not treat the rest as live.
+        let mut ids = [usize::MAX; 16];
+        let mut written = 0usize;
+        let mut list: *mut ScahElementList = std::ptr::null_mut();
+        let mut found = 0u8;
+        assert_eq!(
+            unsafe {
+                scah_store_get_ids_fill(
+                    store,
+                    view("a"),
+                    ids.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    ids.len(),
+                    &mut written,
+                    &mut list,
+                    &mut found,
+                    &mut err,
+                )
+            },
+            ScahStatus::Ok
+        );
+        assert_eq!(found, 1);
+        assert_eq!(written, 2);
+        assert_ne!(ids[0], usize::MAX);
+        assert_ne!(ids[1], usize::MAX);
+        // Unwritten suffix must remain untouched.
+        assert!(ids[2..].iter().all(|&id| id == usize::MAX));
+
+        // Exact small capacity then BufferTooSmall path: written reports full count,
+        // and a span list is still returned for fill_ids without re-query.
+        let mut tiny = [0usize; 1];
+        let mut need = 0usize;
+        found = 0;
+        let mut list2: *mut ScahElementList = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                scah_store_get_ids_fill(
+                    store,
+                    view("a"),
+                    tiny.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    tiny.len(),
+                    &mut need,
+                    &mut list2,
+                    &mut found,
+                    &mut err,
+                )
+            },
+            ScahStatus::BufferTooSmall
+        );
+        assert_eq!(need, 2);
+        assert!(!list2.is_null());
+        let mut filled = [0usize; 2];
+        let mut filled_n = 0usize;
+        assert_eq!(
+            unsafe {
+                scah_element_list_fill_ids(list2, filled.as_mut_ptr(), 2, &mut filled_n, &mut err)
+            },
+            ScahStatus::Ok
+        );
+        assert_eq!(filled_n, 2);
+        assert_eq!(filled[0], ids[0]);
+        assert_eq!(filled[1], ids[1]);
+        unsafe {
+            scah_error_free(err);
+            scah_element_list_free(list);
+            scah_element_list_free(list2);
+            scah_store_free(store);
+            scah_query_free(q);
+        }
+    }
+
+    /// Dependency-free buffer finalization helper for Miri / binding reuse.
+    #[test]
+    fn finalize_filled_vec_exposes_only_written() {
+        unsafe fn finalize_filled_vec<T>(buf: &mut Vec<T>, written: usize) {
+            debug_assert!(written <= buf.capacity());
+            unsafe {
+                buf.set_len(written);
+            }
+        }
+
+        let capacity = 16usize;
+        let mut ids: Vec<usize> = Vec::with_capacity(capacity);
+        unsafe {
+            *ids.as_mut_ptr().add(0) = 10;
+            *ids.as_mut_ptr().add(1) = 20;
+            finalize_filled_vec(&mut ids, 2);
+        }
+        assert_eq!(ids, vec![10, 20]);
     }
 }

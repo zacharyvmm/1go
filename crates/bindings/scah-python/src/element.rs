@@ -14,30 +14,11 @@ use scah_ffi::{
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-const NO_NAME_IDX: u32 = u32::MAX;
-
-#[inline]
-fn pack(id: ScahElementId, name_idx: u32) -> u64 {
-    debug_assert!(id <= u32::MAX as usize);
-    ((name_idx as u64) << 32) | (id as u32 as u64)
-}
-
-#[inline]
-fn unpack_id(packed: u64) -> ScahElementId {
-    (packed & 0xffff_ffff) as ScahElementId
-}
-
-#[inline]
-fn unpack_name_idx(packed: u64) -> u32 {
-    (packed >> 32) as u32
-}
-
 #[gen_stub_pyclass]
 #[pyclass(module = "scah", name = "Element")]
 pub struct PyElement {
     owner: Arc<ElementListOwner>,
-    /// Low 32 bits: element id. High 32 bits: name index (`u32::MAX` = ABI resolve).
-    packed: u64,
+    id: ScahElementId,
 }
 
 unsafe impl Send for PyElement {}
@@ -48,19 +29,8 @@ impl PyElement {
         self.owner.as_ptr()
     }
 
-    fn id_value(&self) -> ScahElementId {
-        unpack_id(self.packed)
-    }
-
-    fn name_idx(&self) -> u32 {
-        unpack_name_idx(self.packed)
-    }
-
-    fn new(owner: Arc<ElementListOwner>, id: ScahElementId, name_idx: u32) -> Self {
-        Self {
-            owner,
-            packed: pack(id, name_idx),
-        }
+    pub(crate) fn new(owner: Arc<ElementListOwner>, id: ScahElementId) -> Self {
+        Self { owner, id }
     }
 }
 
@@ -69,22 +39,9 @@ impl PyElement {
 impl PyElement {
     #[getter]
     pub fn name(&self) -> PyResult<&str> {
-        let name_idx = self.name_idx();
-        if name_idx != NO_NAME_IDX {
-            if let Some(cached) = self.owner.name_at(name_idx as usize) {
-                // SAFETY: view borrows store-owned UTF-8 kept alive by `owner`.
-                return Ok(unsafe { cached.as_str() });
-            }
-        }
         let mut out = ScahStringView::empty();
-        let status = unsafe {
-            scah_element_name(
-                self.list_ptr(),
-                self.id_value(),
-                &mut out,
-                std::ptr::null_mut(),
-            )
-        };
+        let status =
+            unsafe { scah_element_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
         }
@@ -95,12 +52,7 @@ impl PyElement {
     pub fn class_name(&self) -> PyResult<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_class_name(
-                self.list_ptr(),
-                self.id_value(),
-                &mut out,
-                std::ptr::null_mut(),
-            )
+            scah_element_class_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
         };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
@@ -111,14 +63,8 @@ impl PyElement {
     #[getter]
     pub fn id(&self) -> PyResult<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
-        let status = unsafe {
-            scah_element_id(
-                self.list_ptr(),
-                self.id_value(),
-                &mut out,
-                std::ptr::null_mut(),
-            )
-        };
+        let status =
+            unsafe { scah_element_id(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
         }
@@ -130,7 +76,7 @@ impl PyElement {
         let status = unsafe {
             scah_element_get_attribute(
                 self.list_ptr(),
-                self.id_value(),
+                self.id,
                 string_view(&key),
                 &mut out,
                 std::ptr::null_mut(),
@@ -144,7 +90,7 @@ impl PyElement {
 
     #[getter]
     pub fn attributes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let attrs = fetch_attributes(self.list_ptr(), self.id_value())?;
+        let attrs = fetch_attributes(self.list_ptr(), self.id)?;
         let dict = PyDict::new(py);
         for attr in attrs {
             let key = unsafe { view_as_str(attr.key) };
@@ -158,12 +104,7 @@ impl PyElement {
     pub fn inner_html(&self) -> PyResult<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_inner_html(
-                self.list_ptr(),
-                self.id_value(),
-                &mut out,
-                std::ptr::null_mut(),
-            )
+            scah_element_inner_html(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
         };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
@@ -175,12 +116,7 @@ impl PyElement {
     pub fn text_content(&self) -> PyResult<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_text_content(
-                self.list_ptr(),
-                self.id_value(),
-                &mut out,
-                std::ptr::null_mut(),
-            )
+            scah_element_text_content(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
         };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
@@ -189,7 +125,7 @@ impl PyElement {
     }
 
     pub fn get(&self, query: &str) -> PyResult<Vec<PyElement>> {
-        match take_element_get(&self.owner, self.id_value(), query, PyElement::new)? {
+        match take_element_get(&self.owner, self.id, query, PyElement::new)? {
             None => Err(PyValueError::new_err(format!(
                 "This Element does not have children selected with `{query}`"
             ))),
@@ -225,7 +161,7 @@ impl PyElement {
 #[pyclass(module = "scah", name = "Store")]
 pub(crate) struct PyStore {
     pub(crate) handle: NonNull<ScahStore>,
-    /// Cached at construction to avoid a len FFI round-trip on every lookup.
+    /// Cached at construction for `__len__` only — never used as lookup capacity.
     pub(crate) len: usize,
 }
 
@@ -245,12 +181,7 @@ unsafe impl Sync for PyStore {}
 #[pymethods]
 impl PyStore {
     fn get(&self, query: &str) -> PyResult<Option<Vec<PyElement>>> {
-        take_store_get(
-            self.handle.as_ptr(),
-            query,
-            Some(self.len),
-            PyElement::new,
-        )
+        take_store_get(self.handle.as_ptr(), query, PyElement::new)
     }
 
     fn __len__(&self) -> usize {

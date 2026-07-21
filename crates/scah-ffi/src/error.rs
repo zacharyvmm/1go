@@ -95,40 +95,24 @@ where
     }
 }
 
-/// Hot-path guard for unwind-free ABI entry points.
+/// Panic-containing guard for hot ABI entry points.
 ///
-/// In release builds this skips `catch_unwind` so per-call overhead stays close
-/// to a direct field read. Debug builds still catch panics. Call only from
-/// paths that must not unwind in release (leaf getters, ID fills).
+/// Always uses `catch_unwind` in every build profile so a Rust panic cannot
+/// escape an `extern "C"` boundary. Prefer a separately audited panic-free
+/// leaf implementation (no closure) only when absolute nanosecond cost has
+/// been measured and documented.
 ///
 /// # Safety
 ///
-/// Same as [`ffi_guard`]. `f` must not unwind in release builds.
+/// Same as [`ffi_guard`].
 #[inline(always)]
 pub(crate) unsafe fn ffi_guard_leaf<F>(out_error: *mut *mut ScahError, f: F) -> ScahStatus
 where
     F: FnOnce() -> Result<(), ScahStatus> + std::panic::UnwindSafe,
 {
-    unsafe {
-        clear_out_error(out_error);
-    }
-    if cfg!(debug_assertions) {
-        match catch_unwind(AssertUnwindSafe(f)) {
-            Ok(Ok(())) => ScahStatus::Ok,
-            Ok(Err(status)) => status,
-            Err(_) => {
-                unsafe {
-                    set_error(out_error, "internal panic in scah-ffi");
-                }
-                ScahStatus::InternalPanic
-            }
-        }
-    } else {
-        match f() {
-            Ok(()) => ScahStatus::Ok,
-            Err(status) => status,
-        }
-    }
+    // Identical containment model to [`ffi_guard`]; kept as a named entry so
+    // call sites remain readable for hot-path getters.
+    unsafe { ffi_guard(out_error, f) }
 }
 
 /// Null-safe free / simple side-effect wrappers that must not unwind.
@@ -229,6 +213,25 @@ mod tests {
         };
         assert_eq!(status, ScahStatus::InternalPanic);
         assert!(!err.is_null());
+        let view = unsafe { scah_error_message(err) };
+        assert!(!view.data.is_null() && view.len > 0);
+        unsafe {
+            scah_error_free(err);
+        }
+    }
+
+    #[test]
+    fn ffi_guard_leaf_maps_panic_in_all_profiles() {
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        let status = unsafe {
+            ffi_guard_leaf(&mut err, || -> Result<(), ScahStatus> {
+                panic!("leaf boom");
+            })
+        };
+        assert_eq!(status, ScahStatus::InternalPanic);
+        assert!(!err.is_null());
+        let view = unsafe { scah_error_message(err) };
+        assert!(view.len > 0);
         unsafe {
             scah_error_free(err);
         }
