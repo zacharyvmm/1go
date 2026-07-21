@@ -273,24 +273,6 @@ where
         match tag {
             XHtmlTag::Open => {
                 let tag = TagFlags::classify(self.element.name);
-                // Only scan attributes / compute text behavior when normalized
-                // text is requested. Raw-only and no-text modes skip this work.
-                let text_behavior = if self.capture_mode.captures_text() {
-                    let has_hidden = element_has_hidden(&self.element, &mut self.text_state);
-                    Some(text_behavior_for(tag, has_hidden, &mut self.text_state))
-                } else {
-                    None
-                };
-                let text_flags = text_behavior
-                    .map(TextElementBehavior::flags)
-                    .unwrap_or_else(TextElementFlags::empty);
-                // Inherited preformatted context must be read before enter_element.
-                let text_edge_policy = text_behavior
-                    .map(|behavior| {
-                        self.text_state
-                            .edge_policy_for_child(behavior, tag.is_text_cell())
-                    })
-                    .unwrap_or(TextEdgePolicy::TrimCollapsedSeparators);
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
@@ -305,30 +287,51 @@ where
                 let is_self_closing = tag.is_void();
                 self.position.self_closing = is_self_closing;
 
-                // Child start tags cancel preformatted initial-newline eligibility
-                // for the current open pre/textarea (intervening token rule).
-                if self.capture_mode.captures_text() {
-                    self.text_state.cancel_initial_newline();
-                }
-
-                // Opening boundary, then flush any parent/sibling-owned pending
-                // separator before capturing text_start. Raw tape is unaffected.
-                if let Some(behavior) = text_behavior {
-                    self.text_state.before_open_element(
-                        &mut self.store.text.text,
-                        behavior,
-                        is_self_closing,
-                    );
-                    self.text_state.before_text_range_start(
-                        &mut self.store.text.text,
-                        behavior,
-                        text_edge_policy,
-                        tag.is_text_cell(),
-                    );
-                }
-
-                let raw_start = self.store.text.raw_text.len();
-                let text_start = self.store.text.text.len();
+                // Normalized-text bookkeeping is gated behind captures_text().
+                // Inner-HTML-only / no-content parses stay on a leaner path.
+                let (text_behavior, text_edge_policy, raw_start, text_start) =
+                    if self.capture_mode.captures_text() {
+                        let has_hidden = element_has_hidden(&self.element, &mut self.text_state);
+                        let behavior = text_behavior_for(tag, has_hidden, &mut self.text_state);
+                        let text_edge_policy = self
+                            .text_state
+                            .edge_policy_for_child(behavior, tag.is_text_cell());
+                        self.text_state.cancel_initial_newline();
+                        self.text_state.before_open_element(
+                            &mut self.store.text.text,
+                            behavior,
+                            is_self_closing,
+                        );
+                        self.text_state.before_text_range_start(
+                            &mut self.store.text.text,
+                            behavior,
+                            text_edge_policy,
+                            tag.is_text_cell(),
+                        );
+                        (
+                            Some(behavior),
+                            text_edge_policy,
+                            self.store.text.raw_text.len(),
+                            self.store.text.text.len(),
+                        )
+                    } else if self.capture_mode.captures_raw() {
+                        (
+                            None,
+                            TextEdgePolicy::TrimCollapsedSeparators,
+                            self.store.text.raw_text.len(),
+                            0,
+                        )
+                    } else {
+                        (
+                            None,
+                            TextEdgePolicy::TrimCollapsedSeparators,
+                            0,
+                            0,
+                        )
+                    };
+                let text_flags = text_behavior
+                    .map(TextElementBehavior::flags)
+                    .unwrap_or_else(TextElementFlags::empty);
 
                 if is_self_closing {
                     let depth = self.open_elements.depth().saturating_add(1);
@@ -601,15 +604,15 @@ where
     fn finalize_open_element(&mut self, open_element: &OpenElement<'html>, reader: &Reader<'html>) {
         for saved in &open_element.saved {
             let inner_html = saved
-                .inner_html_start
+                .inner_html_start()
                 .map(|start_idx| reader.slice(start_idx..self.position.reader_position));
 
             let raw_text = saved
-                .raw_text_start
+                .raw_text_start()
                 .map(|start| start..self.store.text.raw_text.len());
-            let text = saved.text_start.map(|start| {
+            let text = saved.text_start().map(|start| {
                 let range = start..self.store.text.text.len();
-                match saved.text_edge_policy {
+                match saved.text_edge_policy() {
                     TextEdgePolicy::TrimCollapsedSeparators => {
                         trim_collapsed_range(&self.store.text.text, range)
                     }
