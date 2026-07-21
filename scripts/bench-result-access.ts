@@ -128,17 +128,48 @@ for (const n of [100, 1000, 10000, 100000]) {
 
   results.push(
     measure(
-      `lookup_${n}`,
+      `lookup_only_${n}`,
       () => {
         const hits = store.get('a')
         if (!hits) throw new Error('missing')
-        consumeHits(hits)
+        void hits.length
       },
       args.samples,
       args.iterations,
       targetS,
     ),
   )
+
+  if (n === 10000) {
+    results.push(
+      measure(
+        'lookup_iterate_10000',
+        () => {
+          const hits = store.get('a')
+          if (!hits) throw new Error('missing')
+          for (const _ of hits) {
+            /* iterate only */
+          }
+        },
+        args.samples,
+        args.iterations,
+        targetS,
+      ),
+    )
+    results.push(
+      measure(
+        'lookup_names_10000',
+        () => {
+          const hits = store.get('a')
+          if (!hits) throw new Error('missing')
+          consumeHits(hits)
+        },
+        args.samples,
+        args.iterations,
+        targetS,
+      ),
+    )
+  }
 
   const hits = store.get('a')!
   results.push(
@@ -211,6 +242,56 @@ for (const n of [100, 1000, 10000, 100000]) {
       results.push(measure(name, fn, args.samples, args.iterations, targetS))
     }
   }
+}
+
+if (!args.smoke) {
+  const parts: string[] = ['<s1 href="/0">t</s1>']
+  for (let i = 0; i < 10; i++) parts.push(`<s10 href="/${i}">t</s10>`)
+  for (let i = 0; i < 100; i++) parts.push(`<s100 href="/${i}">t</s100>`)
+  for (let i = 0; i < 1000; i++) parts.push(`<s1000 href="/${i}">t</s1000>`)
+  const filler = 100000 - (1 + 10 + 100 + 1000)
+  for (let i = 0; i < filler; i++) parts.push(`<z href="/${i}">t</z>`)
+  const selStore = parse(parts.join(''), [
+    Query.all('s1', { textContent: true }).build(),
+    Query.all('s10', { textContent: true }).build(),
+    Query.all('s100', { textContent: true }).build(),
+    Query.all('s1000', { textContent: true }).build(),
+    Query.all('z', {}).build(),
+  ])
+  for (const [label, sel, expect] of [
+    ['store_100k_matches_1', 's1', 1],
+    ['store_100k_matches_10', 's10', 10],
+    ['store_100k_matches_100', 's100', 100],
+    ['store_100k_matches_1000', 's1000', 1000],
+  ] as const) {
+    results.push(
+      measure(
+        label,
+        () => {
+          const hits = selStore.get(sel)
+          if (!hits || hits.length !== expect) throw new Error(`expected ${expect}`)
+        },
+        args.samples,
+        args.iterations,
+        targetS,
+      ),
+    )
+  }
+  const allStore = parse(makeHtml(100000), [
+    Query.all('a', { textContent: true }).build(),
+  ])
+  results.push(
+    measure(
+      'store_100k_matches_100000',
+      () => {
+        const hits = allStore.get('a')
+        if (!hits || hits.length !== 100000) throw new Error('expected 100000')
+      },
+      args.samples,
+      args.iterations,
+      targetS,
+    ),
+  )
 }
 
 const nestedCount = args.smoke ? 50 : 1000

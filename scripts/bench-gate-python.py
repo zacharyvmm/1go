@@ -80,13 +80,6 @@ def make_html(n: int) -> str:
     return "".join(f'<a href="/{i}" class="c" id="i{i}">t{i}</a>' for i in range(n))
 
 
-def consume_hits(hits) -> int:
-    total = 0
-    for el in hits:
-        total += len(el.name)
-    return total
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", type=int, default=7)
@@ -99,13 +92,13 @@ def main() -> int:
     for n in [100, 1_000, 10_000] + ([] if args.skip_100k else [100_000]):
         store = parse(make_html(n), [Query.all("a", Save.all()).build()])
 
-        def lookup(store=store):
+        def lookup_only(store=store):
             hits = store.get("a")
             assert hits is not None
-            consume_hits(hits)
+            _ = len(hits)
 
-        results.append(measure(f"lookup_{n}", lookup, args.samples, target))
-        print(f"done lookup_{n}", flush=True)
+        results.append(measure(f"lookup_only_{n}", lookup_only, args.samples, target))
+        print(f"done lookup_only_{n}", flush=True)
 
         if n == 1_000:
             subset = store.get("a")[:1_000]
@@ -122,10 +115,31 @@ def main() -> int:
             results.append(measure("attrs_1k_from_1000", attrs, args.samples, target))
             print("done fields/attrs", flush=True)
 
-    parents = parse(
-        "".join(f"<div><span>c{i}</span></div>" for i in range(500)),
+        if n == 10_000:
+            def lookup_iterate(store=store):
+                hits = store.get("a")
+                assert hits is not None
+                for _ in hits:
+                    pass
+
+            def lookup_names(store=store):
+                total = 0
+                hits = store.get("a")
+                assert hits is not None
+                for el in hits:
+                    total += len(el.name)
+                assert total >= 0
+
+            results.append(measure("lookup_iterate_10000", lookup_iterate, args.samples, target))
+            results.append(measure("lookup_names_10000", lookup_names, args.samples, target))
+            print("done lookup_iterate/names", flush=True)
+
+    nested_html = "".join(f"<div><span>c{i}</span></div>" for i in range(500))
+    nested_store = parse(
+        nested_html,
         [Query.all("div", Save.all()).all("span", Save.all()).build()],
-    ).get("div")
+    )
+    parents = nested_store.get("div")
     assert parents is not None
 
     def nested(parents=parents):
@@ -134,6 +148,8 @@ def main() -> int:
 
     results.append(measure("nested_lookup", nested, args.samples, target))
     print("done nested", flush=True)
+    # Keep nested_store alive for the timed nested lookups above.
+    _ = nested_store
 
     for label, size in (("parse_10kb", 10_000), ("parse_100kb", 100_000), ("parse_1mb", 1_000_000)):
         html = ("<div>" + ("<a>x</a>" * (size // 8)) + "</div>")[:size]

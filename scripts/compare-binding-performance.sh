@@ -115,7 +115,8 @@ run_c_abi_bench() {
       -L"$LIB_DIR" -lscah_ffi -lpthread -ldl -lm \
       -o "$out/c_abi_bench" 2>"$out/c-abi-build.log"; then
       echo "{\"language\":\"c-abi\",\"results\":[],\"skipped\":\"compile failed\"}" >"$out/c-abi.json"
-      return 0
+      echo "C ABI benchmark compilation failed (see $out/c-abi-build.log)" >&2
+      return 1
     fi
     if [[ "$SMOKE" == "1" ]]; then
       "$out/c_abi_bench" --smoke >"$out/c-abi.json"
@@ -168,9 +169,24 @@ else
   run_label candidate "$CAND_SHA"
 fi
 
-REQUIRED_PY=(lookup_100 lookup_1000 attrs_1k_from_1000 field_name_1k_from_1000 nested_lookup)
+REQUIRED_PY=(
+  lookup_only_100
+  lookup_only_1000
+  field_name_1k_from_1000
+  attrs_1k_from_1000
+  nested_lookup
+)
+REQUIRED_NODE=(
+  lookup_only_100
+  lookup_only_1000
+  field_name_1k_from_1000
+  attrs_1k_from_1000
+  toJson_1k_from_1000
+  nested_lookup
+)
 if [[ "$SMOKE" != "1" ]]; then
-  REQUIRED_PY+=(lookup_10000 lookup_100000)
+  REQUIRED_PY+=(lookup_only_10000 lookup_only_100000)
+  REQUIRED_NODE+=(lookup_only_10000 lookup_only_100000)
 fi
 
 status=0
@@ -187,6 +203,10 @@ for kind in python node; do
     for name in "${REQUIRED_PY[@]}"; do
       req_args+=(--required "$name")
     done
+  else
+    for name in "${REQUIRED_NODE[@]}"; do
+      req_args+=(--required "$name")
+    done
   fi
   if ! python3 "$ROOT/scripts/compare_bench_results.py" \
     "$base" "$cand" \
@@ -200,7 +220,9 @@ done
 if [[ -f "$OUT_ROOT/baseline/c-abi.json" && -f "$OUT_ROOT/candidate/c-abi.json" ]]; then
   base_count="$(python3 -c "import json;print(len(json.load(open('$OUT_ROOT/baseline/c-abi.json')).get('results',[])))")"
   cand_count="$(python3 -c "import json;print(len(json.load(open('$OUT_ROOT/candidate/c-abi.json')).get('results',[])))")"
-  if [[ "$base_count" != "0" && "$cand_count" != "0" ]]; then
+  if [[ "$base_count" == "0" && "$cand_count" != "0" ]]; then
+    echo "C ABI present only on candidate — reporting absolute measurements (no main baseline)"
+  elif [[ "$base_count" != "0" && "$cand_count" != "0" ]]; then
     if ! python3 "$ROOT/scripts/compare_bench_results.py" \
       "$OUT_ROOT/baseline/c-abi.json" \
       "$OUT_ROOT/candidate/c-abi.json" \

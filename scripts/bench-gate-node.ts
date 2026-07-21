@@ -72,13 +72,11 @@ for (const n of sizes) {
   const store = parse(makeHtml(n), [Query.all('a', { innerHtml: true, textContent: true }).build()])
   results.push(
     measure(
-      `lookup_${n}`,
+      `lookup_only_${n}`,
       () => {
         const hits = store.get('a')
         if (!hits) throw new Error('missing')
-        let t = 0
-        for (const el of hits) t += el.name.length
-        if (!t) throw new Error('empty')
+        void hits.length
       },
       samples,
     ),
@@ -124,12 +122,44 @@ for (const n of sizes) {
       ),
     )
   }
+  if (n === 10000) {
+    results.push(
+      measure(
+        'lookup_iterate_10000',
+        () => {
+          const hits = store.get('a')
+          if (!hits) throw new Error('missing')
+          for (const _ of hits) {
+            /* */
+          }
+        },
+        samples,
+      ),
+    )
+    results.push(
+      measure(
+        'lookup_names_10000',
+        () => {
+          const hits = store.get('a')
+          if (!hits) throw new Error('missing')
+          let t = 0
+          for (const el of hits) t += el.name.length
+          if (t < 0) throw new Error('bad')
+        },
+        samples,
+      ),
+    )
+  }
 }
 
-const parents = parse(
-  Array.from({ length: 500 }, (_, i) => `<div><span>c${i}</span></div>`).join(''),
-  [Query.all('div', { textContent: true }).all('span', { textContent: true }).build()],
-).get('div')!
+const nestedHtml = Array.from(
+  { length: 500 },
+  (_, i) => `<div><span>c${i}</span></div>`,
+).join('')
+const nestedStore = parse(nestedHtml, [
+  Query.all('div', { textContent: true }).all('span', { textContent: true }).build(),
+])
+const parents = nestedStore.get('div')!
 results.push(
   measure(
     'nested_lookup',

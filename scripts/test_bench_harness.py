@@ -22,8 +22,8 @@ class CompareBenchResultsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "base.json"
             cand = Path(tmp) / "cand.json"
-            self._write(base, [{"name": "lookup_100", "median_ns": 100.0}])
-            self._write(cand, [{"name": "lookup_100", "median_ns": 110.0}])
+            self._write(base, [{"name": "lookup_only_100", "median_ns": 100.0}])
+            self._write(cand, [{"name": "lookup_only_100", "median_ns": 110.0}])
             proc = subprocess.run(
                 [
                     sys.executable,
@@ -33,7 +33,7 @@ class CompareBenchResultsTests(unittest.TestCase):
                     "--threshold",
                     "5",
                     "--required",
-                    "lookup_100",
+                    "lookup_only_100",
                 ],
                 capture_output=True,
                 text=True,
@@ -48,8 +48,8 @@ class CompareBenchResultsTests(unittest.TestCase):
             base = Path(tmp) / "base.json"
             cand = Path(tmp) / "cand.json"
             out = Path(tmp) / "out.json"
-            self._write(base, [{"name": "lookup_100", "median_ns": 100.0}])
-            self._write(cand, [{"name": "lookup_100", "median_ns": 104.0}])
+            self._write(base, [{"name": "lookup_only_100", "median_ns": 100.0}])
+            self._write(cand, [{"name": "lookup_only_100", "median_ns": 104.0}])
             proc = subprocess.run(
                 [
                     sys.executable,
@@ -72,7 +72,7 @@ class CompareBenchResultsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "base.json"
             cand = Path(tmp) / "cand.json"
-            self._write(base, [{"name": "lookup_100", "median_ns": 100.0}])
+            self._write(base, [{"name": "lookup_only_100", "median_ns": 100.0}])
             self._write(cand, [{"name": "other", "median_ns": 100.0}])
             proc = subprocess.run(
                 [
@@ -81,14 +81,13 @@ class CompareBenchResultsTests(unittest.TestCase):
                     str(base),
                     str(cand),
                     "--required",
-                    "lookup_100",
+                    "lookup_only_100",
                 ],
                 capture_output=True,
                 text=True,
             )
             self.assertEqual(proc.returncode, 1)
             self.assertIn("missing candidate case", proc.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

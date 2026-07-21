@@ -95,14 +95,9 @@ def measure(
 
 
 def make_html(n: int) -> str:
-    return "".join(f'<a href="/{i}" class="c" id="i{i}" data-k="{i}">t{i}</a>' for i in range(n))
-
-
-def consume_hits(hits) -> int:
-    total = 0
-    for el in hits:
-        total += len(el.name)
-    return total
+    return "".join(
+        f'<a href="/{i}" class="c" id="i{i}" data-k="{i}">t{i}</a>' for i in range(n)
+    )
 
 
 def main() -> int:
@@ -135,14 +130,54 @@ def main() -> int:
         q = Query.all("a", Save.all()).build()
         store = parse(html, [q])
 
-        def lookup(store=store):
+        def lookup_only(store=store):
             hits = store.get("a")
             assert hits is not None
-            consume_hits(hits)
+            _ = len(hits)
 
         results.append(
-            measure(f"lookup_{n}", lookup, samples=samples, iterations=iterations, target_s=target_s)
+            measure(
+                f"lookup_only_{n}",
+                lookup_only,
+                samples=samples,
+                iterations=iterations,
+                target_s=target_s,
+            )
         )
+
+        if n == 10_000:
+            def lookup_iterate(store=store):
+                hits = store.get("a")
+                assert hits is not None
+                for _ in hits:
+                    pass
+
+            def lookup_names(store=store):
+                hits = store.get("a")
+                assert hits is not None
+                total = 0
+                for el in hits:
+                    total += len(el.name)
+                assert total >= 0
+
+            results.append(
+                measure(
+                    "lookup_iterate_10000",
+                    lookup_iterate,
+                    samples=samples,
+                    iterations=iterations,
+                    target_s=target_s,
+                )
+            )
+            results.append(
+                measure(
+                    "lookup_names_10000",
+                    lookup_names,
+                    samples=samples,
+                    iterations=iterations,
+                    target_s=target_s,
+                )
+            )
 
         hits = store.get("a")
         assert hits is not None
@@ -216,6 +251,62 @@ def main() -> int:
                 results.append(
                     measure(label, fn, samples=samples, iterations=iterations, target_s=target_s)
                 )
+
+    # Selective-query matrix: ~100k-element store, varying match counts.
+    if not args.smoke:
+        parts: list[str] = []
+        parts.append("<s1 href='/0'>t</s1>")
+        parts.extend(f"<s10 href='/{i}'>t</s10>" for i in range(10))
+        parts.extend(f"<s100 href='/{i}'>t</s100>" for i in range(100))
+        parts.extend(f"<s1000 href='/{i}'>t</s1000>" for i in range(1_000))
+        filler = 100_000 - (1 + 10 + 100 + 1_000)
+        parts.extend(f"<z href='/{i}'>t</z>" for i in range(filler))
+        sel_html = "".join(parts)
+        queries = [
+            Query.all("s1", Save.all()).build(),
+            Query.all("s10", Save.all()).build(),
+            Query.all("s100", Save.all()).build(),
+            Query.all("s1000", Save.all()).build(),
+            Query.all("z", Save.none()).build(),
+        ]
+        sel_store = parse(sel_html, queries)
+        for label, sel, expect in (
+            ("store_100k_matches_1", "s1", 1),
+            ("store_100k_matches_10", "s10", 10),
+            ("store_100k_matches_100", "s100", 100),
+            ("store_100k_matches_1000", "s1000", 1_000),
+        ):
+            def selective(store=sel_store, sel=sel, expect=expect):
+                hits = store.get(sel)
+                assert hits is not None
+                assert len(hits) == expect
+
+            results.append(
+                measure(
+                    label,
+                    selective,
+                    samples=samples,
+                    iterations=iterations,
+                    target_s=target_s,
+                )
+            )
+
+        all_store = parse(make_html(100_000), [Query.all("a", Save.all()).build()])
+
+        def selective_all(store=all_store):
+            hits = store.get("a")
+            assert hits is not None
+            assert len(hits) == 100_000
+
+        results.append(
+            measure(
+                "store_100k_matches_100000",
+                selective_all,
+                samples=samples,
+                iterations=iterations,
+                target_s=target_s,
+            )
+        )
 
     # Nested lookup
     nested_html = "".join(f"<div><span>c{i}</span></div>" for i in range(1_000 if not args.smoke else 50))
