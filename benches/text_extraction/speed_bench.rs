@@ -104,6 +104,16 @@ fn nested_html(depth: usize) -> String {
     html
 }
 
+/// Void-heavy input for `Save::none()` (attributes retained, no content to finalize).
+fn void_html(count: usize) -> String {
+    let mut html = String::from("<div>");
+    for i in 0..count {
+        html.push_str(&format!("<input id=\"i{i}\" type=\"text\"><br>"));
+    }
+    html.push_str("</div>");
+    html
+}
+
 fn consume_text(store: &scah::Store<'_, '_>, selector: &str) {
     if let Some(elements) = store.get(selector) {
         for element in elements {
@@ -264,6 +274,20 @@ fn bench_text_modes(c: &mut Criterion) {
             |b, html| {
                 b.iter(|| {
                     let store = parse(black_box(html), black_box(inner_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+
+        let voids = void_html(size);
+        let void_q = &[Query::all("input", Save::none()).unwrap().build()];
+        group.throughput(Throughput::Bytes(voids.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("void_no_content", size),
+            &voids,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(void_q)).unwrap();
                     black_box(store);
                 })
             },
