@@ -364,8 +364,10 @@ fn save_none_matches_remain_in_store_without_content() {
     assert_eq!(sections[1].id, Some("s2"));
     for section in &sections {
         assert!(section.inner_html.is_none());
-        assert!(section.raw_text.is_none());
-        assert!(section.text.is_none());
+        assert!(!section.has_raw_text(&store));
+        assert!(!section.has_text(&store));
+        assert_eq!(section.raw_text(&store), None);
+        assert_eq!(section.text(&store), None);
     }
 }
 
@@ -382,8 +384,10 @@ fn save_none_first_completes_after_element_lifecycle() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, Some("hit"));
     assert!(hits[0].inner_html.is_none());
-    assert!(hits[0].raw_text.is_none());
-    assert!(hits[0].text.is_none());
+    assert!(!hits[0].has_raw_text(&store));
+    assert!(!hits[0].has_text(&store));
+    assert_eq!(hits[0].raw_text(&store), None);
+    assert_eq!(hits[0].text(&store), None);
 }
 
 #[test]
@@ -402,14 +406,18 @@ fn save_none_nested_first_completes_with_parent_child() {
     let products: Vec<_> = store.get("div.product").unwrap().collect();
     assert_eq!(products.len(), 1);
     assert!(products[0].inner_html.is_none());
-    assert!(products[0].raw_text.is_none());
-    assert!(products[0].text.is_none());
+    assert!(!products[0].has_raw_text(&store));
+    assert!(!products[0].has_text(&store));
+    assert_eq!(products[0].raw_text(&store), None);
+    assert_eq!(products[0].text(&store), None);
 
     let title = products[0].get(&store, "> h1").unwrap().next().unwrap();
     assert_eq!(title.name, "h1");
     assert!(title.inner_html.is_none());
-    assert!(title.raw_text.is_none());
-    assert!(title.text.is_none());
+    assert!(!title.has_raw_text(&store));
+    assert!(!title.has_text(&store));
+    assert_eq!(title.raw_text(&store), None);
+    assert_eq!(title.text(&store), None);
 }
 
 #[test]
@@ -950,4 +958,137 @@ fn first_void_save_none_completes_at_synthetic_close() {
 
     let store = parse(html, &queries).unwrap();
     assert_eq!(store.get("br").unwrap().count(), 1);
+}
+
+#[test]
+fn save_combinations_populate_only_requested_fields() {
+    let html = "<div><p>Hello <b>world</b></p><p></p></div>";
+    let cases: &[(&str, Save, bool, bool, bool)] = &[
+        ("inner", Save::only_inner_html(), true, false, false),
+        ("raw", Save::only_raw_text(), false, true, false),
+        ("text", Save::only_text(), false, false, true),
+        (
+            "inner+raw",
+            Save {
+                inner_html: true,
+                raw_text: true,
+                text: false,
+            },
+            true,
+            true,
+            false,
+        ),
+        (
+            "inner+text",
+            Save {
+                inner_html: true,
+                raw_text: false,
+                text: true,
+            },
+            true,
+            false,
+            true,
+        ),
+        (
+            "raw+text",
+            Save {
+                inner_html: false,
+                raw_text: true,
+                text: true,
+            },
+            false,
+            true,
+            true,
+        ),
+        ("all", Save::all(), true, true, true),
+        ("none", Save::none(), false, false, false),
+    ];
+
+    for (label, save, expect_inner, expect_raw, expect_text) in cases {
+        let query = Query::all("p", *save).unwrap().build();
+        let queries = [query];
+        let store = parse(html, &queries).unwrap();
+        let paragraphs: Vec<_> = store.get("p").unwrap().collect();
+        assert_eq!(paragraphs.len(), 2, "{label}");
+
+        let filled = paragraphs[0];
+        let empty = paragraphs[1];
+
+        assert_eq!(filled.inner_html.is_some(), *expect_inner, "{label} filled inner");
+        assert_eq!(filled.has_raw_text(&store), *expect_raw, "{label} filled raw");
+        assert_eq!(filled.has_text(&store), *expect_text, "{label} filled text");
+
+        if *expect_inner {
+            assert_eq!(filled.inner_html, Some("Hello <b>world</b>"));
+        }
+        if *expect_raw {
+            assert_eq!(filled.raw_text(&store), Some("Hello world"));
+            // Captured empty content remains distinguishable from uncaptured.
+            assert_eq!(empty.raw_text(&store), Some(""));
+            assert!(empty.has_raw_text(&store));
+        } else {
+            assert_eq!(filled.raw_text(&store), None);
+            assert_eq!(empty.raw_text(&store), None);
+        }
+        if *expect_text {
+            assert_eq!(filled.text(&store), Some("Hello world"));
+            assert_eq!(empty.text(&store), Some(""));
+            assert!(empty.has_text(&store));
+        } else {
+            assert_eq!(filled.text(&store), None);
+            assert_eq!(empty.text(&store), None);
+        }
+    }
+}
+
+#[test]
+fn nested_elements_keep_independent_text_ranges() {
+    let html = "<section>before <strong>inside</strong> after</section>";
+    let queries = [
+        Query::all("section", Save::all()).unwrap().build(),
+        Query::all("strong", Save::all()).unwrap().build(),
+    ];
+    let store = parse(html, &queries).unwrap();
+    let section = store.get("section").unwrap().next().unwrap();
+    let strong = store.get("strong").unwrap().next().unwrap();
+
+    assert_eq!(section.raw_text(&store), Some("before inside after"));
+    assert_eq!(strong.raw_text(&store), Some("inside"));
+    assert_eq!(section.text(&store), Some("before inside after"));
+    assert_eq!(strong.text(&store), Some("inside"));
+}
+
+#[test]
+fn text_sidecar_unallocated_for_inner_html_only() {
+    let html = "<p>one</p><p>two</p>";
+    let query = Query::all("p", Save::only_inner_html()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    let paragraphs: Vec<_> = store.get("p").unwrap().collect();
+    assert_eq!(paragraphs.len(), 2);
+    for p in paragraphs {
+        assert!(p.inner_html.is_some());
+        assert!(!p.has_raw_text(&store));
+        assert!(!p.has_text(&store));
+        assert_eq!(p.raw_text(&store), None);
+        assert_eq!(p.text(&store), None);
+    }
+}
+
+#[test]
+fn text_sidecar_aligned_for_multiple_matching_queries() {
+    let html = "<p class=\"x\">A</p>";
+    let queries = [
+        Query::all("p", Save::only_text()).unwrap().build(),
+        Query::all("p.x", Save::only_raw_text()).unwrap().build(),
+    ];
+    let store = parse(html, &queries).unwrap();
+    assert_eq!(store.elements.len(), 2);
+
+    let by_tag = store.get("p").unwrap().next().unwrap();
+    let by_class = store.get("p.x").unwrap().next().unwrap();
+    assert_eq!(by_tag.text(&store), Some("A"));
+    assert_eq!(by_tag.raw_text(&store), None);
+    assert_eq!(by_class.raw_text(&store), Some("A"));
+    assert_eq!(by_class.text(&store), None);
 }

@@ -17,6 +17,7 @@ pub use arena::{
 };
 
 pub use element::Element;
+pub(crate) use element::ElementTextRanges;
 pub use query_node::QueryNode;
 
 /// The result set returned by [`parse`](crate::parse).
@@ -53,6 +54,12 @@ pub struct Store<'html, 'query> {
     pub queries: Arena<QueryNode<'query>, QueryId>,
     /// Accumulated raw-text and normalized-text buffers shared by all elements.
     pub(crate) text: TextStore,
+    /// Index-aligned sidecar for raw/normalized text ranges.
+    ///
+    /// Remains unallocated (`None`) when no query requests text capture, so
+    /// inner-HTML-only / no-content workloads do not pay per-element text
+    /// range storage on [`Element`].
+    element_text_ranges: Option<Vec<ElementTextRanges>>,
     #[cfg(any(debug_assertions, test))]
     pub trace: crate::debug::TraceStore<'html, 'query>,
 }
@@ -115,6 +122,7 @@ impl<'html, 'query: 'html> Default for Store<'html, 'query> {
             queries: Arena::new(),
             text: TextStore::new(),
             attributes: Arena::new(),
+            element_text_ranges: None,
             #[cfg(any(debug_assertions, test))]
             trace: crate::debug::TraceStore::new(),
         }
@@ -157,9 +165,11 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     pub fn with_capacity_options(capacity: usize, options: CapacityOptions) -> Self {
         let element_divisor = options.element_bytes_per_slot.max(1);
         let attribute_divisor = options.attribute_bytes_per_slot.max(1);
+        let element_slots = capacity / element_divisor;
+        let tracks_text_ranges = options.reserve_raw_text || options.reserve_text;
 
         Self {
-            elements: Arena::with_capacity(capacity / element_divisor),
+            elements: Arena::with_capacity(element_slots),
             queries: Arena::new(),
             text: TextStore::with_capacity(
                 if options.reserve_raw_text {
@@ -170,9 +180,10 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
                 if options.reserve_text { capacity } else { 0 },
             ),
             attributes: Arena::with_capacity(capacity / attribute_divisor),
+            element_text_ranges: tracks_text_ranges.then(|| Vec::with_capacity(element_slots)),
             #[cfg(any(debug_assertions, test))]
             trace: crate::debug::TraceStore::with_capacity(
-                (capacity / element_divisor).min(options.trace_capacity_limit),
+                element_slots.min(options.trace_capacity_limit),
             ),
         }
     }
@@ -301,6 +312,9 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
 
         let index = ElementId(self.elements.len());
         self.elements.push(new_element);
+        if let Some(ranges) = &mut self.element_text_ranges {
+            ranges.push(ElementTextRanges::default());
+        }
 
         let query_id = match existing_id {
             Some(id) => id,
@@ -354,10 +368,14 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
         #[cfg(any(debug_assertions, test))]
         let has_text = text.is_some();
 
-        let element = &mut self.elements[element_id];
-        element.inner_html = inner_html;
-        element.raw_text = raw_text;
-        element.text = text;
+        self.elements[element_id].inner_html = inner_html;
+        if raw_text.is_some() || text.is_some() {
+            self.ensure_element_text_ranges();
+            let ranges = &mut self.element_text_ranges.as_mut().expect("text ranges")
+                [element_id.index()];
+            ranges.raw_text = raw_text;
+            ranges.text = text;
+        }
 
         crate::scah_trace!(
             self,
@@ -369,6 +387,35 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
                 has_text,
             }
         );
+    }
+
+    #[inline]
+    pub(crate) fn element_text_range(&self, element_id: ElementId) -> Option<&ElementTextRanges> {
+        self.element_text_ranges
+            .as_ref()
+            .and_then(|ranges| ranges.get(element_id.index()))
+    }
+
+    /// Ensure the text-range sidecar is allocated and index-aligned with elements.
+    fn ensure_element_text_ranges(&mut self) {
+        let len = self.elements.len();
+        match &mut self.element_text_ranges {
+            Some(ranges) => {
+                if ranges.len() < len {
+                    ranges.resize_with(len, ElementTextRanges::default);
+                }
+            }
+            None => {
+                let mut ranges = Vec::with_capacity(len);
+                ranges.resize_with(len, ElementTextRanges::default);
+                self.element_text_ranges = Some(ranges);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracks_element_text_ranges(&self) -> bool {
+        self.element_text_ranges.is_some()
     }
 }
 
@@ -385,6 +432,7 @@ mod tests {
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
         assert_eq!(store.text.raw_text.capacity(), 30_000);
         assert_eq!(store.text.text.capacity(), 30_000);
+        assert!(store.tracks_element_text_ranges());
     }
 
     #[test]
@@ -402,6 +450,7 @@ mod tests {
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
         assert_eq!(store.text.raw_text.capacity(), 0);
         assert_eq!(store.text.text.capacity(), 0);
+        assert!(!store.tracks_element_text_ranges());
     }
 
     #[test]
@@ -419,6 +468,11 @@ mod tests {
         assert_eq!(store.attributes.capacity(), 30_000 / 24);
         assert_eq!(store.text.raw_text.capacity(), 30_000);
         assert_eq!(store.text.text.capacity(), 30_000);
+        assert!(store.tracks_element_text_ranges());
+        assert_eq!(
+            store.element_text_ranges.as_ref().unwrap().capacity(),
+            30_000 / 48
+        );
     }
 
     #[test]
@@ -434,6 +488,46 @@ mod tests {
 
         assert_eq!(store.text.raw_text.capacity(), 30_000);
         assert_eq!(store.text.text.capacity(), 0);
+        assert!(store.tracks_element_text_ranges());
+    }
+
+    #[test]
+    fn parse_inner_html_only_skips_text_range_sidecar() {
+        let html = "<p>one</p><p>two</p>";
+        let query = Query::all("p", Save::only_inner_html()).unwrap().build();
+        let queries = [query];
+        let store = crate::parse(html, &queries).unwrap();
+        assert!(!store.tracks_element_text_ranges());
+        assert_eq!(store.elements.len(), 2);
+    }
+
+    #[test]
+    fn parse_text_modes_keep_sidecar_aligned_with_elements() {
+        let html = "<p class=\"x\">A</p><p>B</p>";
+        let queries = [
+            Query::all("p", Save::only_text()).unwrap().build(),
+            Query::all("p.x", Save::only_raw_text()).unwrap().build(),
+        ];
+        let store = crate::parse(html, &queries).unwrap();
+        assert!(store.tracks_element_text_ranges());
+        let ranges = store.element_text_ranges.as_ref().unwrap();
+        assert_eq!(ranges.len(), store.elements.len());
+        assert_eq!(store.elements.len(), 3);
+    }
+
+
+    #[test]
+    fn element_layout_drops_inactive_text_range_fields() {
+        use std::mem::size_of;
+        if size_of::<usize>() == 8 {
+            // main Element was 136 with one Option<Range>; with text ranges moved
+            // to the sidecar, Element should be smaller than that.
+            assert!(
+                size_of::<Element>() <= 128,
+                "Element unexpectedly large: {}",
+                size_of::<Element>()
+            );
+        }
     }
 
     #[test]
