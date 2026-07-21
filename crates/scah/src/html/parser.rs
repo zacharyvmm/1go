@@ -26,42 +26,6 @@ struct ParserTempState<'html> {
 #[derive(Default)]
 struct SiblingParserState {
     callback_arena: Vec<SiblingCallback>,
-    callback_ranges: Vec<SiblingCallbackRange>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SiblingCallbackRange {
-    source_depth: crate::engine::DepthSize,
-    callback_start: u32,
-}
-
-impl SiblingParserState {
-    fn record_callback_range(
-        &mut self,
-        source_depth: crate::engine::DepthSize,
-        callback_start: usize,
-    ) {
-        self.callback_ranges.push(SiblingCallbackRange {
-            source_depth,
-            callback_start: callback_start
-                .try_into()
-                .expect("sibling callback arena exceeded u32 index capacity"),
-        });
-    }
-
-    fn take_callback_start(&mut self, source_depth: crate::engine::DepthSize) -> Option<usize> {
-        if self
-            .callback_ranges
-            .last()
-            .is_some_and(|range| range.source_depth == source_depth)
-        {
-            self.callback_ranges
-                .pop()
-                .map(|range| range.callback_start as usize)
-        } else {
-            None
-        }
-    }
 }
 
 impl ParserTempState<'_> {
@@ -582,11 +546,8 @@ where
                         );
                     }
                     if self.temp_state.sibling_callback_arena().len() != callback_start {
-                        self.temp_state
-                            .sibling
-                            .as_mut()
-                            .expect("sibling parser path requires sibling state")
-                            .record_callback_range(self.position.element_depth, callback_start);
+                        self.open_elements
+                            .attach_sibling_callback_start(callback_start);
                     }
                 }
 
@@ -794,12 +755,7 @@ where
             self.selectors
                 .back(open_element.name, &self.position, reader, &mut self.store);
 
-        let callback_start = self
-            .temp_state
-            .sibling
-            .as_mut()
-            .expect("sibling parser path requires sibling state")
-            .take_callback_start(close_depth);
+        let callback_start = open_element.sibling_callback_start();
         self.finish_sibling_callback_range(callback_start, close_depth, activate_sibling_callbacks);
 
         early_exit
@@ -990,15 +946,6 @@ where
             self.temp_state.sibling_callback_arena().is_empty(),
             "sibling callback arena leaked callbacks after EOF"
         );
-        debug_assert!(
-            self.temp_state
-                .sibling
-                .as_ref()
-                .expect("sibling parser path requires sibling state")
-                .callback_ranges
-                .is_empty(),
-            "sibling callback range stack leaked entries after EOF"
-        );
         self.eof_drained = true;
     }
 }
@@ -1025,20 +972,8 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn parser_temp_state_keeps_sibling_mode_pointer_sized() {
-        assert_eq!(std::mem::size_of::<SiblingParserState>(), 48);
+        assert_eq!(std::mem::size_of::<SiblingParserState>(), 24);
         assert_eq!(std::mem::size_of::<ParserTempState<'_>>(), 80);
-    }
-
-    #[test]
-    fn sibling_callback_ranges_follow_nested_depth_lifo_order() {
-        let mut state = SiblingParserState::default();
-        state.record_callback_range(1, 0);
-        state.record_callback_range(2, 7);
-
-        assert_eq!(state.take_callback_start(3), None);
-        assert_eq!(state.take_callback_start(2), Some(7));
-        assert_eq!(state.take_callback_start(1), Some(0));
-        assert!(state.callback_ranges.is_empty());
     }
 
     #[test]

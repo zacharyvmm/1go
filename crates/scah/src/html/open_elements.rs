@@ -3,6 +3,8 @@ use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
 use crate::store::ElementId;
 
+const NO_SIBLING_CALLBACKS: u32 = u32::MAX;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SavedElement {
     pub element_id: ElementId,
@@ -14,7 +16,16 @@ pub(crate) struct SavedElement {
 pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
     tag: TagFlags,
+    sibling_callback_start: u32,
     pub saved: Vec<SavedElement>,
+}
+
+impl OpenElement<'_> {
+    #[inline(always)]
+    pub(crate) fn sibling_callback_start(&self) -> Option<usize> {
+        (self.sibling_callback_start != NO_SIBLING_CALLBACKS)
+            .then_some(self.sibling_callback_start as usize)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -48,6 +59,7 @@ impl<'html> OpenElementStack<'html> {
         self.entries.push(OpenElement {
             name,
             tag,
+            sibling_callback_start: NO_SIBLING_CALLBACKS,
             saved: Vec::new(),
         });
         Ok(())
@@ -71,6 +83,21 @@ impl<'html> OpenElementStack<'html> {
                 text_content_start,
             });
         }
+    }
+
+    pub(crate) fn attach_sibling_callback_start(&mut self, start: usize) {
+        let start: u32 = start
+            .try_into()
+            .expect("sibling callback arena exceeded u32 index capacity");
+        let open_element = self
+            .entries
+            .last_mut()
+            .expect("non-void sibling source must be on the open stack");
+        debug_assert_eq!(
+            open_element.sibling_callback_start, NO_SIBLING_CALLBACKS,
+            "callbacks attached to one open element more than once"
+        );
+        open_element.sibling_callback_start = start;
     }
 
     #[cfg(test)]
@@ -198,6 +225,17 @@ mod tests {
     #[test]
     fn open_element_size_is_compact() {
         assert_eq!(std::mem::size_of::<OpenElement<'_>>(), 48);
+    }
+
+    #[test]
+    fn sibling_callback_start_round_trips_through_open_stack() {
+        let mut stack = OpenElementStack::default();
+        stack.push("div").unwrap();
+        assert_eq!(stack.entries[0].sibling_callback_start(), None);
+
+        stack.attach_sibling_callback_start(7);
+        let closed = stack.close_by_end_tag("div");
+        assert_eq!(closed[0].sibling_callback_start(), Some(7));
     }
 
     #[test]

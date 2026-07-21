@@ -538,6 +538,7 @@ impl ScopedCursor {
 }
 
 impl<'query> ScopedCursor {
+    #[inline(always)]
     pub fn next<'html, Q: QuerySpec<'query>>(
         &self,
         tree: &Q,
