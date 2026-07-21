@@ -443,6 +443,53 @@ where
         }
     }
 
+    /// Admit a cursor for a query set whose cached features contain no sibling
+    /// combinators. Keeping this dispatch physically separate prevents the
+    /// sibling-watcher admission scan from entering the ordinary spawn graph.
+    fn try_push_plain_cursor(
+        &mut self,
+        candidate: ScopedCursor,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner: RunnerId,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
+            'html,
+            'query,
+        >,
+        create_reason: Option<ScopedCursorReason>,
+    ) -> SpawnOutcome {
+        if self.first_scope_is_claimed(&candidate) {
+            #[cfg(any(debug_assertions, test))]
+            {
+                if let Some(winner) = self.cursors.iter().rev().find(|cursor| {
+                    cursor.position.selection == candidate.position.selection
+                        && cursor.parent == candidate.parent
+                        && cursor.is_first_winner()
+                }) {
+                    Self::trace_cursor_suppressed(
+                        store,
+                        runner,
+                        &candidate,
+                        winner,
+                        CursorSuppressionReason::FirstScopeClaimed,
+                    );
+                }
+            }
+            return SpawnOutcome::Dominated;
+        }
+
+        match self.query.get_transition(candidate.position.state).guard {
+            Combinator::Descendant => {
+                self.try_push_descendant(candidate, runner, store, create_reason)
+            }
+            Combinator::Child => self.try_push_child(candidate, runner, store, create_reason),
+            Combinator::Namespace => {
+                self.finish_push_cursor(candidate, runner, store, create_reason)
+            }
+            Combinator::NextSibling | Combinator::SubsequentSibling => {
+                unreachable!("plain executor received a sibling transition")
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn dispatch_sibling_continuations(
         &mut self,
@@ -672,7 +719,7 @@ where
                     }
 
                     if !terminal_first && let Some(anchor) = anchor_candidate {
-                        let _ = self.try_push_cursor(
+                        let _ = self.try_push_plain_cursor(
                             anchor,
                             runner,
                             store,
@@ -683,7 +730,7 @@ where
                     spawned_positions = self.cursors[i].next_positions(self.query);
                     for pos in &spawned_positions {
                         let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
-                        let _ = self.try_push_cursor(continuation, runner, store, None);
+                        let _ = self.try_push_plain_cursor(continuation, runner, store, None);
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
@@ -769,13 +816,14 @@ where
 
                     for pos in &spawned_positions {
                         let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
-                        let _ = self.try_push_cursor(continuation, runner, store, None);
+                        let _ = self.try_push_plain_cursor(continuation, runner, store, None);
                     }
                 }
             }
         }
     }
 
+    #[inline(always)]
     pub(crate) fn next_with_siblings(
         &mut self,
         runner: RunnerId,

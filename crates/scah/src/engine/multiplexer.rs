@@ -290,6 +290,7 @@ where
         }
     }
 
+    #[inline(never)]
     pub(crate) fn next_with_siblings_into(
         &mut self,
         xhtml_element: &XHtmlElement<'html>,
