@@ -850,3 +850,52 @@ fn selected_cells_after_preserved_newline_exclude_neighbor_tabs() {
     assert_eq!(cells[0].text(&store), Some("A\n"));
     assert_eq!(cells[1].text(&store), Some("B"));
 }
+
+// --- Generated block newlines at cell boundaries must become tabs ---
+
+#[test]
+fn block_at_end_of_cell_keeps_column_boundary() {
+    let html = "<table><tr><td><div>A</div></td><td>B</td></tr></table>";
+
+    assert_eq!(text_of(html, "table"), "A\tB");
+}
+
+#[test]
+fn mixed_block_content_keeps_terminal_cell_boundary() {
+    let html = "<table><tr><td>A<div>B</div></td><td>C</td></tr></table>";
+
+    assert_eq!(text_of(html, "table"), "A\nB\tC");
+}
+
+#[test]
+fn nested_blocks_in_cell_keep_terminal_boundary() {
+    let html = "<table><tr><td><div>A</div><div>B</div></td><td>C</td></tr></table>";
+
+    assert_eq!(text_of(html, "table"), "A\nB\tC");
+}
+
+#[test]
+fn block_cell_boundary_does_not_leak_into_selected_cells() {
+    let html = "<table><tr><td><div>A</div></td><td>B</td></tr></table>";
+
+    let queries = &[
+        Query::all("table", Save::only_text()).unwrap().build(),
+        Query::all("td", Save::only_text()).unwrap().build(),
+    ];
+
+    let store = parse(html, queries).unwrap();
+
+    let table = store.get("table").unwrap().next().unwrap();
+    assert_eq!(table.text(&store), Some("A\tB"));
+
+    let cells: Vec<_> = store.get("td").unwrap().collect();
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0].text(&store), Some("A"));
+    assert_eq!(cells[1].text(&store), Some("B"));
+}
+
+#[test]
+fn multi_row_table_still_uses_row_newlines() {
+    let html = "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>";
+    assert_eq!(text_of(html, "table"), "A\tB\nC\tD");
+}

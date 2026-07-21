@@ -201,6 +201,21 @@ impl ParserTextState {
         }
     }
 
+    /// Queue a table-cell column boundary, replacing any pending separator.
+    ///
+    /// Unlike [`Self::queue_separator`], this does not use ranking. A pending
+    /// end-of-cell block newline (from a closed `div`, `p`, etc.) must become
+    /// the cell's structural tab so the next cell remains distinguishable.
+    /// Row closure still upgrades that tab to a line break via ordinary
+    /// ranking (`Tab + LineBreak => LineBreak`).
+    #[inline]
+    pub fn queue_cell_boundary(&mut self) {
+        if !self.captures_text() || self.suppressed_depth > 0 {
+            return;
+        }
+        self.pending = PendingSeparator::Tab;
+    }
+
     /// Emit a pending separator with canonical physical form.
     ///
     /// Append-only: never removes bytes already written to the tape. Generated
@@ -477,6 +492,12 @@ impl ParserTextState {
 ///   ordinary collapsed mode (`Space`/`Tab` vs `LineBreak` ranking collapses
 ///   mixed pending separators before either is written)
 ///
+/// Table-cell column boundaries are an exception: closing a cell uses
+/// [`ParserTextState::queue_cell_boundary`], which assigns `Tab` and replaces
+/// any pending end-of-cell separator (including a generated block `LineBreak`).
+/// Row closure still upgrades that tab via ordinary ranking
+/// (`Tab + LineBreak => LineBreak`).
+///
 /// Literal preformatted whitespace already on the tape is never removed or
 /// rewritten. Trailing literal spaces/newlines followed by a structural tab
 /// (table cell boundary) or newline are valid, e.g. `"A \tB"` / `"A\n\tB"`.
@@ -633,6 +654,38 @@ mod tests {
         state.queue_separator(PendingSeparator::Space);
         state.queue_separator(PendingSeparator::LineBreak);
         state.flush_pending(&mut tape);
+        assert_eq!(tape.slice(0..tape.len()), "A\n");
+    }
+
+    #[test]
+    fn cell_boundary_replaces_pending_linebreak() {
+        let mut state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        let mut tape = TextTape::new();
+
+        tape.push_str("A");
+        state.queue_separator(PendingSeparator::LineBreak);
+        state.queue_cell_boundary();
+        state.flush_pending(&mut tape);
+
+        assert_eq!(tape.slice(0..tape.len()), "A\t");
+    }
+
+    #[test]
+    fn row_boundary_upgrades_pending_cell_tab_to_linebreak() {
+        let mut state = ParserTextState::new(TextRequirements {
+            raw_text: false,
+            text: true,
+        });
+        let mut tape = TextTape::new();
+
+        tape.push_str("A");
+        state.queue_cell_boundary();
+        state.queue_separator(PendingSeparator::LineBreak);
+        state.flush_pending(&mut tape);
+
         assert_eq!(tape.slice(0..tape.len()), "A\n");
     }
 

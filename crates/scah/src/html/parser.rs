@@ -486,9 +486,15 @@ where
             if !open_element
                 .text_flags
                 .contains(TextElementFlags::SUPPRESSED)
-                && let Some(separator) = open_element.tag().post_text_separator()
             {
-                self.text_state.queue_separator(separator);
+                let tag = open_element.tag();
+                if tag.is_text_cell() {
+                    // Cell close must replace any pending end-of-cell separator
+                    // (e.g. a generated block LineBreak) with the column tab.
+                    self.text_state.queue_cell_boundary();
+                } else if let Some(separator) = tag.post_text_separator() {
+                    self.text_state.queue_separator(separator);
+                }
             }
         }
         self.position.element_depth = close_depth;
