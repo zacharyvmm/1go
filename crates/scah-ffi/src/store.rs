@@ -4,7 +4,9 @@
 //! [`ScahElementList`]. There is no per-result C heap allocation: language
 //! bindings keep one list owner and copy integer IDs.
 
-use crate::error::{ScahError, ScahStatus, ffi_guard, ffi_guard_value, ffi_guard_void, set_error};
+use crate::error::{
+    ScahError, ScahStatus, ffi_guard, ffi_guard_leaf, ffi_guard_value, ffi_guard_void, set_error,
+};
 use crate::owned_store::OwnedStore;
 use crate::query::ScahQuery;
 use crate::string::{ScahOptionalStringView, ScahStringView};
@@ -402,7 +404,7 @@ pub unsafe extern "C" fn scah_store_len(
 ) -> ScahStatus {
     unsafe {
         clear_out_usize(out_len);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let store = require_ref(store)?;
             if out_len.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -559,7 +561,7 @@ pub unsafe extern "C" fn scah_element_list_len(
 ) -> ScahStatus {
     unsafe {
         clear_out_usize(out_len);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(list)?;
             if out_len.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -591,7 +593,7 @@ pub unsafe extern "C" fn scah_element_list_fill_ids(
 ) -> ScahStatus {
     unsafe {
         clear_out_usize(out_written);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(list)?;
             if out_written.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -694,7 +696,7 @@ pub unsafe extern "C" fn scah_element_name(
 ) -> ScahStatus {
     unsafe {
         clear_out_string_view(out_name);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_name.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -721,7 +723,7 @@ pub unsafe extern "C" fn scah_element_id(
 ) -> ScahStatus {
     unsafe {
         clear_out_optional_string_view(out_id);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_id.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -747,7 +749,7 @@ pub unsafe extern "C" fn scah_element_class_name(
 ) -> ScahStatus {
     unsafe {
         clear_out_optional_string_view(out_class);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_class.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -773,7 +775,7 @@ pub unsafe extern "C" fn scah_element_inner_html(
 ) -> ScahStatus {
     unsafe {
         clear_out_optional_string_view(out_html);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_html.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -799,7 +801,7 @@ pub unsafe extern "C" fn scah_element_text_content(
 ) -> ScahStatus {
     unsafe {
         clear_out_optional_string_view(out_text);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_text.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -827,7 +829,7 @@ pub unsafe extern "C" fn scah_element_view(
 ) -> ScahStatus {
     unsafe {
         clear_out_element_view(out_view);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_view.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -869,7 +871,7 @@ pub unsafe extern "C" fn scah_element_get_attribute(
 ) -> ScahStatus {
     unsafe {
         clear_out_optional_string_view(out_value);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_value.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -898,7 +900,7 @@ pub unsafe extern "C" fn scah_element_attribute_count(
 ) -> ScahStatus {
     unsafe {
         clear_out_usize(out_count);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_count.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -938,7 +940,7 @@ pub unsafe extern "C" fn scah_element_attribute_at(
     unsafe {
         clear_out_string_view(out_key);
         clear_out_optional_string_view(out_value);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_key.is_null() || out_value.is_null() {
                 return Err(ScahStatus::NullPointer);
@@ -978,7 +980,7 @@ pub unsafe extern "C" fn scah_element_attributes_fill(
 ) -> ScahStatus {
     unsafe {
         clear_out_usize(out_written);
-        ffi_guard(out_error, || {
+        ffi_guard_leaf(out_error, || {
             let list = require_ref(owner)?;
             if out_written.is_null() {
                 return Err(ScahStatus::NullPointer);

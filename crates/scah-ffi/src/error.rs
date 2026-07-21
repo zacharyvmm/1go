@@ -95,6 +95,42 @@ where
     }
 }
 
+/// Hot-path guard for leaf getters that are written to be unwind-free.
+///
+/// In release builds this skips `catch_unwind` so per-call overhead stays close
+/// to a direct field read. Debug builds still catch panics. Call only from
+/// trivial accessors (null checks + option lookups; no allocation).
+///
+/// # Safety
+///
+/// Same as [`ffi_guard`]. `f` must not unwind in release builds.
+#[inline(always)]
+pub(crate) unsafe fn ffi_guard_leaf<F>(out_error: *mut *mut ScahError, f: F) -> ScahStatus
+where
+    F: FnOnce() -> Result<(), ScahStatus> + std::panic::UnwindSafe,
+{
+    unsafe {
+        clear_out_error(out_error);
+    }
+    if cfg!(debug_assertions) {
+        match catch_unwind(AssertUnwindSafe(f)) {
+            Ok(Ok(())) => ScahStatus::Ok,
+            Ok(Err(status)) => status,
+            Err(_) => {
+                unsafe {
+                    set_error(out_error, "internal panic in scah-ffi");
+                }
+                ScahStatus::InternalPanic
+            }
+        }
+    } else {
+        match f() {
+            Ok(()) => ScahStatus::Ok,
+            Err(status) => status,
+        }
+    }
+}
+
 /// Null-safe free / simple side-effect wrappers that must not unwind.
 pub(crate) fn ffi_guard_void<F>(f: F)
 where

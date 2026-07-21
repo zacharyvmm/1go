@@ -2,8 +2,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use scah_ffi::{
     ScahAttributeView, ScahElementId, ScahElementList, ScahError, ScahOptionalStringView,
-    ScahStatus, ScahStringView, scah_element_attribute_count, scah_element_attributes_fill,
-    scah_element_list_free, scah_error_free, scah_error_message,
+    ScahStatus, ScahStringView, scah_element_attributes_fill, scah_element_list_free,
+    scah_error_free, scah_error_message,
 };
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
@@ -145,7 +145,11 @@ pub fn take_store_get<T>(
     let status = unsafe { scah_store_len(store, &mut hint, &mut error) };
     map_status(status, error)?;
 
-    let mut ids = vec![0usize; hint];
+    let mut ids = Vec::with_capacity(hint);
+    // SAFETY: get_ids_fill writes every slot up to `written` (<= hint on success).
+    unsafe {
+        ids.set_len(hint);
+    }
     let mut written = 0usize;
     let mut list: *mut ScahElementList = std::ptr::null_mut();
     let mut found = 0u8;
@@ -169,7 +173,10 @@ pub fn take_store_get<T>(
                 scah_error_free(error);
             }
         }
-        ids.resize(written, 0);
+        ids = Vec::with_capacity(written);
+        unsafe {
+            ids.set_len(written);
+        }
         error = std::ptr::null_mut();
         let status = unsafe {
             scah_store_get_ids_fill(
@@ -213,7 +220,7 @@ pub fn take_element_get<T>(
 ) -> PyResult<Option<Vec<T>>> {
     use scah_ffi::scah_element_get_ids_fill;
 
-    let mut ids = vec![0usize; 8];
+    let mut stack = [0usize; 4];
     let mut written = 0usize;
     let mut found = 0u8;
     let mut error = std::ptr::null_mut();
@@ -222,8 +229,8 @@ pub fn take_element_get<T>(
             parent_owner.as_ptr(),
             element,
             string_view(query),
-            ids.as_mut_ptr(),
-            ids.len(),
+            stack.as_mut_ptr(),
+            stack.len(),
             &mut written,
             std::ptr::null_mut(),
             &mut found,
@@ -236,7 +243,10 @@ pub fn take_element_get<T>(
                 scah_error_free(error);
             }
         }
-        ids.resize(written.max(1), 0);
+        let mut ids = Vec::with_capacity(written);
+        unsafe {
+            ids.set_len(written);
+        }
         error = std::ptr::null_mut();
         let status = unsafe {
             scah_element_get_ids_fill(
@@ -252,17 +262,24 @@ pub fn take_element_get<T>(
             )
         };
         map_status(status, error)?;
-    } else {
-        map_status(status, error)?;
+        if found == 0 {
+            return Ok(None);
+        }
+        ids.truncate(written);
+        return Ok(Some(
+            ids.into_iter()
+                .map(|id| make(parent_owner.clone(), id))
+                .collect(),
+        ));
     }
-
+    map_status(status, error)?;
     if found == 0 {
         return Ok(None);
     }
-
-    ids.truncate(written);
     Ok(Some(
-        ids.into_iter()
+        stack[..written]
+            .iter()
+            .copied()
             .map(|id| make(parent_owner.clone(), id))
             .collect(),
     ))
@@ -275,38 +292,41 @@ pub fn fetch_attributes(
     owner: *const ScahElementList,
     id: ScahElementId,
 ) -> PyResult<Vec<ScahAttributeView>> {
-    let mut count = 0usize;
-    let mut error = std::ptr::null_mut();
-    let status = unsafe { scah_element_attribute_count(owner, id, &mut count, &mut error) };
-    map_status(status, error)?;
-
-    if count == 0 {
-        return Ok(Vec::new());
+    // Most elements have few extra attributes; try a small buffer first to
+    // avoid a separate attribute_count round-trip.
+    let mut capacity = 8usize;
+    loop {
+        let mut buf: Vec<MaybeUninit<ScahAttributeView>> = Vec::with_capacity(capacity);
+        unsafe {
+            buf.set_len(capacity);
+        }
+        let mut written = 0usize;
+        let mut error = std::ptr::null_mut();
+        let status = unsafe {
+            scah_element_attributes_fill(
+                owner,
+                id,
+                buf.as_mut_ptr() as *mut ScahAttributeView,
+                capacity,
+                &mut written,
+                &mut error,
+            )
+        };
+        if status == ScahStatus::BufferTooSmall {
+            if !error.is_null() {
+                unsafe {
+                    scah_error_free(error);
+                }
+            }
+            capacity = written.max(1);
+            continue;
+        }
+        map_status(status, error)?;
+        return Ok(buf
+            .into_iter()
+            .take(written)
+            // SAFETY: fill initialized the first `written` entries.
+            .map(|slot| unsafe { slot.assume_init() })
+            .collect());
     }
-
-    let mut buf: Vec<MaybeUninit<ScahAttributeView>> = Vec::with_capacity(count);
-    // SAFETY: capacity is exact; fill writes `count` initialized views.
-    unsafe {
-        buf.set_len(count);
-    }
-    let mut written = 0usize;
-    let mut error = std::ptr::null_mut();
-    let status = unsafe {
-        scah_element_attributes_fill(
-            owner,
-            id,
-            buf.as_mut_ptr() as *mut ScahAttributeView,
-            count,
-            &mut written,
-            &mut error,
-        )
-    };
-    map_status(status, error)?;
-
-    Ok(buf
-        .into_iter()
-        .take(written)
-        // SAFETY: fill initialized the first `written` entries.
-        .map(|slot| unsafe { slot.assume_init() })
-        .collect())
 }
