@@ -84,10 +84,12 @@ run_python_bench() {
   (
     cd "$worktree/crates/bindings/scah-python"
     uv sync -q
+    # Force a fresh extension build; editable installs can otherwise leave a stale .so.
+    uv pip install -e . --reinstall --no-cache -q
     if [[ "$SMOKE" == "1" ]]; then
-      uv run --with pytest python "$ROOT/scripts/bench-result-access.py" --smoke --output "$out_json"
+      .venv/bin/python "$ROOT/scripts/bench-result-access.py" --smoke --output "$out_json"
     else
-      uv run --with pytest python "$ROOT/scripts/bench-result-access.py" --samples 15 --output "$out_json"
+      .venv/bin/python "$ROOT/scripts/bench-result-access.py" --samples 15 --output "$out_json"
     fi
   )
 }

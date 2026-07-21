@@ -316,19 +316,84 @@ enum ScahStatus scah_store_get(const struct ScahStore *store,
                                uint8_t *out_found,
                                struct ScahError **out_error);
 
+// Create a store-retaining owner list with an empty span.
+//
+// Language bindings allocate one owner per parsed store and reuse it for all
+// element getters, avoiding a boxed list allocation on every lookup. Prefer
+// [`scah_store_get_span`] + [`scah_store_fill_ids`] for result materialization.
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. `out_owner` must be non-null.
+// On success the caller owns the list and must free it with
+// [`scah_element_list_free`].
+enum ScahStatus scah_store_owner(const struct ScahStore *store,
+                                 struct ScahElementList **out_owner,
+                                 struct ScahError **out_error);
+
+// Look up match span metadata without allocating a result list.
+//
+// On success with `*out_found == 1`, writes the first element id and the
+// match count (O(1) after query-node resolution). No owned outputs are
+// transferred.
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. `out_first`, `out_len`, and
+// `out_found` must be non-null.
+enum ScahStatus scah_store_get_span(const struct ScahStore *store,
+                                    struct ScahStringView query,
+                                    ScahElementId *out_first,
+                                    size_t *out_len,
+                                    uint8_t *out_found,
+                                    struct ScahError **out_error);
+
+// Copy `len` result IDs starting at `first` into a caller buffer.
+//
+// When `capacity < len`, returns [`ScahStatus::BufferTooSmall`] with
+// `*out_written = len` and no diagnostic allocation.
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. When `capacity > 0`, `out_ids`
+// must be writable for `capacity` IDs. `out_written` must be non-null.
+enum ScahStatus scah_store_fill_ids(const struct ScahStore *store,
+                                    ScahElementId first,
+                                    size_t len,
+                                    ScahElementId *out_ids,
+                                    size_t capacity,
+                                    size_t *out_written,
+                                    struct ScahError **out_error);
+
+// Copy `len` result IDs starting at `first` using a list owner's store.
+//
+// Same sizing contract as [`scah_store_fill_ids`].
+//
+// # Safety
+//
+// `owner` must point to a live [`ScahElementList`]. When `capacity > 0`,
+// `out_ids` must be writable for `capacity` IDs. `out_written` must be non-null.
+enum ScahStatus scah_element_list_fill_from(const struct ScahElementList *owner,
+                                            ScahElementId first,
+                                            size_t len,
+                                            ScahElementId *out_ids,
+                                            size_t capacity,
+                                            size_t *out_written,
+                                            struct ScahError **out_error);
+
 // Look up matches and copy IDs (and optionally names) into caller buffers.
 //
 // When `capacity` is smaller than the match count, returns
 // [`ScahStatus::BufferTooSmall`] and writes the required count to
-// `*out_written`. When `out_elements` is non-null, a span list is still
-// returned so the caller can finish with [`scah_element_list_fill_ids`]
-// without re-running the query. On success with `*out_found == 1` and a
-// non-null `out_elements`, the caller owns that list and must free it with
-// [`scah_element_list_free`].
+// `*out_written`. No owned list is transferred and no [`ScahError`] is
+// allocated for this expected capacity negotiation — use [`scah_store_get`]
+// then [`scah_element_list_fill_ids`] when the caller needs a list owner.
 //
 // Pass `out_elements == NULL` to only fill IDs (caller must keep the store
 // alive for subsequent element access). Pass `out_names == NULL` to skip
 // name materialization; when non-null it must have `capacity` slots.
+//
+// Owned outputs are transferred only when status is [`ScahStatus::Ok`].
 //
 // # Safety
 //
@@ -569,6 +634,20 @@ enum ScahStatus scah_element_get(const struct ScahElementList *owner,
                                  uint8_t *out_found,
                                  struct ScahError **out_error);
 
+// Nested lookup that returns span metadata without allocating a child list.
+//
+// # Safety
+//
+// Same owner/element/query requirements as [`scah_element_get`]. `out_first`,
+// `out_len`, and `out_found` must be non-null.
+enum ScahStatus scah_element_get_span(const struct ScahElementList *owner,
+                                      ScahElementId element,
+                                      struct ScahStringView query,
+                                      ScahElementId *out_first,
+                                      size_t *out_len,
+                                      uint8_t *out_found,
+                                      struct ScahError **out_error);
+
 // Nested lookup that copies child IDs into a caller buffer in one pass.
 //
 // # Safety
@@ -585,6 +664,117 @@ enum ScahStatus scah_element_get_ids_fill(const struct ScahElementList *owner,
                                           struct ScahElementList **out_elements,
                                           uint8_t *out_found,
                                           struct ScahError **out_error);
+
+// Element tag name via store handle (no result-list owner required).
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. `element` must be a bounds-valid
+// store element id. `out_name` must be non-null and valid for writing one
+// [`ScahStringView`]. The returned view is valid only while `store` remains
+// alive. When `out_error` is non-null, it must be valid for writing one
+// `*mut ScahError`.
+enum ScahStatus scah_store_element_name(const struct ScahStore *store,
+                                        ScahElementId element,
+                                        struct ScahStringView *out_name,
+                                        struct ScahError **out_error);
+
+// Element `id` attribute via store handle.
+//
+// # Safety
+//
+// Same store/element requirements as [`scah_store_element_name`]. `out_id`
+// must be non-null. Returned string data is valid only while `store` remains
+// alive.
+enum ScahStatus scah_store_element_id(const struct ScahStore *store,
+                                      ScahElementId element,
+                                      struct ScahOptionalStringView *out_id,
+                                      struct ScahError **out_error);
+
+// Element `class` attribute via store handle.
+//
+// # Safety
+//
+// Same requirements as [`scah_store_element_id`].
+enum ScahStatus scah_store_element_class_name(const struct ScahStore *store,
+                                              ScahElementId element,
+                                              struct ScahOptionalStringView *out_class,
+                                              struct ScahError **out_error);
+
+// Element inner HTML via store handle.
+//
+// # Safety
+//
+// Same requirements as [`scah_store_element_id`].
+enum ScahStatus scah_store_element_inner_html(const struct ScahStore *store,
+                                              ScahElementId element,
+                                              struct ScahOptionalStringView *out_html,
+                                              struct ScahError **out_error);
+
+// Element text content via store handle.
+//
+// # Safety
+//
+// Same requirements as [`scah_store_element_id`].
+enum ScahStatus scah_store_element_text_content(const struct ScahStore *store,
+                                                ScahElementId element,
+                                                struct ScahOptionalStringView *out_text,
+                                                struct ScahError **out_error);
+
+// Look up a single attribute by name via store handle.
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. `key` must satisfy
+// [`ScahStringView::as_str`]. `out_value` must be non-null. Returned string
+// data is valid only while `store` remains alive.
+enum ScahStatus scah_store_element_get_attribute(const struct ScahStore *store,
+                                                 ScahElementId element,
+                                                 struct ScahStringView key,
+                                                 struct ScahOptionalStringView *out_value,
+                                                 struct ScahError **out_error);
+
+// Fill extra attributes via store handle.
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. When `capacity > 0`,
+// `out_attributes` must point to a writable array of `capacity`
+// [`ScahAttributeView`] values. `out_written` must be non-null. Returned
+// string data is valid only while `store` remains alive.
+enum ScahStatus scah_store_element_attributes_fill(const struct ScahStore *store,
+                                                   ScahElementId element,
+                                                   struct ScahAttributeView *out_attributes,
+                                                   size_t capacity,
+                                                   size_t *out_written,
+                                                   struct ScahError **out_error);
+
+// Nested lookup via store handle (no child list allocation).
+//
+// # Safety
+//
+// `store` must point to a live [`ScahStore`]. `query` must satisfy
+// [`ScahStringView::as_str`]. When `capacity > 0`, `out_ids` must be writable
+// for `capacity` IDs. `out_written` and `out_found` must be non-null.
+enum ScahStatus scah_store_element_get_ids_fill(const struct ScahStore *store,
+                                                ScahElementId element,
+                                                struct ScahStringView query,
+                                                ScahElementId *out_ids,
+                                                size_t capacity,
+                                                size_t *out_written,
+                                                uint8_t *out_found,
+                                                struct ScahError **out_error);
+
+// Fixed-field element snapshot via store handle.
+//
+// # Safety
+//
+// Same store/element requirements as [`scah_store_element_name`]. `out_view`
+// must be non-null. All string views remain valid while `store` remains alive.
+enum ScahStatus scah_store_element_view(const struct ScahStore *store,
+                                        ScahElementId element,
+                                        struct ScahElementView *out_view,
+                                        struct ScahError **out_error);
 
 // Capture neither inner HTML nor text content.
 struct ScahSave scah_save_none(void);

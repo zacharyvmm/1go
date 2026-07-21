@@ -140,6 +140,19 @@ static void bench_store_get(void *ctx) {
   scah_element_list_free(list);
 }
 
+static void bench_store_get_span(void *ctx) {
+  BenchCtx *b = ctx;
+  ScahError *err = NULL;
+  ScahElementId first = 0;
+  size_t len = 0;
+  uint8_t found = 0;
+  ScahStringView q = {.data = (const uint8_t *)"a", .len = 1};
+  if (scah_store_get_span(b->store, q, &first, &len, &found, &err) != ScahStatus_Ok || !found)
+    die("store_get_span");
+  volatile size_t sink = first + len;
+  (void)sink;
+}
+
 static void bench_store_get_ids_fill(void *ctx) {
   BenchCtx *b = ctx;
   ScahError *err = NULL;
@@ -150,6 +163,7 @@ static void bench_store_get_ids_fill(void *ctx) {
   ScahElementList *list = NULL;
   ScahStatus st = scah_store_get_ids_fill(b->store, q, stack, NULL, 16, &written, &list, &found, &err);
   if (st == ScahStatus_BufferTooSmall) {
+    /* Capacity negotiation: no owned list, no diagnostic. Retry with exact size. */
     ScahElementId *ids = malloc(written * sizeof(ScahElementId));
     if (!ids) abort();
     size_t capacity = written;
@@ -161,6 +175,25 @@ static void bench_store_get_ids_fill(void *ctx) {
   }
   if (st != ScahStatus_Ok || !found) die("store_get_ids_fill");
   scah_element_list_free(list);
+}
+
+static void bench_store_span_fill(void *ctx) {
+  BenchCtx *b = ctx;
+  ScahError *err = NULL;
+  ScahStringView q = {.data = (const uint8_t *)"a", .len = 1};
+  ScahElementId first = 0;
+  size_t len = 0;
+  uint8_t found = 0;
+  if (scah_store_get_span(b->store, q, &first, &len, &found, &err) != ScahStatus_Ok || !found)
+    die("span meta");
+  ScahElementId *ids = malloc(len * sizeof(ScahElementId));
+  if (!ids) abort();
+  size_t written = 0;
+  if (scah_store_fill_ids(b->store, first, len, ids, len, &written, &err) != ScahStatus_Ok)
+    die("span fill");
+  volatile size_t sink = written;
+  (void)sink;
+  free(ids);
 }
 
 static void bench_list_fill_ids(void *ctx) {
@@ -348,6 +381,14 @@ int main(int argc, char **argv) {
     SampleStats s = measure(name, bench_store_get, &ctx, samples, fixed_iters, smoke);
     print_stat(&s, first);
     first = 0;
+
+    snprintf(name, sizeof(name), "c_store_get_span_%zu", n);
+    s = measure(name, bench_store_get_span, &ctx, samples, fixed_iters, smoke);
+    print_stat(&s, 0);
+
+    snprintf(name, sizeof(name), "c_store_span_fill_%zu", n);
+    s = measure(name, bench_store_span_fill, &ctx, samples, fixed_iters, smoke);
+    print_stat(&s, 0);
 
     snprintf(name, sizeof(name), "c_store_get_ids_fill_%zu", n);
     s = measure(name, bench_store_get_ids_fill, &ctx, samples, fixed_iters, smoke);

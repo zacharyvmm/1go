@@ -2,21 +2,18 @@ use napi::Result;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use scah_ffi::{
-    ScahElementId, ScahElementList, ScahOptionalStringView, ScahStatus, ScahStringView,
-    scah_element_class_name, scah_element_get_attribute, scah_element_id, scah_element_inner_html,
-    scah_element_name, scah_element_text_content, scah_element_view,
+    ScahElementId, ScahOptionalStringView, ScahStatus, ScahStore, ScahStringView,
+    scah_store_element_class_name, scah_store_element_get_attribute, scah_store_element_id,
+    scah_store_element_inner_html, scah_store_element_name, scah_store_element_text_content,
+    scah_store_element_view,
 };
 use std::sync::Arc;
 
 use crate::ffi::{
-    ElementListOwner, fetch_attributes, map_status, optional_view_to_option, string_view,
-    take_element_get, view_as_str,
+    StoreOwner, map_status, optional_view_to_option, string_view, take_element_get, view_as_str,
+    with_attributes,
 };
 
-/// Public JSON shape for [`JsElement::to_json`].
-///
-/// Declared for TypeScript generation; the runtime builds a plain object so
-/// optional fields remain `undefined` when absent.
 #[napi(object)]
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -32,16 +29,25 @@ pub struct JsonElement {
 
 #[napi(js_name = "Element")]
 pub struct JsElement {
-    pub(crate) owner: Arc<ElementListOwner>,
+    pub(crate) owner: Arc<StoreOwner>,
     pub(crate) id: ScahElementId,
+    cached_name: Option<&'static str>,
 }
 
 impl JsElement {
-    pub(crate) fn new(owner: Arc<ElementListOwner>, id: ScahElementId) -> Self {
-        Self { owner, id }
+    pub(crate) fn new(
+        owner: Arc<StoreOwner>,
+        id: ScahElementId,
+        cached_name: Option<&'static str>,
+    ) -> Self {
+        Self {
+            owner,
+            id,
+            cached_name,
+        }
     }
 
-    fn list_ptr(&self) -> *const ScahElementList {
+    fn store_ptr(&self) -> *const ScahStore {
         self.owner.as_ptr()
     }
 }
@@ -59,7 +65,8 @@ impl JsElement {
             attribute_count: 0,
         };
         let mut error = std::ptr::null_mut();
-        let status = unsafe { scah_element_view(self.list_ptr(), self.id, &mut view, &mut error) };
+        let status =
+            unsafe { scah_store_element_view(self.store_ptr(), self.id, &mut view, &mut error) };
         map_status(status, error)?;
 
         let mut object = Object::new(&env)?;
@@ -86,9 +93,13 @@ impl JsElement {
 
     #[napi(getter)]
     pub fn name(&self) -> Result<&str> {
+        if let Some(name) = self.cached_name {
+            return Ok(name);
+        }
         let mut out = ScahStringView::empty();
-        let status =
-            unsafe { scah_element_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
+        let status = unsafe {
+            scah_store_element_name(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
+        };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
         }
@@ -99,7 +110,7 @@ impl JsElement {
     pub fn class_name(&self) -> Result<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_class_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+            scah_store_element_class_name(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
         };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
@@ -110,8 +121,9 @@ impl JsElement {
     #[napi(getter)]
     pub fn id(&self) -> Result<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
-        let status =
-            unsafe { scah_element_id(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
+        let status = unsafe {
+            scah_store_element_id(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
+        };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
         }
@@ -122,8 +134,8 @@ impl JsElement {
     pub fn get_attribute(&self, key: String) -> Result<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_get_attribute(
-                self.list_ptr(),
+            scah_store_element_get_attribute(
+                self.store_ptr(),
                 self.id,
                 string_view(&key),
                 &mut out,
@@ -138,21 +150,22 @@ impl JsElement {
 
     #[napi(getter, ts_return_type = "Record<string, string | null>")]
     pub fn attributes(&self, env: Env) -> Result<Object<'_>> {
-        let attrs = fetch_attributes(self.list_ptr(), self.id)?;
-        let mut object = Object::new(&env)?;
-        for attr in attrs {
-            let key = unsafe { view_as_str(attr.key) };
-            let value = optional_view_to_option(attr.value);
-            object.set(key, value)?;
-        }
-        Ok(object)
+        with_attributes(self.store_ptr(), self.id, |attrs| {
+            let mut object = Object::new(&env)?;
+            for attr in attrs {
+                let key = unsafe { view_as_str(attr.key) };
+                let value = optional_view_to_option(attr.value);
+                object.set(key, value)?;
+            }
+            Ok(object)
+        })
     }
 
     #[napi(getter)]
     pub fn inner_html(&self) -> Result<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_inner_html(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+            scah_store_element_inner_html(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
         };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;
@@ -164,7 +177,12 @@ impl JsElement {
     pub fn text_content(&self) -> Result<Option<&str>> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_text_content(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+            scah_store_element_text_content(
+                self.store_ptr(),
+                self.id,
+                &mut out,
+                std::ptr::null_mut(),
+            )
         };
         if status != ScahStatus::Ok {
             map_status(status, std::ptr::null_mut())?;

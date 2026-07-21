@@ -80,6 +80,28 @@ impl ScahStringView {
         let bytes = unsafe { slice::from_raw_parts(self.data, self.len) };
         std::str::from_utf8(bytes).map_err(|_| ScahStatus::InvalidUtf8)
     }
+
+    /// Interpret this view as UTF-8 without re-validation.
+    ///
+    /// Intended for audited leaf ABI paths where the caller (including Rust
+    /// bindings) already guarantees valid UTF-8. Invalid input is UB.
+    ///
+    /// # Safety
+    ///
+    /// Same pointer/lifetime requirements as [`Self::as_str`], and the bytes
+    /// must be valid UTF-8.
+    #[inline(always)]
+    pub(crate) unsafe fn as_str_unchecked<'a>(self) -> Result<&'a str, ScahStatus> {
+        if self.data.is_null() {
+            if self.len == 0 {
+                return Ok("");
+            }
+            return Err(ScahStatus::NullPointer);
+        }
+        let bytes = unsafe { slice::from_raw_parts(self.data, self.len) };
+        debug_assert!(std::str::from_utf8(bytes).is_ok());
+        Ok(unsafe { std::str::from_utf8_unchecked(bytes) })
+    }
 }
 
 impl ScahOptionalStringView {

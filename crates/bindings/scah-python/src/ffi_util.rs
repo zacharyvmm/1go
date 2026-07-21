@@ -1,9 +1,9 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use scah_ffi::{
-    ScahAttributeView, ScahElementId, ScahElementList, ScahError, ScahOptionalStringView,
-    ScahStatus, ScahStringView, scah_element_attributes_fill, scah_element_list_free,
-    scah_error_free, scah_error_message,
+    ScahAttributeView, ScahElementId, ScahError, ScahOptionalStringView, ScahStatus, ScahStore,
+    ScahStringView, scah_error_free, scah_error_message, scah_store_element_attributes_fill,
+    scah_store_free,
 };
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 /// Initial stack capacity for selective and mid-size lookups.
 ///
-/// 1024 × usize ≈ 8 KiB — fits the 100 / 1_000 gate cases in one pass.
-/// Larger results use BufferTooSmall → `scah_element_list_fill_ids`.
+/// Large enough for the 100 / 1_000 gate cases without a heap ID vec; oversized
+/// lookups probe once then allocate exactly.
 pub const INLINE_LOOKUP_CAPACITY: usize = 1024;
 
 #[inline]
@@ -33,10 +33,8 @@ pub unsafe fn view_as_str<'a>(view: ScahStringView) -> &'a str {
     if view.data.is_null() || view.len == 0 {
         return "";
     }
-    // SAFETY: caller guarantees a live UTF-8 borrow for `'a`.
     let bytes = unsafe { std::slice::from_raw_parts(view.data, view.len) };
     debug_assert!(std::str::from_utf8(bytes).is_ok());
-    // SAFETY: ABI contract — successful views are valid UTF-8.
     unsafe { std::str::from_utf8_unchecked(bytes) }
 }
 
@@ -45,7 +43,6 @@ pub fn optional_view_to_option<'a>(view: ScahOptionalStringView) -> Option<&'a s
     if view.is_some == 0 {
         None
     } else {
-        // SAFETY: successful optional views borrow store-owned UTF-8.
         Some(unsafe { view_as_str(view.value) })
     }
 }
@@ -54,7 +51,6 @@ pub fn take_error_message(err: *mut ScahError) -> String {
     if err.is_null() {
         return String::new();
     }
-    // SAFETY: `err` is a live scah-ffi error handle owned by the caller.
     let view = unsafe { scah_error_message(err) };
     let msg = unsafe { view_as_str(view) }.to_owned();
     unsafe {
@@ -113,50 +109,34 @@ fn status_err_message(status: ScahStatus, message: String) -> PyErr {
     }
 }
 
-fn free_list_if_any(list: *mut ScahElementList) {
-    if !list.is_null() {
-        unsafe {
-            scah_element_list_free(list);
-        }
-    }
+/// Shared owner for the parsed store handle (keeps HTML alive for elements).
+pub struct StoreOwner {
+    handle: NonNull<ScahStore>,
 }
 
-/// Shared owner for one C ABI result list (retains the store via the list).
-pub struct ElementListOwner {
-    handle: NonNull<ScahElementList>,
-}
-
-impl ElementListOwner {
+impl StoreOwner {
     #[inline]
-    pub fn new(handle: NonNull<ScahElementList>) -> Self {
+    pub fn new(handle: NonNull<ScahStore>) -> Self {
         Self { handle }
     }
 
     #[inline]
-    pub fn as_ptr(&self) -> *const ScahElementList {
+    pub fn as_ptr(&self) -> *const ScahStore {
         self.handle.as_ptr()
     }
 }
 
-impl Drop for ElementListOwner {
+impl Drop for StoreOwner {
     fn drop(&mut self) {
-        // SAFETY: handle was returned by scah-ffi and is freed exactly once.
         unsafe {
-            scah_element_list_free(self.handle.as_ptr());
+            scah_store_free(self.handle.as_ptr());
         }
     }
 }
 
-// SAFETY: exclusive Arc ownership; C ABI element access is read-only.
-unsafe impl Send for ElementListOwner {}
-unsafe impl Sync for ElementListOwner {}
+unsafe impl Send for StoreOwner {}
+unsafe impl Sync for StoreOwner {}
 
-/// Finalize a Vec after an ABI fill initialized exactly `written` prefix slots.
-///
-/// # Safety
-///
-/// The first `written` elements of `buf`'s allocated storage must already be
-/// initialized by a successful ABI write, and `written <= buf.capacity()`.
 #[inline]
 pub unsafe fn finalize_filled_vec<T>(buf: &mut Vec<T>, written: usize) {
     debug_assert!(written <= buf.capacity());
@@ -165,204 +145,51 @@ pub unsafe fn finalize_filled_vec<T>(buf: &mut Vec<T>, written: usize) {
     }
 }
 
-/// One-pass store lookup: small stack buffer, exact heap retry on overflow.
+/// Store lookup via one ABI fill into a stack/heap buffer.
 ///
-/// Does not allocate from total store size. Tag names are not prefetched;
-/// callers use `scah_element_name` on demand.
+/// `make` receives an optional tag name when the ABI fills `out_names`.
 pub fn take_store_get<T>(
-    store: *const scah_ffi::ScahStore,
+    owner: &Arc<StoreOwner>,
     query: &str,
-    mut make: impl FnMut(Arc<ElementListOwner>, ScahElementId) -> T,
+    mut make: impl FnMut(Arc<StoreOwner>, ScahElementId, Option<&'static str>) -> T,
 ) -> PyResult<Option<Vec<T>>> {
     use scah_ffi::scah_store_get_ids_fill;
 
-    // Avoid zeroing 8 KiB on every lookup — ABI writes the initialized prefix.
     let mut ids_stack: [MaybeUninit<ScahElementId>; INLINE_LOOKUP_CAPACITY] =
         [const { MaybeUninit::uninit() }; INLINE_LOOKUP_CAPACITY];
+    let mut names_stack: [MaybeUninit<ScahStringView>; INLINE_LOOKUP_CAPACITY] =
+        [const { MaybeUninit::uninit() }; INLINE_LOOKUP_CAPACITY];
     let mut written = 0usize;
-    let mut list: *mut ScahElementList = std::ptr::null_mut();
     let mut found = 0u8;
     let mut error = std::ptr::null_mut();
     let status = unsafe {
         scah_store_get_ids_fill(
-            store,
+            owner.as_ptr(),
             string_view(query),
-            ids_stack.as_mut_ptr() as *mut ScahElementId,
-            std::ptr::null_mut(),
+            ids_stack.as_mut_ptr().cast(),
+            names_stack.as_mut_ptr().cast(),
             INLINE_LOOKUP_CAPACITY,
             &mut written,
-            &mut list,
-            &mut found,
-            &mut error,
-        )
-    };
-
-    if status == ScahStatus::BufferTooSmall {
-        // Trust `written` only as required capacity; ignore any partial prefix.
-        if !error.is_null() {
-            unsafe {
-                scah_error_free(error);
-            }
-        }
-        let capacity = written;
-        let mut ids: Vec<ScahElementId> = Vec::with_capacity(capacity);
-        if list.is_null() {
-            // Fallback: exact retry of the query fill (no list was returned).
-            written = 0;
-            found = 0;
-            error = std::ptr::null_mut();
-            let status = unsafe {
-                scah_store_get_ids_fill(
-                    store,
-                    string_view(query),
-                    ids.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    capacity,
-                    &mut written,
-                    &mut list,
-                    &mut found,
-                    &mut error,
-                )
-            };
-            if status != ScahStatus::Ok {
-                free_list_if_any(list);
-                map_status(status, error)?;
-                unreachable!();
-            }
-            map_status(status, error)?;
-        } else {
-            // Prefer fill_ids on the returned span list — avoids re-running the query.
-            written = 0;
-            error = std::ptr::null_mut();
-            let status = unsafe {
-                scah_ffi::scah_element_list_fill_ids(
-                    list,
-                    ids.as_mut_ptr(),
-                    capacity,
-                    &mut written,
-                    &mut error,
-                )
-            };
-            if status != ScahStatus::Ok {
-                free_list_if_any(list);
-                map_status(status, error)?;
-                unreachable!();
-            }
-            map_status(status, error)?;
-            found = 1;
-        }
-        if written > capacity {
-            free_list_if_any(list);
-            return Err(PyRuntimeError::new_err(
-                "scah_store_get_ids_fill wrote beyond caller capacity",
-            ));
-        }
-        // SAFETY: successful ABI call initialized exactly the first `written` entries.
-        unsafe {
-            finalize_filled_vec(&mut ids, written);
-        }
-        return finish_store_get(list, found, ids, &mut make);
-    }
-
-    if status != ScahStatus::Ok {
-        free_list_if_any(list);
-        map_status(status, error)?;
-        unreachable!();
-    }
-    map_status(status, error)?;
-    if written > INLINE_LOOKUP_CAPACITY {
-        free_list_if_any(list);
-        return Err(PyRuntimeError::new_err(
-            "scah_store_get_ids_fill wrote beyond caller capacity",
-        ));
-    }
-    if found == 0 {
-        free_list_if_any(list);
-        return Ok(None);
-    }
-    let handle = NonNull::new(list)
-        .ok_or_else(|| PyRuntimeError::new_err("successful lookup returned null element list"))?;
-    let owner = Arc::new(ElementListOwner::new(handle));
-    Ok(Some(
-        ids_stack[..written]
-            .iter()
-            // SAFETY: ABI initialized the first `written` slots.
-            .map(|slot| make(owner.clone(), unsafe { slot.assume_init() }))
-            .collect(),
-    ))
-}
-
-fn finish_store_get<T>(
-    list: *mut ScahElementList,
-    found: u8,
-    ids: Vec<ScahElementId>,
-    make: &mut impl FnMut(Arc<ElementListOwner>, ScahElementId) -> T,
-) -> PyResult<Option<Vec<T>>> {
-    if found == 0 {
-        free_list_if_any(list);
-        return Ok(None);
-    }
-    let handle = match NonNull::new(list) {
-        Some(h) => h,
-        None => {
-            return Err(PyRuntimeError::new_err(
-                "successful lookup returned null element list",
-            ));
-        }
-    };
-    let owner = Arc::new(ElementListOwner::new(handle));
-    Ok(Some(
-        ids.into_iter().map(|id| make(owner.clone(), id)).collect(),
-    ))
-}
-
-/// Nested element lookup with stack buffer + exact heap retry.
-///
-/// Child elements share `parent_owner` (same store lifetime).
-pub fn take_element_get<T>(
-    parent_owner: &Arc<ElementListOwner>,
-    element: ScahElementId,
-    query: &str,
-    mut make: impl FnMut(Arc<ElementListOwner>, ScahElementId) -> T,
-) -> PyResult<Option<Vec<T>>> {
-    use scah_ffi::scah_element_get_ids_fill;
-
-    const NESTED_INLINE: usize = 32;
-    let mut stack: [MaybeUninit<ScahElementId>; NESTED_INLINE] =
-        [const { MaybeUninit::uninit() }; NESTED_INLINE];
-    let mut written = 0usize;
-    let mut found = 0u8;
-    let mut error = std::ptr::null_mut();
-    let status = unsafe {
-        scah_element_get_ids_fill(
-            parent_owner.as_ptr(),
-            element,
-            string_view(query),
-            stack.as_mut_ptr() as *mut ScahElementId,
-            stack.len(),
-            &mut written,
             std::ptr::null_mut(),
             &mut found,
             &mut error,
         )
     };
+
     if status == ScahStatus::BufferTooSmall {
-        if !error.is_null() {
-            unsafe {
-                scah_error_free(error);
-            }
-        }
+        debug_assert!(error.is_null());
         let capacity = written;
         let mut ids: Vec<ScahElementId> = Vec::with_capacity(capacity);
+        let mut names: Vec<ScahStringView> = Vec::with_capacity(capacity);
         written = 0;
         found = 0;
         error = std::ptr::null_mut();
         let status = unsafe {
-            scah_element_get_ids_fill(
-                parent_owner.as_ptr(),
-                element,
+            scah_store_get_ids_fill(
+                owner.as_ptr(),
                 string_view(query),
                 ids.as_mut_ptr(),
+                names.as_mut_ptr(),
                 capacity,
                 &mut written,
                 std::ptr::null_mut(),
@@ -371,12 +198,83 @@ pub fn take_element_get<T>(
             )
         };
         map_status(status, error)?;
-        if written > capacity {
-            return Err(PyRuntimeError::new_err(
-                "scah_element_get_ids_fill wrote beyond caller capacity",
-            ));
+        unsafe {
+            finalize_filled_vec(&mut ids, written);
+            finalize_filled_vec(&mut names, written);
         }
-        // SAFETY: successful ABI retry initialized exactly `written` entries.
+        if found == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(
+            ids.into_iter()
+                .zip(names)
+                .map(|(id, name)| make(owner.clone(), id, Some(unsafe { view_as_str(name) })))
+                .collect(),
+        ));
+    }
+
+    map_status(status, error)?;
+    if found == 0 {
+        return Ok(None);
+    }
+    Ok(Some(
+        (0..written)
+            .map(|i| {
+                let id = unsafe { ids_stack[i].assume_init() };
+                let name = unsafe { view_as_str(names_stack[i].assume_init()) };
+                make(owner.clone(), id, Some(name))
+            })
+            .collect(),
+    ))
+}
+
+/// Nested element lookup via one ABI fill into a stack/heap buffer.
+pub fn take_element_get<T>(
+    owner: &Arc<StoreOwner>,
+    element: ScahElementId,
+    query: &str,
+    mut make: impl FnMut(Arc<StoreOwner>, ScahElementId, Option<&'static str>) -> T,
+) -> PyResult<Option<Vec<T>>> {
+    use scah_ffi::scah_store_element_get_ids_fill;
+
+    const NESTED_INLINE: usize = 8;
+    let mut stack: [MaybeUninit<ScahElementId>; NESTED_INLINE] =
+        [const { MaybeUninit::uninit() }; NESTED_INLINE];
+    let mut written = 0usize;
+    let mut found = 0u8;
+    let mut error = std::ptr::null_mut();
+    let status = unsafe {
+        scah_store_element_get_ids_fill(
+            owner.as_ptr(),
+            element,
+            string_view(query),
+            stack.as_mut_ptr().cast(),
+            NESTED_INLINE,
+            &mut written,
+            &mut found,
+            &mut error,
+        )
+    };
+    if status == ScahStatus::BufferTooSmall {
+        debug_assert!(error.is_null());
+        let capacity = written;
+        let mut ids: Vec<ScahElementId> = Vec::with_capacity(capacity);
+        written = 0;
+        found = 0;
+        error = std::ptr::null_mut();
+        let status = unsafe {
+            scah_store_element_get_ids_fill(
+                owner.as_ptr(),
+                element,
+                string_view(query),
+                ids.as_mut_ptr(),
+                capacity,
+                &mut written,
+                &mut found,
+                &mut error,
+            )
+        };
+        map_status(status, error)?;
         unsafe {
             finalize_filled_vec(&mut ids, written);
         }
@@ -385,7 +283,7 @@ pub fn take_element_get<T>(
         }
         return Ok(Some(
             ids.into_iter()
-                .map(|id| make(parent_owner.clone(), id))
+                .map(|id| make(owner.clone(), id, None))
                 .collect(),
         ));
     }
@@ -393,85 +291,71 @@ pub fn take_element_get<T>(
     if found == 0 {
         return Ok(None);
     }
-    if written > NESTED_INLINE {
-        return Err(PyRuntimeError::new_err(
-            "scah_element_get_ids_fill wrote beyond caller capacity",
-        ));
-    }
     Ok(Some(
         stack[..written]
             .iter()
-            .map(|slot| make(parent_owner.clone(), unsafe { slot.assume_init() }))
+            .map(|slot| make(owner.clone(), unsafe { slot.assume_init() }, None))
             .collect(),
     ))
 }
 
-/// Fetch all attributes into a borrowed FFI buffer.
-///
-/// Returned views remain valid while `owner` remains alive.
-pub fn fetch_attributes(
-    owner: *const ScahElementList,
+/// Materialize attributes via a temporary borrowed slice — no intermediate `Vec`.
+pub fn with_attributes<R>(
+    store: *const ScahStore,
     id: ScahElementId,
-) -> PyResult<Vec<ScahAttributeView>> {
+    f: impl FnOnce(&[ScahAttributeView]) -> PyResult<R>,
+) -> PyResult<R> {
     let mut stack: [MaybeUninit<ScahAttributeView>; 8] = [const { MaybeUninit::uninit() }; 8];
     let mut written = 0usize;
     let mut error = std::ptr::null_mut();
     let status = unsafe {
-        scah_element_attributes_fill(
-            owner,
+        scah_store_element_attributes_fill(
+            store,
             id,
-            stack.as_mut_ptr() as *mut ScahAttributeView,
+            stack.as_mut_ptr().cast(),
             stack.len(),
             &mut written,
             &mut error,
         )
     };
+    if status == ScahStatus::Ok {
+        let attrs = unsafe {
+            std::slice::from_raw_parts(stack.as_ptr().cast::<ScahAttributeView>(), written)
+        };
+        return f(attrs);
+    }
     if status != ScahStatus::BufferTooSmall {
         map_status(status, error)?;
-        return Ok(stack
-            .into_iter()
-            .take(written)
-            // SAFETY: fill initialized the first `written` entries.
-            .map(|slot| unsafe { slot.assume_init() })
-            .collect());
+        unreachable!();
     }
-    if !error.is_null() {
-        unsafe {
-            scah_error_free(error);
-        }
-    }
-    let capacity = written.max(1);
-    let mut buf: Vec<MaybeUninit<ScahAttributeView>> = Vec::with_capacity(capacity);
-    // SAFETY: MaybeUninit elements need no initialization before the ABI write.
+    debug_assert!(error.is_null());
+    let required = written.max(1);
+    let mut heap: Vec<MaybeUninit<ScahAttributeView>> = Vec::with_capacity(required);
     unsafe {
-        buf.set_len(capacity);
+        heap.set_len(required);
     }
     written = 0;
     error = std::ptr::null_mut();
     let status = unsafe {
-        scah_element_attributes_fill(
-            owner,
+        scah_store_element_attributes_fill(
+            store,
             id,
-            buf.as_mut_ptr() as *mut ScahAttributeView,
-            capacity,
+            heap.as_mut_ptr().cast(),
+            required,
             &mut written,
             &mut error,
         )
     };
     map_status(status, error)?;
-    Ok(buf
-        .into_iter()
-        .take(written)
-        // SAFETY: fill initialized the first `written` entries.
-        .map(|slot| unsafe { slot.assume_init() })
-        .collect())
+    let attrs =
+        unsafe { std::slice::from_raw_parts(heap.as_ptr().cast::<ScahAttributeView>(), written) };
+    f(attrs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Simulates an ABI fill that writes only a prefix of reserved capacity.
     unsafe fn mock_partial_fill(dst: *mut usize, capacity: usize, written_out: *mut usize) {
         assert!(capacity >= 2);
         unsafe {

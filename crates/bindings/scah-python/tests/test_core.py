@@ -245,6 +245,29 @@ def test_attributes_preserve_missing_versus_empty():
     assert element.attributes["value"] == ""
 
 
+def test_attributes_materialize_zero_to_many():
+    """Attribute maps cover empty, small, exactly-8, and overflow (>8) cases."""
+    q = Query.all("el", Save.all()).build()
+
+    empty = parse("<el></el>", [q]).get("el")[0]
+    assert empty.attributes == {}
+
+    one = parse('<el a="1"></el>', [q]).get("el")[0]
+    assert one.attributes == {"a": "1"}
+
+    eight_attrs = " ".join(f'k{i}="v{i}"' for i in range(8))
+    eight = parse(f"<el {eight_attrs}></el>", [q]).get("el")[0]
+    assert eight.attributes == {f"k{i}": f"v{i}" for i in range(8)}
+
+    nine_attrs = " ".join(f'k{i}="v{i}"' for i in range(9))
+    nine = parse(f"<el {nine_attrs}></el>", [q]).get("el")[0]
+    assert nine.attributes == {f"k{i}": f"v{i}" for i in range(9)}
+
+    many_attrs = " ".join(f'k{i}="v{i}"' for i in range(24))
+    many = parse(f"<el {many_attrs}></el>", [q]).get("el")[0]
+    assert many.attributes == {f"k{i}": f"v{i}" for i in range(24)}
+
+
 def test_large_result_lookup_correctness():
     """10_000-match lookup returns the correct ordered collection."""
     count = 10_000

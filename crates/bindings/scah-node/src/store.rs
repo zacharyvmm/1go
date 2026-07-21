@@ -1,25 +1,18 @@
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use napi::Result;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use scah_ffi::{ScahStore, scah_store_free, scah_store_len};
+use scah_ffi::{ScahStore, scah_store_len};
 
 use crate::elements::JsElement;
-use crate::ffi::{map_status, take_store_get};
+use crate::ffi::{StoreOwner, map_status, take_store_get};
 
 #[napi(js_name = "Store")]
 pub struct JSStore {
-    pub(crate) handle: NonNull<ScahStore>,
+    pub(crate) owner: Arc<StoreOwner>,
     pub(crate) len: usize,
-}
-
-impl Drop for JSStore {
-    fn drop(&mut self) {
-        unsafe {
-            scah_store_free(self.handle.as_ptr());
-        }
-    }
 }
 
 impl JSStore {
@@ -30,7 +23,10 @@ impl JSStore {
         let mut error = std::ptr::null_mut();
         let status = unsafe { scah_store_len(handle.as_ptr(), &mut len, &mut error) };
         map_status(status, error)?;
-        Ok(Self { handle, len })
+        Ok(Self {
+            owner: Arc::new(StoreOwner::new(handle)),
+            len,
+        })
     }
 }
 
@@ -38,9 +34,7 @@ impl JSStore {
 impl JSStore {
     #[napi]
     pub fn get(&self, query: String) -> Result<Option<Vec<JsElement>>> {
-        // Lookup uses a small stack buffer + exact retry; `len` is for
-        // `length` only and must not size query result buffers.
-        take_store_get(self.handle.as_ptr(), &query, JsElement::new)
+        take_store_get(&self.owner, &query, JsElement::new)
     }
 
     #[napi(getter)]

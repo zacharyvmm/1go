@@ -1,15 +1,16 @@
 use crate::ffi_util::{
-    ElementListOwner, fetch_attributes, map_status, optional_view_to_option, string_view,
-    take_element_get, take_store_get, view_as_str,
+    StoreOwner, map_status, optional_view_to_option, string_view, take_element_get, take_store_get,
+    view_as_str, with_attributes,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt, prelude::*};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use scah_ffi::{
-    ScahElementId, ScahElementList, ScahOptionalStringView, ScahStatus, ScahStore, ScahStringView,
-    scah_element_class_name, scah_element_get_attribute, scah_element_id, scah_element_inner_html,
-    scah_element_name, scah_element_text_content, scah_store_free, scah_store_len,
+    ScahElementId, ScahOptionalStringView, ScahStatus, ScahStore, ScahStringView,
+    scah_store_element_class_name, scah_store_element_get_attribute, scah_store_element_id,
+    scah_store_element_inner_html, scah_store_element_name, scah_store_element_text_content,
+    scah_store_len,
 };
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -17,20 +18,30 @@ use std::sync::Arc;
 #[gen_stub_pyclass]
 #[pyclass(module = "scah", name = "Element")]
 pub struct PyElement {
-    owner: Arc<ElementListOwner>,
+    owner: Arc<StoreOwner>,
     id: ScahElementId,
+    /// Populated when store lookup fills names in the same ABI call.
+    cached_name: Option<&'static str>,
 }
 
 unsafe impl Send for PyElement {}
 unsafe impl Sync for PyElement {}
 
 impl PyElement {
-    fn list_ptr(&self) -> *const ScahElementList {
+    fn store_ptr(&self) -> *const ScahStore {
         self.owner.as_ptr()
     }
 
-    pub(crate) fn new(owner: Arc<ElementListOwner>, id: ScahElementId) -> Self {
-        Self { owner, id }
+    pub(crate) fn new(
+        owner: Arc<StoreOwner>,
+        id: ScahElementId,
+        cached_name: Option<&'static str>,
+    ) -> Self {
+        Self {
+            owner,
+            id,
+            cached_name,
+        }
     }
 }
 
@@ -38,90 +49,101 @@ impl PyElement {
 #[pymethods]
 impl PyElement {
     #[getter]
-    pub fn name(&self) -> PyResult<&str> {
-        let mut out = ScahStringView::empty();
-        let status =
-            unsafe { scah_element_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
-        if status != ScahStatus::Ok {
-            map_status(status, std::ptr::null_mut())?;
+    pub fn name(&self) -> Option<&str> {
+        if let Some(name) = self.cached_name {
+            return Some(name);
         }
-        Ok(unsafe { view_as_str(out) })
-    }
-
-    #[getter]
-    pub fn class_name(&self) -> PyResult<Option<&str>> {
-        let mut out = ScahOptionalStringView::none();
+        let mut out = ScahStringView::empty();
         let status = unsafe {
-            scah_element_class_name(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+            scah_store_element_name(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
         };
         if status != ScahStatus::Ok {
-            map_status(status, std::ptr::null_mut())?;
+            return None;
         }
-        Ok(optional_view_to_option(out))
+        Some(unsafe { view_as_str(out) })
     }
 
     #[getter]
-    pub fn id(&self) -> PyResult<Option<&str>> {
-        let mut out = ScahOptionalStringView::none();
-        let status =
-            unsafe { scah_element_id(self.list_ptr(), self.id, &mut out, std::ptr::null_mut()) };
-        if status != ScahStatus::Ok {
-            map_status(status, std::ptr::null_mut())?;
-        }
-        Ok(optional_view_to_option(out))
-    }
-
-    pub fn get_attribute(&self, key: String) -> PyResult<Option<&str>> {
+    pub fn class_name(&self) -> Option<&str> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_get_attribute(
-                self.list_ptr(),
+            scah_store_element_class_name(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
+        };
+        if status != ScahStatus::Ok {
+            return None;
+        }
+        optional_view_to_option(out)
+    }
+
+    #[getter]
+    pub fn id(&self) -> Option<&str> {
+        let mut out = ScahOptionalStringView::none();
+        let status = unsafe {
+            scah_store_element_id(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
+        };
+        if status != ScahStatus::Ok {
+            return None;
+        }
+        optional_view_to_option(out)
+    }
+
+    pub fn get_attribute(&self, key: &str) -> Option<&str> {
+        let mut out = ScahOptionalStringView::none();
+        let status = unsafe {
+            scah_store_element_get_attribute(
+                self.store_ptr(),
                 self.id,
-                string_view(&key),
+                string_view(key),
                 &mut out,
                 std::ptr::null_mut(),
             )
         };
         if status != ScahStatus::Ok {
-            map_status(status, std::ptr::null_mut())?;
+            return None;
         }
-        Ok(optional_view_to_option(out))
+        optional_view_to_option(out)
     }
 
     #[getter]
     pub fn attributes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let attrs = fetch_attributes(self.list_ptr(), self.id)?;
-        let dict = PyDict::new(py);
-        for attr in attrs {
-            let key = unsafe { view_as_str(attr.key) };
-            let value = optional_view_to_option(attr.value);
-            dict.set_item(key, value)?;
-        }
-        Ok(dict)
+        with_attributes(self.store_ptr(), self.id, |attrs| {
+            let dict = PyDict::new(py);
+            for attr in attrs {
+                let key = unsafe { view_as_str(attr.key) };
+                let value = optional_view_to_option(attr.value);
+                dict.set_item(key, value)?;
+            }
+            Ok(dict)
+        })
     }
 
     #[getter]
-    pub fn inner_html(&self) -> PyResult<Option<&str>> {
+    pub fn inner_html(&self) -> Option<&str> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_inner_html(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+            scah_store_element_inner_html(self.store_ptr(), self.id, &mut out, std::ptr::null_mut())
         };
         if status != ScahStatus::Ok {
-            map_status(status, std::ptr::null_mut())?;
+            return None;
         }
-        Ok(optional_view_to_option(out))
+        optional_view_to_option(out)
     }
 
     #[getter]
-    pub fn text_content(&self) -> PyResult<Option<&str>> {
+    pub fn text_content(&self) -> Option<&str> {
         let mut out = ScahOptionalStringView::none();
         let status = unsafe {
-            scah_element_text_content(self.list_ptr(), self.id, &mut out, std::ptr::null_mut())
+            scah_store_element_text_content(
+                self.store_ptr(),
+                self.id,
+                &mut out,
+                std::ptr::null_mut(),
+            )
         };
         if status != ScahStatus::Ok {
-            map_status(status, std::ptr::null_mut())?;
+            return None;
         }
-        Ok(optional_view_to_option(out))
+        optional_view_to_option(out)
     }
 
     pub fn get(&self, query: &str) -> PyResult<Vec<PyElement>> {
@@ -146,12 +168,12 @@ impl PyElement {
 
     pub fn __getitem__<'py>(&'py self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
         match key {
-            "name" => self.name()?.into_bound_py_any(py),
-            "id" => self.id()?.into_bound_py_any(py),
-            "class" => self.class_name()?.into_bound_py_any(py),
+            "name" => self.name().into_bound_py_any(py),
+            "id" => self.id().into_bound_py_any(py),
+            "class" => self.class_name().into_bound_py_any(py),
             "attributes" => self.attributes(py)?.into_bound_py_any(py),
-            "inner_html" => self.inner_html()?.into_bound_py_any(py),
-            "text_content" => self.text_content()?.into_bound_py_any(py),
+            "inner_html" => self.inner_html().into_bound_py_any(py),
+            "text_content" => self.text_content().into_bound_py_any(py),
             _ => Err(pyo3::exceptions::PyKeyError::new_err(key.to_string())),
         }
     }
@@ -160,18 +182,9 @@ impl PyElement {
 #[gen_stub_pyclass]
 #[pyclass(module = "scah", name = "Store")]
 pub(crate) struct PyStore {
-    pub(crate) handle: NonNull<ScahStore>,
+    pub(crate) owner: Arc<StoreOwner>,
     /// Cached at construction for `__len__` only — never used as lookup capacity.
     pub(crate) len: usize,
-}
-
-impl Drop for PyStore {
-    fn drop(&mut self) {
-        // SAFETY: handle was returned by scah_parse and is freed exactly once.
-        unsafe {
-            scah_store_free(self.handle.as_ptr());
-        }
-    }
 }
 
 unsafe impl Send for PyStore {}
@@ -181,7 +194,7 @@ unsafe impl Sync for PyStore {}
 #[pymethods]
 impl PyStore {
     fn get(&self, query: &str) -> PyResult<Option<Vec<PyElement>>> {
-        take_store_get(self.handle.as_ptr(), query, PyElement::new)
+        take_store_get(&self.owner, query, PyElement::new)
     }
 
     fn __len__(&self) -> usize {
@@ -197,6 +210,9 @@ impl PyStore {
         let mut error = std::ptr::null_mut();
         let status = unsafe { scah_store_len(handle.as_ptr(), &mut len, &mut error) };
         map_status(status, error)?;
-        Ok(Self { handle, len })
+        Ok(Self {
+            owner: Arc::new(StoreOwner::new(handle)),
+            len,
+        })
     }
 }

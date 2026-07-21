@@ -43,12 +43,6 @@ export declare class Store {
 }
 export type JSStore = Store
 
-/**
- * Public JSON shape for [`JsElement::to_json`].
- *
- * Declared for TypeScript generation; the runtime builds a plain object so
- * optional fields remain `undefined` when absent.
- */
 export interface JsonElement {
   name: string
   id?: string

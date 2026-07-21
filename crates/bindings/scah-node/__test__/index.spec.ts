@@ -287,6 +287,28 @@ test('attributes preserve missing versus empty values', () => {
   expect(element.attributes.value).toBe('')
 })
 
+test('attributes materialize zero to many', () => {
+  const q = Query.all('el', { innerHtml: true, textContent: true }).build()
+
+  expect(parse('<el></el>', [q]).get('el')![0].attributes).toEqual({})
+  expect(parse('<el a="1"></el>', [q]).get('el')![0].attributes).toEqual({ a: '1' })
+
+  const eightAttrs = Array.from({ length: 8 }, (_, i) => `k${i}="v${i}"`).join(' ')
+  expect(parse(`<el ${eightAttrs}></el>`, [q]).get('el')![0].attributes).toEqual(
+    Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`k${i}`, `v${i}`])),
+  )
+
+  const nineAttrs = Array.from({ length: 9 }, (_, i) => `k${i}="v${i}"`).join(' ')
+  expect(parse(`<el ${nineAttrs}></el>`, [q]).get('el')![0].attributes).toEqual(
+    Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, `v${i}`])),
+  )
+
+  const manyAttrs = Array.from({ length: 24 }, (_, i) => `k${i}="v${i}"`).join(' ')
+  expect(parse(`<el ${manyAttrs}></el>`, [q]).get('el')![0].attributes).toEqual(
+    Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`k${i}`, `v${i}`])),
+  )
+})
+
 test('large result collection correctness', () => {
   const count = 10_000
   let html = ''
