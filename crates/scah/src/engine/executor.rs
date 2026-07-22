@@ -32,19 +32,13 @@ where
     Q: QuerySpec<'query>,
 {
     pub fn new(query: &'a Q) -> Self {
-        let mut root = ScopedCursor::new_root(
+        let root = ScopedCursor::new_root(
             ElementId::default(),
             Position {
                 selection: QuerySectionId(0),
                 state: TransitionId(0),
             },
         );
-        if matches!(
-            query.get_transition(root.position.state).guard,
-            Combinator::Child
-        ) {
-            root.mark_child_obligation();
-        }
         Self {
             query,
             cursors: vec![root],
@@ -311,7 +305,7 @@ where
     /// Admit a child obligation unless the exact obligation is already live.
     fn try_push_child(
         &mut self,
-        mut candidate: ScopedCursor,
+        candidate: ScopedCursor,
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner: RunnerId,
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
             'html,
@@ -319,7 +313,6 @@ where
         >,
         create_reason: Option<ScopedCursorReason>,
     ) -> SpawnOutcome {
-        candidate.mark_child_obligation();
         let candidate_base = candidate.match_base_depth();
         for existing in self.cursors.iter().rev() {
             if existing.end() {
@@ -612,7 +605,7 @@ where
         let mut emitted_this_step: SmallVec<[(ElementId, QuerySectionId); 4]> = SmallVec::new();
 
         for i in 0..snapshot_len {
-            if !self.cursors[i].can_match_at(depth) {
+            if self.cursors[i].end() {
                 continue;
             }
 
@@ -849,7 +842,7 @@ where
         let mut emitted_this_step: SmallVec<[(ElementId, QuerySectionId); 4]> = SmallVec::new();
 
         for i in 0..snapshot_len {
-            if !self.cursors[i].can_match_at(depth) {
+            if self.cursors[i].end() {
                 continue;
             }
 

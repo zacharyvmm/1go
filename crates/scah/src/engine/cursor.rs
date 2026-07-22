@@ -24,13 +24,6 @@ const FLAG_ADJACENT_REMAINING: u8 = 1 << 4;
 /// the executor finishes its snapshot loop so the current element can match,
 /// but must not dominate a replacement watcher spawned by that element.
 const FLAG_ADJACENT_EXPIRING: u8 = 1 << 5;
-/// Child (`>`) obligation whose transition can only match at
-/// `match_base_depth + 1`.
-///
-/// Admission already resolves the transition guard, so retaining that fact in
-/// the cursor lets the executor reject wrong-depth child cursors together with
-/// its activity check, before transition dispatch or predicate matching.
-const FLAG_CHILD_OBLIGATION: u8 = 1 << 6;
 
 /// Bounds how long a cursor remains eligible to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,45 +351,6 @@ impl ScopedCursor {
         !self.is_active()
     }
 
-    /// Whether this cursor can match at `depth`.
-    ///
-    /// Descendant and sibling cursors retain the ordinary activity-only check.
-    /// Child cursors are exact-depth obligations, so all deeper subtree events
-    /// can be rejected without consulting the query transition.
-    #[inline]
-    pub(crate) fn can_match_at(&self, depth: super::DepthSize) -> bool {
-        match self.mode {
-            CursorMode::Moving {
-                match_base_depth,
-                flags,
-                ..
-            } => {
-                flags_is_active(flags)
-                    && (flags & FLAG_CHILD_OBLIGATION == 0
-                        || match_base_depth.saturating_add(1) == depth)
-            }
-            CursorMode::Anchored { flags } => flags_is_active(flags),
-        }
-    }
-
-    /// Retain the child guard resolved during cursor admission.
-    pub(crate) fn mark_child_obligation(&mut self) {
-        let CursorMode::Moving { flags, .. } = &mut self.mode else {
-            debug_assert!(false, "child obligations must be moving cursors");
-            return;
-        };
-        *flags |= FLAG_CHILD_OBLIGATION;
-    }
-
-    /// Whether this moving cursor is an exact-depth child (`>`) obligation.
-    #[cfg(test)]
-    pub(crate) fn is_child_obligation(&self) -> bool {
-        matches!(
-            self.mode,
-            CursorMode::Moving { flags, .. } if flags & FLAG_CHILD_OBLIGATION != 0
-        )
-    }
-
     #[cfg(test)]
     pub fn spawn_moving(&self, at_depth: super::DepthSize, next_position: Position) -> Self {
         Self {
@@ -483,8 +437,7 @@ impl ScopedCursor {
         } = &mut self.mode
         {
             *unwind_depth = depth;
-            let retained = *flags & FLAG_CHILD_OBLIGATION;
-            *flags = retained | CursorActivity::Blocked.to_flags() | FLAG_HAS_UNWIND;
+            *flags = CursorActivity::Blocked.to_flags() | FLAG_HAS_UNWIND;
             self.debug_assert_moving_invariants();
         }
     }
@@ -502,8 +455,7 @@ impl ScopedCursor {
             ..
         } = &mut self.mode
         {
-            let retained = *flags & FLAG_CHILD_OBLIGATION;
-            *flags = retained | CursorActivity::Active.to_flags();
+            *flags = CursorActivity::Active.to_flags();
             *unwind_depth = 0;
             self.debug_assert_moving_invariants();
         }
@@ -517,7 +469,7 @@ impl ScopedCursor {
             ..
         } = &mut self.mode
         {
-            let retained = *flags & (FLAG_FIRST_WINNER | FLAG_CHILD_OBLIGATION);
+            let retained = *flags & FLAG_FIRST_WINNER;
             *flags = retained | CursorActivity::Complete.to_flags();
             *unwind_depth = 0;
             self.debug_assert_moving_invariants();
@@ -559,15 +511,8 @@ impl ScopedCursor {
             ..
         } = &mut self.mode
         {
-            // Preserve child-obligation identity through First-winner ownership.
-            // Matching is already gated by COMPLETE, so the bit is inert until
-            // `complete_after_close` clears unwind; it must not leak into clones.
-            let retained = *flags & FLAG_CHILD_OBLIGATION;
             *unwind_depth = selected_depth;
-            *flags = retained
-                | CursorActivity::Complete.to_flags()
-                | FLAG_HAS_UNWIND
-                | FLAG_FIRST_WINNER;
+            *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND | FLAG_FIRST_WINNER;
         }
 
         self.debug_assert_moving_invariants();
@@ -581,7 +526,6 @@ impl ScopedCursor {
                 unwind_depth,
                 ..
             } => {
-                // Cancellation ends the logical cursor; drop child identity.
                 *flags = CursorActivity::Complete.to_flags();
                 *unwind_depth = 0;
             }
@@ -1036,78 +980,6 @@ mod tests {
         assert!(!cursor.end());
         assert_eq!(cursor.unwind_depth(), None);
         assert_eq!(cursor.match_base_depth(), 2);
-    }
-
-    #[test]
-    fn child_obligation_rejects_other_depths_and_survives_reactivation() {
-        let mut cursor = ScopedCursor::new_moving_with_last(
-            5,
-            NULL_PARENT,
-            Position {
-                selection: QuerySectionId(0),
-                state: TransitionId(0),
-            },
-            5,
-        );
-
-        assert!(cursor.can_match_at(5));
-        assert!(cursor.can_match_at(6));
-        assert!(cursor.can_match_at(7));
-
-        cursor.mark_child_obligation();
-        assert!(cursor.is_child_obligation());
-        assert!(!cursor.can_match_at(5));
-        assert!(cursor.can_match_at(6));
-        assert!(!cursor.can_match_at(7));
-
-        cursor.block_until_close(6);
-        assert!(cursor.is_child_obligation());
-        assert!(!cursor.can_match_at(6));
-        cursor.reactivate_after_close();
-        assert!(cursor.is_child_obligation());
-        assert!(cursor.can_match_at(6));
-        assert!(!cursor.can_match_at(7));
-    }
-
-    #[test]
-    fn child_obligation_flag_lifecycle_across_cursor_transitions() {
-        let mut child = ScopedCursor::new_moving_with_last(
-            5,
-            NULL_PARENT,
-            Position {
-                selection: QuerySectionId(0),
-                state: TransitionId(0),
-            },
-            5,
-        );
-        child.mark_child_obligation();
-
-        let anchored = child.anchor_clone(6);
-        assert!(anchored.is_anchored());
-        assert!(!anchored.is_child_obligation());
-
-        let sibling = ScopedCursor::new_sibling(
-            4,
-            5,
-            NULL_PARENT,
-            Position {
-                selection: QuerySectionId(0),
-                state: TransitionId(0),
-            },
-            super::CursorLifetime::AdjacentSibling,
-        );
-        assert!(!sibling.is_child_obligation());
-
-        let mut first_winner = child.clone();
-        first_winner.select_first_until_close(6, 5);
-        assert!(first_winner.is_first_winner());
-        assert!(first_winner.is_child_obligation());
-        first_winner.complete_after_close();
-        assert!(first_winner.is_child_obligation());
-
-        let mut cancelled = child;
-        cancelled.cancel_complete();
-        assert!(!cancelled.is_child_obligation());
     }
 
     #[test]
