@@ -23,7 +23,7 @@ struct ParserTempState<'html> {
     save_hits: Vec<SaveHit>,
 }
 
-pub struct XHtmlParser<'html, 'query, Q, const CAPTURE: bool = true> {
+pub struct XHtmlParser<'html, 'query, Q> {
     position: DocumentPosition,
     pub selectors: QueryMultiplexer<'query, Q>,
     store: Store<'html, 'query>,
@@ -101,7 +101,7 @@ fn text_behavior_for(
     }
 }
 
-impl<'html, 'query: 'html, Q, const CAPTURE: bool> XHtmlParser<'html, 'query, Q, CAPTURE>
+impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
 where
     Q: QuerySpec<'query>,
 {
@@ -207,177 +207,19 @@ where
         }
     }
 
+    #[inline]
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
-        // Const-generic capture specialization: the no-text monomorphization does
-        // not reference the text-capture path, so LTO can drop it.
-        if CAPTURE {
-            self.next_with_capture(reader)
-        } else {
-            self.next_without_text(reader)
-        }
+        self.next_with_capture(reader)
     }
 
-    /// Lean scanner for `Save` modes that capture neither raw nor normalized text.
-    ///
-    /// Mirrors main's open/close hot path: parser-only tag classification, no
-    /// source-tape flushes, and no text-flag stack traffic.
-    fn next_without_text(&mut self, reader: &mut Reader<'html>) -> bool {
-        if self.parse_error.is_some() {
-            return false;
-        }
-        if let Some(close_tag) = self.raw_text_close {
-            loop {
-                reader.next_until(b'<');
-                if reader.peek().is_none() {
-                    self.drain_open_elements(reader);
-                    return false;
-                }
-
-                if reader.match_ignore_case(close_tag)
-                    && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
-                {
-                    self.raw_text_close = None;
-
-                    self.position.reader_position = reader.get_position();
-                    reader.next_until(b'>');
-                    reader.skip();
-
-                    let closing_tag = &close_tag[2..];
-                    let early_exit = self.handle_close_tag(closing_tag, reader);
-                    return !early_exit && !reader.eof();
-                } else {
-                    reader.skip();
-                }
-            }
-        }
-
-        reader.next_until(b'<');
-
-        if reader.peek().is_none() {
-            self.drain_open_elements(reader);
-            return false;
-        }
-
-        let tag = {
-            let mut tag: Option<XHtmlTag> = None;
-
-            while tag.is_none() {
-                self.position.reader_position = reader.get_position();
-                tag = XHtmlTag::from(reader);
-                if let Some(XHtmlTag::Open) = tag {
-                    self.element.from(reader, &mut self.store.attributes);
-                } else if tag.is_none() {
-                    reader.next_until(b'<');
-                    if reader.peek().is_none() {
-                        self.drain_open_elements(reader);
-                        return false;
-                    }
-                }
-            }
-
-            tag.unwrap()
-        };
-        let tag_start_position = self.position.reader_position;
-
-        let mut early_exit = false;
-
-        match tag {
-            XHtmlTag::Open => {
-                #[cfg(feature = "bench-internals")]
-                {
-                    self.path_stats.tag_classifications += 1;
-                }
-
-                let tag = TagFlags::classify(self.element.name);
-
-                if let Some(close_tag) = tag.raw_text_close_tag() {
-                    self.raw_text_close = Some(close_tag);
-                }
-
-                self.position.reader_position = tag_start_position;
-                self.open_elements
-                    .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
-                self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
-                self.position.reader_position = reader.get_position();
-
-                let is_self_closing = tag.is_void();
-                self.position.self_closing = is_self_closing;
-
-                if is_self_closing {
-                    let depth = self.open_elements.depth().saturating_add(1);
-                    if depth > MAX_ELEMENT_DEPTH {
-                        self.record_parse_error(ParseError::MaximumDepthExceeded);
-                        return false;
-                    }
-                    self.position.element_depth = depth;
-                } else if let Err(err) = self.open_elements.push_classified(self.element.name, tag)
-                {
-                    self.record_parse_error(err);
-                    return false;
-                } else {
-                    self.position.element_depth = self.open_elements.depth();
-                }
-
-                crate::scah_trace!(
-                    self.store,
-                    TraceEvent::OpenTag {
-                        tag: self.element.name,
-                        depth: self.position.element_depth,
-                        reader_position: self.position.reader_position,
-                        self_closing: is_self_closing,
-                    }
-                );
-
-                self.selectors.next_into(
-                    &self.element,
-                    &self.position,
-                    &mut self.store,
-                    &mut self.temp_state.save_hits,
-                );
-                if is_self_closing {
-                    early_exit = self.selectors.back(
-                        self.element.name,
-                        &self.position,
-                        reader,
-                        &mut self.store,
-                    ) || early_exit;
-                } else {
-                    for save_hit in &self.temp_state.save_hits {
-                        if !save_hit.needs_close_finalization() {
-                            continue;
-                        }
-                        self.open_elements.attach_saved(
-                            save_hit.element_id,
-                            save_hit
-                                .save_inner_html
-                                .then_some(self.position.reader_position),
-                            None,
-                            None,
-                            TextEdgePolicy::TrimCollapsedSeparators,
-                        );
-                    }
-                }
-
-                self.element.clear();
-            }
-            XHtmlTag::Close(closing_tag) => {
-                early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
-            }
-        }
-
-        !early_exit && !reader.eof()
-    }
-
-    #[cold]
-    #[inline(never)]
+    #[inline]
     fn next_with_capture(&mut self, reader: &mut Reader<'html>) -> bool {
         let raw = self.capture_mode.captures_raw();
         let text = self.capture_mode.captures_text();
         self.next_impl(reader, raw, text)
     }
 
-    #[cold]
-    #[inline(never)]
+    #[inline]
     fn next_impl(&mut self, reader: &mut Reader<'html>, raw: bool, text: bool) -> bool {
         let captures_any = raw || text;
 
@@ -929,7 +771,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -1054,7 +896,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("a", Save::only_inner_html()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1074,7 +916,7 @@ mod tests {
             Query::all("b", Save::only_text()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1099,7 +941,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -1150,7 +992,7 @@ mod tests {
         let queries = &[queries.build()];
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -1218,7 +1060,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -1266,7 +1108,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         println!("{:?}", queries);
 
@@ -1299,7 +1141,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -1337,7 +1179,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1361,7 +1203,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1403,7 +1245,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1490,7 +1332,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1517,7 +1359,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("p", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1536,7 +1378,7 @@ mod tests {
             Query::all("span", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1556,7 +1398,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("div span", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1575,7 +1417,7 @@ mod tests {
             Query::all("a", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1595,7 +1437,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("li", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1617,7 +1459,7 @@ mod tests {
             Query::all("dd", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1638,7 +1480,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("option", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1658,7 +1500,7 @@ mod tests {
             Query::all("option", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1680,7 +1522,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("td", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1700,7 +1542,7 @@ mod tests {
             Query::all(".x", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1723,7 +1565,7 @@ mod tests {
             Query::all("div > span", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1738,7 +1580,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("div", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1764,7 +1606,7 @@ mod tests {
         let html = "<section><div id=\"a\">x</div><div id=\"b\">y</div></section>";
         let queries = &[Query::all("div", Save::none()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         let mut reader = Reader::new(html);
 
         // Advance until the first matched <div> is open.
@@ -1832,7 +1674,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1923,7 +1765,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -2030,7 +1872,7 @@ mod tests {
     fn path_stats_for(html: &str, save: Save) -> crate::html::TextPathStats {
         let queries = &[Query::all("div", save).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         let mut reader = Reader::new(html);
         while parser.next(&mut reader) {}
         assert!(parser.take_parse_error().is_none());

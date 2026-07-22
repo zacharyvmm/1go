@@ -1100,3 +1100,115 @@ fn text_sidecar_aligned_for_multiple_matching_queries() {
     assert_eq!(by_class.raw_text(&store), Some("A"));
     assert_eq!(by_class.text(&store), None);
 }
+
+use scah::{ParseError, parse_without_text_capture};
+
+#[test]
+fn parse_without_text_capture_rejects_raw_text() {
+    let queries = &[Query::all("p", Save::only_raw_text()).unwrap().build()];
+
+    let err = parse_without_text_capture("<p>x</p>", queries).unwrap_err();
+
+    assert_eq!(err, ParseError::TextCaptureRequired);
+}
+
+#[test]
+fn parse_without_text_capture_rejects_normalized_text() {
+    let queries = &[Query::all("p", Save::only_text()).unwrap().build()];
+
+    let err = parse_without_text_capture("<p>x</p>", queries).unwrap_err();
+
+    assert_eq!(err, ParseError::TextCaptureRequired);
+}
+
+#[test]
+fn parse_without_text_capture_accepts_inner_html() {
+    let queries = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
+
+    let store = parse_without_text_capture("<p>x</p>", queries).unwrap();
+    let element = store.get("p").unwrap().next().unwrap();
+
+    assert_eq!(element.inner_html, Some("x"));
+}
+
+#[test]
+fn parse_dispatches_to_text_parser_when_required() {
+    let queries = &[Query::all("p", Save::only_text()).unwrap().build()];
+
+    let store = parse("<p>Hello</p>", queries).unwrap();
+    let element = store.get("p").unwrap().next().unwrap();
+
+    assert_eq!(element.text(&store), Some("Hello"));
+}
+
+fn assert_store_equivalent(normal: &scah::Store, specialized: &scah::Store) {
+    assert_eq!(
+        normal.elements.len(),
+        specialized.elements.len(),
+        "element count mismatch"
+    );
+    for (n, s) in normal.elements.iter().zip(specialized.elements.iter()) {
+        assert_eq!(n.name, s.name, "element name mismatch");
+        assert_eq!(n.id, s.id, "element id mismatch");
+        assert_eq!(n.inner_html, s.inner_html, "inner_html mismatch");
+        assert_eq!(
+            n.attributes(normal),
+            s.attributes(specialized),
+            "attributes mismatch"
+        );
+    }
+}
+
+#[test]
+fn normal_and_no_text_parser_parity() {
+    let documents = [
+        // ordinary nested HTML
+        "<div><section><p class=\"intro\">Hello <span>world</span></p></section></div>".to_string(),
+        // void elements
+        "<div><input type=\"text\" value=\"val\"><img src=\"a.jpg\"><br><hr></div>".to_string(),
+        // raw-text script/style tags
+        "<main><script>if (a < b) { console.log('</style>'); }</script><style>p { color: red; }</style></main>".to_string(),
+        // implied paragraph closes
+        "<div><p>Paragraph 1<p>Paragraph 2<p>Paragraph 3</div>".to_string(),
+        // mismatched closes
+        "<div><p>mismatched <span>content</div></span></p>".to_string(),
+        // table structures
+        "<table><thead><tr><th>Header</th></tr></thead><tbody><tr><td>Cell 1</td><td>Cell 2</td></tr></tbody></table>".to_string(),
+        // EOF with unclosed tags
+        "<div><section><p>unclosed paragraph".to_string(),
+        // mixed-case tags
+        "<DIV><P Class=\"Test\">Upper</P><br/></DIV>".to_string(),
+        // maximum-depth boundary
+        format!("{opens}<p id=\"deep\">leaf</p>{closes}", opens = "<div>".repeat(50), closes = "</div>".repeat(50)),
+    ];
+
+    for html in &documents {
+        // Test Save::none() with All
+        let q_none = &[Query::all("p", Save::none()).unwrap().build()];
+        let normal_none = parse(html, q_none).unwrap();
+        let spec_none = parse_without_text_capture(html, q_none).unwrap();
+        assert_store_equivalent(&normal_none, &spec_none);
+
+        // Test Save::only_inner_html() with All
+        let q_inner = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
+        let normal_inner = parse(html, q_inner).unwrap();
+        let spec_inner = parse_without_text_capture(html, q_inner).unwrap();
+        assert_store_equivalent(&normal_inner, &spec_inner);
+
+        // Test Save::only_inner_html() with First
+        let q_first = &[Query::first("p", Save::only_inner_html()).unwrap().build()];
+        let normal_first = parse(html, q_first).unwrap();
+        let spec_first = parse_without_text_capture(html, q_first).unwrap();
+        assert_store_equivalent(&normal_first, &spec_first);
+
+        // Test nested .then() queries
+        let q_then = &[Query::all("div", Save::only_inner_html())
+            .unwrap()
+            .then(|div| Ok([div.all("p", Save::only_inner_html())?]))
+            .unwrap()
+            .build()];
+        let normal_then = parse(html, q_then).unwrap();
+        let spec_then = parse_without_text_capture(html, q_then).unwrap();
+        assert_store_equivalent(&normal_then, &spec_then);
+    }
+}

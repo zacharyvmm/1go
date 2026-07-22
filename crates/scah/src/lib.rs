@@ -112,7 +112,7 @@ mod otel;
 pub use engine::multiplexer::QueryMultiplexer;
 pub use html::element::builder::XHtmlElement;
 pub use html::parser::XHtmlParser;
-pub use html::parser_no_text::NoTextParser;
+use html::parser_no_text::NoTextParser;
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
 pub use scah_query_ir::{
@@ -208,9 +208,9 @@ pub mod bench_internals {
         Q: QuerySpec<'query>,
     {
         let mut parser = if no_extra_allocations {
-            XHtmlParser::<Q, true>::new(selectors)
+            XHtmlParser::new(selectors)
         } else {
-            XHtmlParser::<Q, true>::with_capacity(selectors, html.len())
+            XHtmlParser::with_capacity(selectors, html.len())
         };
 
         let mut reader = Reader::new(html);
@@ -313,7 +313,7 @@ where
     // [`parse_without_text_capture`] never reference the capturing parser, so
     // LTO can drop it entirely (matching main's no-text image size).
     if capture {
-        parse_with_parser::<_, true>(html, selectors, no_extra_allocations, query_count)
+        parse_with_parser(html, selectors, no_extra_allocations, query_count)
     } else {
         run_no_text_parser(html, selectors, no_extra_allocations, query_count)
     }
@@ -377,7 +377,7 @@ where
     Ok(parser.finish())
 }
 
-fn parse_with_parser<'html: 'query, 'query: 'html, Q, const CAPTURE: bool>(
+fn parse_with_parser<'html: 'query, 'query: 'html, Q>(
     html: &'html str,
     selectors: QueryMultiplexer<'query, Q>,
     no_extra_allocations: bool,
@@ -387,9 +387,9 @@ where
     Q: QuerySpec<'query>,
 {
     let mut parser = if no_extra_allocations {
-        XHtmlParser::<Q, CAPTURE>::new(selectors)
+        XHtmlParser::new(selectors)
     } else {
-        XHtmlParser::<Q, CAPTURE>::with_capacity(selectors, html.len())
+        XHtmlParser::with_capacity(selectors, html.len())
     };
 
     let mut reader = Reader::new(html);
@@ -559,7 +559,7 @@ mod tests {
 
         let html = "<div><span></span></div>";
         let mut reader = Reader::new(html);
-        let mut parser = XHtmlParser::<_, true>::new(selectors);
+        let mut parser = XHtmlParser::new(selectors);
         while parser.next(&mut reader) {}
 
         assert!(!parser.selectors.cursor_stats_enabled());

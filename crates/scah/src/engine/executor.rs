@@ -782,7 +782,7 @@ mod tests {
     fn parse<'html>(html: &'html str, queries: &'html [Query]) -> Store<'html, 'html> {
         let reader = &mut Reader::new(html);
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         parser.matches()
     }
@@ -1022,7 +1022,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("main > section", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1036,7 +1036,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("div div a", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1053,7 +1053,7 @@ mod tests {
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1078,7 +1078,7 @@ mod tests {
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1100,7 +1100,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("div span", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1115,7 +1115,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("ul li", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1129,7 +1129,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("body div ul li a", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1153,7 +1153,7 @@ mod tests {
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1325,7 +1325,7 @@ mod tests {
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1353,7 +1353,7 @@ mod tests {
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1410,7 +1410,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("div p", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1424,7 +1424,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::first("div span", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1697,7 +1697,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("main > div p", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1772,7 +1772,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("div > p", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1786,7 +1786,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("div", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1804,7 +1804,7 @@ mod tests {
             .unwrap()
             .build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1837,7 +1837,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::first("div p", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
 
@@ -1852,7 +1852,7 @@ mod tests {
             .unwrap()
             .build()];
         let manager2 = QueryMultiplexer::new(query2);
-        let mut parser2 = XHtmlParser::<_, true>::new(manager2);
+        let mut parser2 = XHtmlParser::new(manager2);
         while parser2.next(reader2) {}
         let store2 = parser2.matches();
 
@@ -1890,7 +1890,7 @@ mod tests {
         let reader = &mut Reader::new(html_li);
         let queries = [query.clone()];
         let manager = QueryMultiplexer::new(&queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
         let ps: Vec<_> = store.get("div > div p").unwrap().collect();
@@ -2048,7 +2048,7 @@ mod tests {
             let reader = &mut Reader::new(&html);
             let query = &[Query::first(tag, Save::all()).unwrap().build()];
             let manager = QueryMultiplexer::new(query);
-            let mut parser = XHtmlParser::<_, true>::new(manager);
+            let mut parser = XHtmlParser::new(manager);
             while parser.next(reader) {}
             let store = parser.matches();
             let hits: Vec<_> = store.get(tag).unwrap().collect();
@@ -2062,7 +2062,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("br", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
         let hits: Vec<_> = store.get("br").unwrap().collect();
@@ -2086,7 +2086,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let nested = &[Query::all("div", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(nested);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
         assert_eq!(store.get("div").unwrap().count(), 3);
@@ -2095,7 +2095,7 @@ mod tests {
         let reader = &mut Reader::new(sibling_html);
         let sibling_q = &[Query::all("main > section", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(sibling_q);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
         assert_eq!(store.get("main > section").unwrap().count(), 2);
@@ -2107,7 +2107,7 @@ mod tests {
         let reader = &mut Reader::new(html);
         let query = &[Query::all("div br", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(query);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         let store = parser.matches();
         assert_eq!(store.get("div br").unwrap().count(), 2);
@@ -2282,7 +2282,7 @@ mod tests {
         let queries = [query];
         let reader = &mut Reader::new(&html);
         let manager = QueryMultiplexer::new(&queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         assert!(
             reader.get_position() < html_len,
@@ -2312,7 +2312,7 @@ mod tests {
         let queries = [query];
         let reader = &mut Reader::new(&html);
         let manager = QueryMultiplexer::new(&queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         assert!(
             reader.get_position() < html_len,
@@ -2336,7 +2336,7 @@ mod tests {
         let queries = [query];
         let reader = &mut Reader::new(&html);
         let manager = QueryMultiplexer::new(&queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         assert!(
             reader.get_position() < html_len,
@@ -2362,7 +2362,7 @@ mod tests {
         let queries = [query];
         let reader = &mut Reader::new(&article_html);
         let manager = QueryMultiplexer::new(&queries);
-        let mut parser = XHtmlParser::<_, true>::new(manager);
+        let mut parser = XHtmlParser::new(manager);
         while parser.next(reader) {}
         assert!(
             reader.get_position() < article_len,
@@ -2381,7 +2381,7 @@ mod tests {
         let flat_queries = [flat_query];
         let reader2 = &mut Reader::new(&flat_html);
         let manager2 = QueryMultiplexer::new(&flat_queries);
-        let mut parser2 = XHtmlParser::<_, true>::new(manager2);
+        let mut parser2 = XHtmlParser::new(manager2);
         while parser2.next(reader2) {}
         assert!(reader2.get_position() < flat_len);
 
@@ -2391,7 +2391,7 @@ mod tests {
         let br_queries = [br_query];
         let reader3 = &mut Reader::new(&br_html);
         let manager3 = QueryMultiplexer::new(&br_queries);
-        let mut parser3 = XHtmlParser::<_, true>::new(manager3);
+        let mut parser3 = XHtmlParser::new(manager3);
         while parser3.next(reader3) {}
         assert!(reader3.get_position() < br_len);
     }

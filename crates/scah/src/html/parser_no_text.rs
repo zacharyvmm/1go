@@ -20,7 +20,7 @@ struct ParserTempState<'html> {
 ///
 /// This intentionally lives outside the text-capturing parser module so
 /// no-text-only binaries do not retain text extraction implementation details.
-pub struct NoTextParser<'html, 'query, Q> {
+pub(crate) struct NoTextParser<'html, 'query, Q> {
     position: DocumentPosition,
     pub selectors: QueryMultiplexer<'query, Q>,
     store: Store<'html, 'query>,
