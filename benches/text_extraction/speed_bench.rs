@@ -126,25 +126,99 @@ fn consume_text(store: &scah::Store<'_, '_>, selector: &str) {
 }
 
 fn bench_text_modes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("text_extraction_modes");
-    group.sample_size(100);
+    // ── Primary Performance Gate: main parse() vs PR parse() ────────
+    let mut parse_group = c.benchmark_group("text_extraction_parse");
+    parse_group.sample_size(100);
 
-    for size in [100usize, 1_000].iter().copied() {
+    for size in [1000usize].iter().copied() {
         let prose = prose_html(size);
-        group.throughput(Throughput::Bytes(prose.len() as u64));
+        parse_group.throughput(Throughput::Bytes(prose.len() as u64));
 
         let none_q = &[Query::all("p", Save::none()).unwrap().build()];
-        group.bench_with_input(BenchmarkId::new("no_content", size), &prose, |b, html| {
+        parse_group.bench_with_input(BenchmarkId::new("no_content", size), &prose, |b, html| {
             b.iter(|| {
-                let store = parse_without_text_capture(black_box(html), black_box(none_q)).unwrap();
+                let store = parse(black_box(html), black_box(none_q)).unwrap();
                 black_box(store);
             })
         });
 
-        // Same prose document, selector that matches nothing — isolates scan-path
-        // overhead from matched-result / SavedElement layout costs for Save::none().
         let none_no_match_q = &[Query::all("article > span", Save::none()).unwrap().build()];
-        group.bench_with_input(
+        parse_group.bench_with_input(
+            BenchmarkId::new("no_content_no_matches", size),
+            &prose,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(none_no_match_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+
+        let inner_q = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
+        parse_group.bench_with_input(
+            BenchmarkId::new("inner_html_only", size),
+            &prose,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(inner_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+
+        let no_match_q = &[Query::all("article > span", Save::only_inner_html())
+            .unwrap()
+            .build()];
+        parse_group.bench_with_input(
+            BenchmarkId::new("inner_html_no_matches", size),
+            &prose,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(no_match_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+
+        let voids = matched_void_html(size);
+        let void_q = &[Query::all("input", Save::none()).unwrap().build()];
+        parse_group.throughput(Throughput::Bytes(voids.len() as u64));
+        parse_group.bench_with_input(
+            BenchmarkId::new("matched_void_no_content", size),
+            &voids,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(void_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+    parse_group.finish();
+
+    // ── Specialized No-Text API: parse_without_text_capture() ────────
+    let mut specialized_group = c.benchmark_group("text_extraction_no_text_api");
+    specialized_group.sample_size(100);
+
+    for size in [1000usize].iter().copied() {
+        let prose = prose_html(size);
+        specialized_group.throughput(Throughput::Bytes(prose.len() as u64));
+
+        let none_q = &[Query::all("p", Save::none()).unwrap().build()];
+        specialized_group.bench_with_input(
+            BenchmarkId::new("no_content", size),
+            &prose,
+            |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse_without_text_capture(black_box(html), black_box(none_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+
+        let none_no_match_q = &[Query::all("article > span", Save::none()).unwrap().build()];
+        specialized_group.bench_with_input(
             BenchmarkId::new("no_content_no_matches", size),
             &prose,
             |b, html| {
@@ -156,6 +230,59 @@ fn bench_text_modes(c: &mut Criterion) {
                 })
             },
         );
+
+        let inner_q = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
+        specialized_group.bench_with_input(
+            BenchmarkId::new("inner_html_only", size),
+            &prose,
+            |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse_without_text_capture(black_box(html), black_box(inner_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+
+        let no_match_q = &[Query::all("article > span", Save::only_inner_html())
+            .unwrap()
+            .build()];
+        specialized_group.bench_with_input(
+            BenchmarkId::new("inner_html_no_matches", size),
+            &prose,
+            |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse_without_text_capture(black_box(html), black_box(no_match_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+
+        let voids = matched_void_html(size);
+        let void_q = &[Query::all("input", Save::none()).unwrap().build()];
+        specialized_group.throughput(Throughput::Bytes(voids.len() as u64));
+        specialized_group.bench_with_input(
+            BenchmarkId::new("matched_void_no_content", size),
+            &voids,
+            |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse_without_text_capture(black_box(html), black_box(void_q)).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+    specialized_group.finish();
+
+    // ── Text-Enabled Workloads ───────────────────────────────────────
+    let mut group = c.benchmark_group("text_extraction_modes");
+    group.sample_size(100);
+
+    for size in [100usize, 1_000].iter().copied() {
+        let prose = prose_html(size);
+        group.throughput(Throughput::Bytes(prose.len() as u64));
 
         let raw_q = &[Query::all("p", Save::only_raw_text()).unwrap().build()];
         group.bench_with_input(BenchmarkId::new("raw_only", size), &prose, |b, html| {
@@ -283,52 +410,6 @@ fn bench_text_modes(c: &mut Criterion) {
                 black_box(store);
             })
         });
-
-        let inner_q = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
-        group.throughput(Throughput::Bytes(prose.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("inner_html_only", size),
-            &prose,
-            |b, html| {
-                b.iter(|| {
-                    let store =
-                        parse_without_text_capture(black_box(html), black_box(inner_q)).unwrap();
-                    black_box(store);
-                })
-            },
-        );
-
-        // Same prose document, but a selector that matches nothing — isolates
-        // parser/store overhead from matched-result / SavedElement layout costs.
-        let no_match_q = &[Query::all("article > span", Save::only_inner_html())
-            .unwrap()
-            .build()];
-        group.bench_with_input(
-            BenchmarkId::new("inner_html_no_matches", size),
-            &prose,
-            |b, html| {
-                b.iter(|| {
-                    let store =
-                        parse_without_text_capture(black_box(html), black_box(no_match_q)).unwrap();
-                    black_box(store);
-                })
-            },
-        );
-
-        let voids = matched_void_html(size);
-        let void_q = &[Query::all("input", Save::none()).unwrap().build()];
-        group.throughput(Throughput::Bytes(voids.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("matched_void_no_content", size),
-            &voids,
-            |b, html| {
-                b.iter(|| {
-                    let store =
-                        parse_without_text_capture(black_box(html), black_box(void_q)).unwrap();
-                    black_box(store);
-                })
-            },
-        );
     }
 
     let nested = nested_html(32);

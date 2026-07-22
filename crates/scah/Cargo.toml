@@ -34,9 +34,6 @@ otel = ["dep:tracing"]
 pretty_assertions = "1.4.1"
 criterion = { version = "0.8.1", features = ["html_reports"] }
 
-[[bench]]
-name = "gate_compare"
-harness = false
 
 [lints.clippy]
 let-and-return = "allow"
