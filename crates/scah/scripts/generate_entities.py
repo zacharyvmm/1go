@@ -201,7 +201,7 @@ def rustfmt_file(path: Path) -> None:
 
     rustfmt = shutil.which("rustfmt")
     if rustfmt is None:
-        return
+        raise RuntimeError("rustfmt is required to regenerate entities_table.rs")
     subprocess.run([rustfmt, str(path)], check=True)
 
 

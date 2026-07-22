@@ -92,6 +92,12 @@ class GenerationTests(unittest.TestCase):
         self.assertIn("Third-party license: THIRD_PARTY_LICENSES/WHATWG-HTML.txt", first)
         self.assertIn(f"Source SHA-256: {source_hash}", first)
 
+    def test_missing_rustfmt_raises_error(self) -> None:
+        with mock.patch("shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.gen.rustfmt_file(Path("dummy.rs"))
+            self.assertIn("rustfmt is required to regenerate entities_table.rs", str(ctx.exception))
+
     def test_update_fixture_uses_same_downloaded_bytes(self) -> None:
         payload = {
             "&amp;": {"codepoints": [38], "characters": "&"},
