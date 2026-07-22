@@ -114,8 +114,13 @@ class GenerationTests(unittest.TestCase):
 
             self.assertEqual(written_fixture, raw)
             self.assertIn(f"Source SHA-256: {source_hash}", written_table)
-            self.assertIn('("amp;", "&")', written_table)
-            self.assertIn('("lt;", "<")', written_table)
+            self.assertIn("NAMED_ENTITY_COUNT: usize = 2", written_table)
+            # "amp;" then "lt;" as UTF-8 in the name blob; "&" then "<" in values.
+            self.assertIn(
+                "0x61, 0x6D, 0x70, 0x3B, 0x6C, 0x74, 0x3B", written_table
+            )
+            self.assertIn("0x26, 0x3C", written_table)
+            self.assertIn("ENTITY_NAME_ENDS", written_table)
             self.assertNotIn("Retrieved:", written_table)
 
             # Default generation from the updated fixture must match.

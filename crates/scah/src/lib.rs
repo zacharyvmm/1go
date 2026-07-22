@@ -112,6 +112,7 @@ mod otel;
 pub use engine::multiplexer::QueryMultiplexer;
 pub use html::element::builder::XHtmlElement;
 pub use html::parser::XHtmlParser;
+pub use html::parser_no_text::NoTextParser;
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
 pub use scah_query_ir::{
@@ -128,7 +129,7 @@ pub use store::{CapacityOptions, Element, ElementId, Store};
 /// Cursor instrumentation is available only with `bench-internals`.
 #[doc(hidden)]
 pub mod bench_internals {
-    pub use crate::html::tag::{ScopeKind, TagFlags};
+    pub use crate::html::tag::{ClassifiedTag, ScopeKind, TagFlags, TextTagFlags};
 
     #[cfg(feature = "bench-internals")]
     pub use crate::engine::cursor::ScopedCursor;
@@ -161,10 +162,55 @@ pub mod bench_internals {
         let mut selectors = QueryMultiplexer::new_with_cursor_stats(queries);
         selectors.sample_cursor_stats();
 
-        let mut parser = if no_extra_allocations {
-            XHtmlParser::new(selectors)
+        let requirements = selectors.text_requirements();
+        let capture = requirements.raw_text || requirements.text;
+
+        if capture {
+            run_capturing_parser_with_cursor_stats(html, selectors, no_extra_allocations)
         } else {
-            XHtmlParser::with_capacity(selectors, html.len())
+            run_no_text_parser_with_cursor_stats(html, selectors, no_extra_allocations)
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn run_no_text_parser_with_cursor_stats<'html, 'query: 'html, Q>(
+        html: &'html str,
+        selectors: QueryMultiplexer<'query, Q>,
+        no_extra_allocations: bool,
+    ) -> Result<(Store<'html, 'query>, CursorStatsSnapshot), ParseError>
+    where
+        Q: QuerySpec<'query>,
+    {
+        let mut parser = if no_extra_allocations {
+            crate::NoTextParser::new(selectors)
+        } else {
+            crate::NoTextParser::with_capacity(selectors, html.len())
+        };
+
+        let mut reader = Reader::new(html);
+        while parser.next(&mut reader) {}
+
+        if let Some(err) = parser.take_parse_error() {
+            return Err(err);
+        }
+
+        let stats = parser.selectors.cursor_stats_snapshot();
+        Ok((parser.finish(), stats))
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn run_capturing_parser_with_cursor_stats<'html, 'query: 'html, Q>(
+        html: &'html str,
+        selectors: QueryMultiplexer<'query, Q>,
+        no_extra_allocations: bool,
+    ) -> Result<(Store<'html, 'query>, CursorStatsSnapshot), ParseError>
+    where
+        Q: QuerySpec<'query>,
+    {
+        let mut parser = if no_extra_allocations {
+            XHtmlParser::<Q, true>::new(selectors)
+        } else {
+            XHtmlParser::<Q, true>::with_capacity(selectors, html.len())
         };
 
         let mut reader = Reader::new(html);
@@ -189,6 +235,9 @@ pub enum ParseError {
     EmptyQueries,
     /// The open-element stack exceeded [`engine::MAX_ELEMENT_DEPTH`].
     MaximumDepthExceeded,
+    /// [`parse_without_text_capture`] was called with queries that request
+    /// raw or normalized text. Use [`parse`] instead.
+    TextCaptureRequired,
 }
 
 impl std::fmt::Display for ParseError {
@@ -198,6 +247,10 @@ impl std::fmt::Display for ParseError {
             ParseError::MaximumDepthExceeded => {
                 write!(f, "HTML nesting depth exceeds the maximum supported depth")
             }
+            ParseError::TextCaptureRequired => write!(
+                f,
+                "parse_without_text_capture cannot run queries that capture raw or normalized text; use parse"
+            ),
         }
     }
 }
@@ -251,15 +304,96 @@ where
     let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
 
     let selectors = QueryMultiplexer::new(queries);
+    let requirements = selectors.text_requirements();
+    let capture = requirements.raw_text || requirements.text;
+    let query_count = queries.len();
 
-    let mut parser = if no_extra_allocations {
-        XHtmlParser::new(selectors)
+    // Specialize the parser so no-text parses do not keep text-capture code in
+    // the monomorphized hot path. Binaries that only call
+    // [`parse_without_text_capture`] never reference the capturing parser, so
+    // LTO can drop it entirely (matching main's no-text image size).
+    if capture {
+        parse_with_parser::<_, true>(html, selectors, no_extra_allocations, query_count)
     } else {
-        XHtmlParser::with_capacity(selectors, html.len())
+        run_no_text_parser(html, selectors, no_extra_allocations, query_count)
+    }
+}
+
+/// Parse HTML for queries that do not capture raw or normalized text.
+///
+/// This entry point never references the text-capturing parser, so no-text-only
+/// binaries (and their Criterion harnesses) can drop entity tables and text-path
+/// code via LTO. Prefer it for inner-HTML / no-content workloads that must stay
+/// competitive with main.
+///
+/// # Errors
+///
+/// Returns [`ParseError::TextCaptureRequired`] when any query requests raw or
+/// normalized text. Use [`parse`] for those workloads.
+pub fn parse_without_text_capture<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    queries: &'a [Q],
+) -> Result<Store<'html, 'query>, ParseError>
+where
+    Q: QuerySpec<'query>,
+{
+    if queries.is_empty() {
+        return Err(ParseError::EmptyQueries);
+    }
+
+    let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
+    let selectors = QueryMultiplexer::new(queries);
+    let requirements = selectors.text_requirements();
+    if requirements.raw_text || requirements.text {
+        return Err(ParseError::TextCaptureRequired);
+    }
+
+    run_no_text_parser(html, selectors, no_extra_allocations, queries.len())
+}
+
+fn run_no_text_parser<'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    selectors: QueryMultiplexer<'query, Q>,
+    no_extra_allocations: bool,
+    query_count: usize,
+) -> Result<Store<'html, 'query>, ParseError>
+where
+    Q: QuerySpec<'query>,
+{
+    let mut parser = if no_extra_allocations {
+        NoTextParser::new(selectors)
+    } else {
+        NoTextParser::with_capacity(selectors, html.len())
     };
 
     let mut reader = Reader::new(html);
-    parser.trace_parse_started(html.len(), queries.len());
+    parser.trace_parse_started(html.len(), query_count);
+    while parser.next(&mut reader) {}
+
+    if let Some(err) = parser.take_parse_error() {
+        return Err(err);
+    }
+
+    Ok(parser.finish())
+}
+
+fn parse_with_parser<'html: 'query, 'query: 'html, Q, const CAPTURE: bool>(
+    html: &'html str,
+    selectors: QueryMultiplexer<'query, Q>,
+    no_extra_allocations: bool,
+    query_count: usize,
+) -> Result<Store<'html, 'query>, ParseError>
+where
+    Q: QuerySpec<'query>,
+{
+    let mut parser = if no_extra_allocations {
+        XHtmlParser::<Q, CAPTURE>::new(selectors)
+    } else {
+        XHtmlParser::<Q, CAPTURE>::with_capacity(selectors, html.len())
+    };
+
+    let mut reader = Reader::new(html);
+    parser.trace_parse_started(html.len(), query_count);
     while parser.next(&mut reader) {}
 
     if let Some(err) = parser.take_parse_error() {
@@ -272,6 +406,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_without_text_capture_rejects_text_queries() {
+        let html = "<p>x</p>";
+        let queries = &[Query::all("p", Save::only_text())
+            .expect("valid selector")
+            .build()];
+        let err = parse_without_text_capture(html, queries).unwrap_err();
+        assert!(matches!(err, ParseError::TextCaptureRequired));
+    }
 
     #[test]
     fn empty_query_slice_returns_error() {
@@ -415,7 +559,7 @@ mod tests {
 
         let html = "<div><span></span></div>";
         let mut reader = Reader::new(html);
-        let mut parser = XHtmlParser::new(selectors);
+        let mut parser = XHtmlParser::<_, true>::new(selectors);
         while parser.next(&mut reader) {}
 
         assert!(!parser.selectors.cursor_stats_enabled());

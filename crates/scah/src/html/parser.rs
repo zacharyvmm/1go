@@ -1,9 +1,9 @@
 use super::element::builder::XHtmlTag;
 use super::open_elements::{OpenElement, OpenElementStack};
-use super::tag::TagFlags;
+use super::tag::{ClassifiedTag, TagFlags, TextTagFlags};
+use super::text_edge::TextEdgePolicy;
 use super::text_state::{
-    ParserTextState, PendingSeparator, TextCaptureMode, TextEdgePolicy, TextElementBehavior,
-    TextElementFlags,
+    ParserTextState, PendingSeparator, TextCaptureMode, TextElementBehavior, TextElementFlags,
 };
 use crate::ParseError;
 use crate::QuerySpec;
@@ -23,19 +23,26 @@ struct ParserTempState<'html> {
     save_hits: Vec<SaveHit>,
 }
 
-pub struct XHtmlParser<'html, 'query, Q> {
+pub struct XHtmlParser<'html, 'query, Q, const CAPTURE: bool = true> {
     position: DocumentPosition,
     pub selectors: QueryMultiplexer<'query, Q>,
     store: Store<'html, 'query>,
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
+    /// Depth-aligned with `open_elements` when normalized text is captured.
+    /// Remains empty on no-text / raw-only paths so stack entries stay lean.
+    text_open_flags: Vec<TextElementFlags>,
     temp_state: ParserTempState<'html>,
     /// Hot-path capture mode (mirrors `text_state.mode` for cheaper checks).
     capture_mode: TextCaptureMode,
-    text_state: ParserTextState,
+    /// Present only when raw and/or normalized text capture is enabled.
+    /// Boxed so no-text parsers keep a smaller inline footprint.
+    text_state: Option<Box<ParserTextState>>,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
     parse_error: Option<ParseError>,
+    #[cfg(feature = "bench-internals")]
+    path_stats: crate::html::TextPathStats,
 }
 
 /// A raw-text end tag is only "appropriate" when the tag name is immediately
@@ -68,7 +75,7 @@ fn element_has_hidden(element: &XHtmlElement<'_>, text_state: &mut ParserTextSta
 /// Only called when normalized text capture is enabled.
 #[inline]
 fn text_behavior_for(
-    tag: TagFlags,
+    text_tag: TextTagFlags,
     has_hidden: bool,
     text_state: &mut ParserTextState,
 ) -> TextElementBehavior {
@@ -78,11 +85,11 @@ fn text_behavior_for(
     }
     #[cfg(not(feature = "bench-internals"))]
     let _ = text_state;
-    let suppressed = tag.is_text_suppressed() || has_hidden;
-    let preformatted = tag.is_text_preformatted();
+    let suppressed = text_tag.is_suppressed() || has_hidden;
+    let preformatted = text_tag.is_preformatted();
     let opening_separator = if suppressed {
         PendingSeparator::None
-    } else if tag.is_text_block() || tag.is_text_row() {
+    } else if text_tag.is_block() || text_tag.is_row() {
         PendingSeparator::LineBreak
     } else {
         PendingSeparator::None
@@ -94,13 +101,15 @@ fn text_behavior_for(
     }
 }
 
-impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
+impl<'html, 'query: 'html, Q, const CAPTURE: bool> XHtmlParser<'html, 'query, Q, CAPTURE>
 where
     Q: QuerySpec<'query>,
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
         let requirements = selectors.text_requirements();
-        let text_state = ParserTextState::new(requirements);
+        let capture_mode = TextCaptureMode::from_requirements(requirements);
+        let text_state = (!matches!(capture_mode, TextCaptureMode::None))
+            .then(|| Box::new(ParserTextState::new(requirements)));
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -110,19 +119,24 @@ where
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
+            text_open_flags: Vec::new(),
             temp_state: ParserTempState::default(),
-            capture_mode: text_state.mode,
+            capture_mode,
             text_state,
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
             store: Store::default(),
+            #[cfg(feature = "bench-internals")]
+            path_stats: crate::html::TextPathStats::default(),
         }
     }
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
         let requirements = selectors.text_requirements();
-        let text_state = ParserTextState::new(requirements);
+        let capture_mode = TextCaptureMode::from_requirements(requirements);
+        let text_state = (!matches!(capture_mode, TextCaptureMode::None))
+            .then(|| Box::new(ParserTextState::new(requirements)));
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -132,8 +146,9 @@ where
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
+            text_open_flags: Vec::new(),
             temp_state: ParserTempState::default(),
-            capture_mode: text_state.mode,
+            capture_mode,
             text_state,
             raw_text_close: None,
             eof_drained: false,
@@ -146,22 +161,30 @@ where
                     ..crate::CapacityOptions::default()
                 },
             ),
+            #[cfg(feature = "bench-internals")]
+            path_stats: crate::html::TextPathStats::default(),
         }
     }
 
     fn flush_source_text(&mut self, reader: &Reader<'html>, end: usize) {
         #[cfg(feature = "bench-internals")]
         {
-            self.text_state.path_stats.flush_calls += 1;
+            self.path_stats.flush_calls += 1;
         }
-        let Some(start) = self.text_state.source_start.take() else {
+        let Some(start) = self
+            .text_state
+            .as_deref_mut()
+            .expect("text state")
+            .source_start
+            .take()
+        else {
             return;
         };
         if start >= end {
             return;
         }
         let slice = reader.slice(start..end);
-        match self.text_state.mode {
+        match self.text_state.as_deref_mut().expect("text state").mode {
             TextCaptureMode::None => {}
             TextCaptureMode::RawOnly => {
                 self.store.text.raw_text.push_str(slice);
@@ -169,18 +192,195 @@ where
             TextCaptureMode::TextOnly => {
                 let depth = self.position.element_depth;
                 self.text_state
+                    .as_deref_mut()
+                    .expect("text state")
                     .write_normalized_fragment(&mut self.store.text.text, slice, depth);
             }
             TextCaptureMode::Both => {
                 self.store.text.raw_text.push_str(slice);
                 let depth = self.position.element_depth;
                 self.text_state
+                    .as_deref_mut()
+                    .expect("text state")
                     .write_normalized_fragment(&mut self.store.text.text, slice, depth);
             }
         }
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
+        // Const-generic capture specialization: the no-text monomorphization does
+        // not reference the text-capture path, so LTO can drop it.
+        if CAPTURE {
+            self.next_with_capture(reader)
+        } else {
+            self.next_without_text(reader)
+        }
+    }
+
+    /// Lean scanner for `Save` modes that capture neither raw nor normalized text.
+    ///
+    /// Mirrors main's open/close hot path: parser-only tag classification, no
+    /// source-tape flushes, and no text-flag stack traffic.
+    fn next_without_text(&mut self, reader: &mut Reader<'html>) -> bool {
+        if self.parse_error.is_some() {
+            return false;
+        }
+        if let Some(close_tag) = self.raw_text_close {
+            loop {
+                reader.next_until(b'<');
+                if reader.peek().is_none() {
+                    self.drain_open_elements(reader);
+                    return false;
+                }
+
+                if reader.match_ignore_case(close_tag)
+                    && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
+                {
+                    self.raw_text_close = None;
+
+                    self.position.reader_position = reader.get_position();
+                    reader.next_until(b'>');
+                    reader.skip();
+
+                    let closing_tag = &close_tag[2..];
+                    let early_exit = self.handle_close_tag(closing_tag, reader);
+                    return !early_exit && !reader.eof();
+                } else {
+                    reader.skip();
+                }
+            }
+        }
+
+        reader.next_until(b'<');
+
+        if reader.peek().is_none() {
+            self.drain_open_elements(reader);
+            return false;
+        }
+
+        let tag = {
+            let mut tag: Option<XHtmlTag> = None;
+
+            while tag.is_none() {
+                self.position.reader_position = reader.get_position();
+                tag = XHtmlTag::from(reader);
+                if let Some(XHtmlTag::Open) = tag {
+                    self.element.from(reader, &mut self.store.attributes);
+                } else if tag.is_none() {
+                    reader.next_until(b'<');
+                    if reader.peek().is_none() {
+                        self.drain_open_elements(reader);
+                        return false;
+                    }
+                }
+            }
+
+            tag.unwrap()
+        };
+        let tag_start_position = self.position.reader_position;
+
+        let mut early_exit = false;
+
+        match tag {
+            XHtmlTag::Open => {
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.path_stats.tag_classifications += 1;
+                }
+
+                let tag = TagFlags::classify(self.element.name);
+
+                if let Some(close_tag) = tag.raw_text_close_tag() {
+                    self.raw_text_close = Some(close_tag);
+                }
+
+                self.position.reader_position = tag_start_position;
+                self.open_elements
+                    .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
+                self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
+                self.position.reader_position = reader.get_position();
+
+                let is_self_closing = tag.is_void();
+                self.position.self_closing = is_self_closing;
+
+                if is_self_closing {
+                    let depth = self.open_elements.depth().saturating_add(1);
+                    if depth > MAX_ELEMENT_DEPTH {
+                        self.record_parse_error(ParseError::MaximumDepthExceeded);
+                        return false;
+                    }
+                    self.position.element_depth = depth;
+                } else if let Err(err) = self.open_elements.push_classified(self.element.name, tag)
+                {
+                    self.record_parse_error(err);
+                    return false;
+                } else {
+                    self.position.element_depth = self.open_elements.depth();
+                }
+
+                crate::scah_trace!(
+                    self.store,
+                    TraceEvent::OpenTag {
+                        tag: self.element.name,
+                        depth: self.position.element_depth,
+                        reader_position: self.position.reader_position,
+                        self_closing: is_self_closing,
+                    }
+                );
+
+                self.selectors.next_into(
+                    &self.element,
+                    &self.position,
+                    &mut self.store,
+                    &mut self.temp_state.save_hits,
+                );
+                if is_self_closing {
+                    early_exit = self.selectors.back(
+                        self.element.name,
+                        &self.position,
+                        reader,
+                        &mut self.store,
+                    ) || early_exit;
+                } else {
+                    for save_hit in &self.temp_state.save_hits {
+                        if !save_hit.needs_close_finalization() {
+                            continue;
+                        }
+                        self.open_elements.attach_saved(
+                            save_hit.element_id,
+                            save_hit
+                                .save_inner_html
+                                .then_some(self.position.reader_position),
+                            None,
+                            None,
+                            TextEdgePolicy::TrimCollapsedSeparators,
+                        );
+                    }
+                }
+
+                self.element.clear();
+            }
+            XHtmlTag::Close(closing_tag) => {
+                early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
+            }
+        }
+
+        !early_exit && !reader.eof()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn next_with_capture(&mut self, reader: &mut Reader<'html>) -> bool {
+        let raw = self.capture_mode.captures_raw();
+        let text = self.capture_mode.captures_text();
+        self.next_impl(reader, raw, text)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn next_impl(&mut self, reader: &mut Reader<'html>, raw: bool, text: bool) -> bool {
+        let captures_any = raw || text;
+
         if self.parse_error.is_some() {
             return false;
         }
@@ -203,7 +403,7 @@ where
                 if reader.match_ignore_case(close_tag)
                     && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
                 {
-                    if self.capture_mode.captures_any() {
+                    if captures_any {
                         self.flush_source_text(reader, reader.get_position());
                     }
                     self.raw_text_close = None;
@@ -214,8 +414,11 @@ where
 
                     let closing_tag = &close_tag[2..];
                     let early_exit = self.handle_close_tag(closing_tag, reader);
-                    if self.capture_mode.captures_any() {
-                        self.text_state.mark_source_start(reader.get_position());
+                    if captures_any {
+                        self.text_state
+                            .as_deref_mut()
+                            .expect("text state")
+                            .mark_source_start(reader.get_position());
                     }
                     return !early_exit && !reader.eof();
                 } else {
@@ -243,14 +446,20 @@ where
                 } else if tag.is_none() {
                     // Comment / doctype / declaration: keep preceding text,
                     // skip the markup itself, then resume at the next `<`.
-                    if self.capture_mode.captures_any() {
+                    if captures_any {
                         self.flush_source_text(reader, self.position.reader_position);
                     }
-                    if self.capture_mode.captures_text() {
-                        self.text_state.cancel_initial_newline();
+                    if text {
+                        self.text_state
+                            .as_deref_mut()
+                            .expect("text state")
+                            .cancel_initial_newline();
                     }
-                    if self.capture_mode.captures_any() {
-                        self.text_state.mark_source_start(reader.get_position());
+                    if captures_any {
+                        self.text_state
+                            .as_deref_mut()
+                            .expect("text state")
+                            .mark_source_start(reader.get_position());
                     }
                     reader.next_until(b'<');
                     if reader.peek().is_none() {
@@ -264,7 +473,7 @@ where
         };
         let tag_start_position = self.position.reader_position;
 
-        if self.capture_mode.captures_any() {
+        if captures_any {
             self.flush_source_text(reader, tag_start_position);
         }
 
@@ -272,7 +481,24 @@ where
 
         match tag {
             XHtmlTag::Open => {
-                let tag = TagFlags::classify(self.element.name);
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.path_stats.tag_classifications += 1;
+                }
+
+                let (tag, text_tag) = if text {
+                    #[cfg(feature = "bench-internals")]
+                    {
+                        self.path_stats.text_tag_classifications += 1;
+                    }
+                    let classified = ClassifiedTag::classify(self.element.name);
+                    (classified.parser, classified.text)
+                } else {
+                    (
+                        TagFlags::classify(self.element.name),
+                        TextTagFlags::default(),
+                    )
+                };
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
@@ -287,46 +513,56 @@ where
                 let is_self_closing = tag.is_void();
                 self.position.self_closing = is_self_closing;
 
-                // Normalized-text bookkeeping is gated behind captures_text().
-                // Inner-HTML-only / no-content parses stay on a leaner path.
-                let (text_behavior, text_edge_policy, raw_start, text_start) =
-                    if self.capture_mode.captures_text() {
-                        let has_hidden = element_has_hidden(&self.element, &mut self.text_state);
-                        let behavior = text_behavior_for(tag, has_hidden, &mut self.text_state);
-                        let text_edge_policy = self
-                            .text_state
-                            .edge_policy_for_child(behavior, tag.is_text_cell());
-                        self.text_state.cancel_initial_newline();
-                        self.text_state.before_open_element(
-                            &mut self.store.text.text,
-                            behavior,
-                            is_self_closing,
-                        );
-                        self.text_state.before_text_range_start(
+                let (text_behavior, text_edge_policy, raw_start, text_start, text_flags) = if text {
+                    let has_hidden = element_has_hidden(
+                        &self.element,
+                        self.text_state.as_deref_mut().expect("text state"),
+                    );
+                    let behavior = text_behavior_for(
+                        text_tag,
+                        has_hidden,
+                        self.text_state.as_deref_mut().expect("text state"),
+                    );
+                    let text_edge_policy = self
+                        .text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .edge_policy_for_child(behavior, text_tag.is_cell());
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .cancel_initial_newline();
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .before_open_element(&mut self.store.text.text, behavior, is_self_closing);
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .before_text_range_start(
                             &mut self.store.text.text,
                             behavior,
                             text_edge_policy,
-                            tag.is_text_cell(),
+                            text_tag.is_cell(),
                         );
-                        (
-                            Some(behavior),
-                            text_edge_policy,
-                            self.store.text.raw_text.len(),
-                            self.store.text.text.len(),
-                        )
-                    } else if self.capture_mode.captures_raw() {
-                        (
-                            None,
-                            TextEdgePolicy::TrimCollapsedSeparators,
-                            self.store.text.raw_text.len(),
-                            0,
-                        )
-                    } else {
-                        (None, TextEdgePolicy::TrimCollapsedSeparators, 0, 0)
-                    };
-                let text_flags = text_behavior
-                    .map(TextElementBehavior::flags)
-                    .unwrap_or_else(TextElementFlags::empty);
+                    (
+                        Some(behavior),
+                        text_edge_policy,
+                        self.store.text.raw_text.len(),
+                        self.store.text.text.len(),
+                        Some(behavior.stack_flags(text_tag)),
+                    )
+                } else if raw {
+                    (
+                        None,
+                        TextEdgePolicy::TrimCollapsedSeparators,
+                        self.store.text.raw_text.len(),
+                        0,
+                        None,
+                    )
+                } else {
+                    (None, TextEdgePolicy::TrimCollapsedSeparators, 0, 0, None)
+                };
 
                 if is_self_closing {
                     let depth = self.open_elements.depth().saturating_add(1);
@@ -335,13 +571,18 @@ where
                         return false;
                     }
                     self.position.element_depth = depth;
-                } else if let Err(err) =
-                    self.open_elements
-                        .push_classified(self.element.name, tag, text_flags)
+                } else if let Err(err) = self.open_elements.push_classified(self.element.name, tag)
                 {
                     self.record_parse_error(err);
                     return false;
                 } else {
+                    if let Some(flags) = text_flags {
+                        #[cfg(feature = "bench-internals")]
+                        {
+                            self.path_stats.text_flag_writes += 1;
+                        }
+                        self.text_open_flags.push(flags);
+                    }
                     self.position.element_depth = self.open_elements.depth();
                 }
 
@@ -379,9 +620,12 @@ where
                     // after the void itself is finalized as empty.
                     if let Some(behavior) = text_behavior
                         && !behavior.suppressed
-                        && tag.is_text_break()
+                        && text_tag.is_break()
                     {
-                        self.text_state.queue_separator(PendingSeparator::LineBreak);
+                        self.text_state
+                            .as_deref_mut()
+                            .expect("text state")
+                            .queue_separator(PendingSeparator::LineBreak);
                     }
                     early_exit = self.selectors.back(
                         self.element.name,
@@ -409,22 +653,33 @@ where
                     }
                     if let Some(behavior) = text_behavior {
                         self.text_state
+                            .as_deref_mut()
+                            .expect("text state")
                             .after_open_element(behavior, self.position.element_depth);
                     }
                 }
 
                 self.element.clear();
-                if self.capture_mode.captures_any() {
-                    self.text_state.mark_source_start(reader.get_position());
+                if captures_any {
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .mark_source_start(reader.get_position());
                 }
             }
             XHtmlTag::Close(closing_tag) => {
-                if self.capture_mode.captures_text() {
-                    self.text_state.cancel_initial_newline();
+                if text {
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .cancel_initial_newline();
                 }
                 early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
-                if self.capture_mode.captures_any() {
-                    self.text_state.mark_source_start(reader.get_position());
+                if captures_any {
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .mark_source_start(reader.get_position());
                 }
             }
         }
@@ -484,19 +739,27 @@ where
     ) -> bool {
         self.finalize_open_element(&open_element, reader);
         if self.capture_mode.captures_text() {
+            let text_flags = self
+                .text_open_flags
+                .pop()
+                .expect("text_open_flags stays depth-aligned with open_elements");
             self.text_state
-                .after_close_element(open_element.text_flags, close_depth);
-            if !open_element
-                .text_flags
-                .contains(TextElementFlags::SUPPRESSED)
-            {
-                let tag = open_element.tag();
-                if tag.is_text_cell() {
+                .as_deref_mut()
+                .expect("text state")
+                .after_close_element(text_flags, close_depth);
+            if !text_flags.contains(TextElementFlags::SUPPRESSED) {
+                if text_flags.contains(TextElementFlags::CELL) {
                     // Cell close must replace any pending end-of-cell separator
                     // (e.g. a generated block LineBreak) with the column tab.
-                    self.text_state.queue_cell_boundary();
-                } else if let Some(separator) = tag.post_text_separator() {
-                    self.text_state.queue_separator(separator);
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .queue_cell_boundary();
+                } else if let Some(separator) = text_flags.post_text_separator() {
+                    self.text_state
+                        .as_deref_mut()
+                        .expect("text state")
+                        .queue_separator(separator);
                 }
             }
         }
@@ -666,7 +929,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -791,7 +1054,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("a", Save::only_inner_html()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -811,7 +1074,7 @@ mod tests {
             Query::all("b", Save::only_text()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -836,7 +1099,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -887,7 +1150,7 @@ mod tests {
         let queries = &[queries.build()];
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -955,7 +1218,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -1003,7 +1266,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         println!("{:?}", queries);
 
@@ -1036,7 +1299,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         // STEP 1
         //let mut continue_parser = parser.next(&mut reader);
@@ -1074,7 +1337,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1098,7 +1361,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1140,7 +1403,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1227,7 +1490,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1254,7 +1517,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("p", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1273,7 +1536,7 @@ mod tests {
             Query::all("span", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1293,7 +1556,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("div span", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1312,7 +1575,7 @@ mod tests {
             Query::all("a", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1332,7 +1595,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("li", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1354,7 +1617,7 @@ mod tests {
             Query::all("dd", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1375,7 +1638,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("option", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1395,7 +1658,7 @@ mod tests {
             Query::all("option", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1417,7 +1680,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("td", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1437,7 +1700,7 @@ mod tests {
             Query::all(".x", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1460,7 +1723,7 @@ mod tests {
             Query::all("div > span", Save::all()).unwrap().build(),
         ];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1475,7 +1738,7 @@ mod tests {
         let mut reader = Reader::new(html);
         let queries = &[Query::all("div", Save::all()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1501,7 +1764,7 @@ mod tests {
         let html = "<section><div id=\"a\">x</div><div id=\"b\">y</div></section>";
         let queries = &[Query::all("div", Save::none()).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
         let mut reader = Reader::new(html);
 
         // Advance until the first matched <div> is open.
@@ -1569,7 +1832,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1660,7 +1923,7 @@ mod tests {
 
         let manager = QueryMultiplexer::new(queries);
 
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
 
         while parser.next(&mut reader) {}
 
@@ -1767,11 +2030,20 @@ mod tests {
     fn path_stats_for(html: &str, save: Save) -> crate::html::TextPathStats {
         let queries = &[Query::all("div", save).unwrap().build()];
         let manager = QueryMultiplexer::new(queries);
-        let mut parser = XHtmlParser::new(manager);
+        let mut parser = XHtmlParser::<_, true>::new(manager);
         let mut reader = Reader::new(html);
         while parser.next(&mut reader) {}
         assert!(parser.take_parse_error().is_none());
-        parser.text_state.path_stats
+        let mut stats = parser.path_stats;
+        if let Some(text_state) = parser.text_state.as_ref() {
+            stats.flush_calls += text_state.path_stats.flush_calls;
+            stats.mark_start_calls += text_state.path_stats.mark_start_calls;
+            stats.normalized_behavior_computations +=
+                text_state.path_stats.normalized_behavior_computations;
+            stats.hidden_attribute_scans += text_state.path_stats.hidden_attribute_scans;
+            stats.decoded_fragments += text_state.path_stats.decoded_fragments;
+        }
+        stats
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1783,6 +2055,8 @@ mod tests {
         assert_eq!(stats.normalized_behavior_computations, 0);
         assert_eq!(stats.hidden_attribute_scans, 0);
         assert_eq!(stats.decoded_fragments, 0);
+        assert_eq!(stats.text_tag_classifications, 0);
+        assert!(stats.tag_classifications > 0);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1794,6 +2068,8 @@ mod tests {
         assert_eq!(stats.normalized_behavior_computations, 0);
         assert_eq!(stats.hidden_attribute_scans, 0);
         assert_eq!(stats.decoded_fragments, 0);
+        assert_eq!(stats.text_tag_classifications, 0);
+        assert!(stats.tag_classifications > 0);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1805,5 +2081,19 @@ mod tests {
         assert_eq!(stats.normalized_behavior_computations, 0);
         assert_eq!(stats.hidden_attribute_scans, 0);
         assert_eq!(stats.decoded_fragments, 0);
+        assert_eq!(stats.text_tag_classifications, 0);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn text_only_runs_text_classification() {
+        let stats = path_stats_for("<div>A&amp;B</div>", Save::only_text());
+        assert!(stats.flush_calls > 0);
+        assert!(stats.normalized_behavior_computations > 0);
+        assert!(stats.text_tag_classifications > 0);
+        assert_eq!(
+            stats.text_tag_classifications, stats.tag_classifications,
+            "text mode should classify parser+text together once per open tag"
+        );
     }
 }

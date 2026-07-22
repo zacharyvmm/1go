@@ -3,7 +3,32 @@
 #[path = "entities_table.rs"]
 mod entities_table;
 
-use entities_table::{MAX_NAME_LEN, NAMED_ENTITIES};
+use entities_table::{
+    ENTITY_NAME_ENDS, ENTITY_NAMES, ENTITY_VALUE_ENDS, ENTITY_VALUES, MAX_NAME_LEN,
+    NAMED_ENTITY_COUNT,
+};
+
+#[inline]
+fn entity_name(index: usize) -> &'static [u8] {
+    let start = if index == 0 {
+        0
+    } else {
+        ENTITY_NAME_ENDS[index - 1] as usize
+    };
+    let end = ENTITY_NAME_ENDS[index] as usize;
+    &ENTITY_NAMES[start..end]
+}
+
+#[inline]
+fn entity_value(index: usize) -> &'static [u8] {
+    let start = if index == 0 {
+        0
+    } else {
+        ENTITY_VALUE_ENDS[index - 1] as usize
+    };
+    let end = ENTITY_VALUE_ENDS[index] as usize;
+    &ENTITY_VALUES[start..end]
+}
 
 /// Return whether `source` might need character-reference decoding.
 #[inline]
@@ -16,6 +41,8 @@ pub(crate) fn contains_ampersand(source: &str) -> bool {
 /// Decoded UTF-8 bytes are appended to `out`. Callers should use
 /// [`contains_ampersand`] to fast-path fragments that cannot contain a
 /// character reference.
+#[cold]
+#[inline(never)]
 pub(crate) fn decode_character_references(source: &str, out: &mut Vec<u8>) {
     let bytes = source.as_bytes();
     let mut copied_through = 0;
@@ -111,16 +138,29 @@ fn decode_named(source: &[u8], out: &mut Vec<u8>) -> Option<usize> {
 
     while candidate_end > 0 {
         let candidate = &source[..candidate_end];
-        if let Ok(index) =
-            NAMED_ENTITIES.binary_search_by(|(name, _)| name.as_bytes().cmp(candidate))
-        {
-            out.extend_from_slice(NAMED_ENTITIES[index].1.as_bytes());
+        if let Ok(index) = binary_search_entity_name(candidate) {
+            out.extend_from_slice(entity_value(index));
             return Some(candidate_end);
         }
         candidate_end -= 1;
     }
 
     None
+}
+
+#[inline]
+fn binary_search_entity_name(candidate: &[u8]) -> Result<usize, usize> {
+    let mut left = 0usize;
+    let mut right = NAMED_ENTITY_COUNT;
+    while left < right {
+        let mid = left + (right - left) / 2;
+        match entity_name(mid).cmp(candidate) {
+            std::cmp::Ordering::Less => left = mid + 1,
+            std::cmp::Ordering::Greater => right = mid,
+            std::cmp::Ordering::Equal => return Ok(mid),
+        }
+    }
+    Err(left)
 }
 
 fn normalize_numeric_reference(value: u64) -> char {

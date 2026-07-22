@@ -56,6 +56,13 @@ fn parse(html: String, queries: Vec<Reference<JsQuery>>) -> Result<JSStore> {
                 "HTML nesting depth exceeds the maximum supported depth".to_owned(),
             ));
         }
+        Err(ParseError::TextCaptureRequired) => {
+            // `parse` never returns this; only `parse_without_text_capture` does.
+            return Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                "internal error: unexpected TextCaptureRequired from parse".to_owned(),
+            ));
+        }
     };
 
     Ok(JSStore {

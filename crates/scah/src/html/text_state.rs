@@ -1,4 +1,5 @@
 use super::entities::{contains_ampersand, decode_character_references};
+use super::text_edge::TextEdgePolicy;
 use crate::engine::DepthSize;
 use crate::store::TextTape;
 use scah_query_ir::TextRequirements;
@@ -57,14 +58,6 @@ pub(crate) enum PendingSeparator {
     LineBreak = 3,
 }
 
-/// Whether a saved element's normalized range should trim collapsible edges.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TextEdgePolicy {
-    #[default]
-    TrimCollapsedSeparators,
-    Preserve,
-}
-
 /// Compact per-element normalized text behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TextElementBehavior {
@@ -77,6 +70,20 @@ impl TextElementBehavior {
     #[inline]
     pub fn flags(self) -> TextElementFlags {
         let mut flags = TextElementFlags::empty();
+        if self.suppressed {
+            flags.insert(TextElementFlags::SUPPRESSED);
+        }
+        if self.preformatted {
+            flags.insert(TextElementFlags::PREFORMATTED);
+        }
+        flags
+    }
+
+    /// Merge runtime behavior with tag classification bits for the open stack.
+    #[inline]
+    pub fn stack_flags(self, text_tag: super::tag::TextTagFlags) -> TextElementFlags {
+        let mut flags = TextElementFlags::from_text_tag(text_tag);
+        // Attribute-driven hidden suppression overrides / extends tag flags.
         if self.suppressed {
             flags.insert(TextElementFlags::SUPPRESSED);
         }
@@ -111,6 +118,9 @@ pub struct TextPathStats {
     pub normalized_behavior_computations: usize,
     pub hidden_attribute_scans: usize,
     pub decoded_fragments: usize,
+    pub tag_classifications: usize,
+    pub text_tag_classifications: usize,
+    pub text_flag_writes: usize,
 }
 
 impl ParserTextState {
@@ -536,13 +546,20 @@ fn apply_separator(tape: &mut TextTape, separator: PendingSeparator) {
     }
 }
 
-/// Instance-specific text behavior for an open element.
+/// Compact per-element normalized text behavior recorded on the open stack.
+///
+/// Includes both runtime behavior (suppressed / preformatted from attributes
+/// and tag class) and the classification bits needed at close time for
+/// structural separators. No-text parses push [`Self::empty`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TextElementFlags(u8);
 
 impl TextElementFlags {
     pub const SUPPRESSED: Self = Self(1 << 0);
     pub const PREFORMATTED: Self = Self(1 << 1);
+    pub const BREAK: Self = Self(1 << 2);
+    pub const LINE_SEP: Self = Self(1 << 3); // block or row → line break after close
+    pub const CELL: Self = Self(1 << 4);
 
     #[inline]
     pub const fn empty() -> Self {
@@ -557,6 +574,38 @@ impl TextElementFlags {
     #[inline]
     pub fn insert(&mut self, other: Self) {
         self.0 |= other.0;
+    }
+
+    #[inline]
+    pub(crate) fn from_text_tag(text_tag: super::tag::TextTagFlags) -> Self {
+        let mut flags = Self::empty();
+        if text_tag.is_break() {
+            flags.insert(Self::BREAK);
+        }
+        if text_tag.is_block() || text_tag.is_row() {
+            flags.insert(Self::LINE_SEP);
+        }
+        if text_tag.is_cell() {
+            flags.insert(Self::CELL);
+        }
+        if text_tag.is_suppressed() {
+            flags.insert(Self::SUPPRESSED);
+        }
+        if text_tag.is_preformatted() {
+            flags.insert(Self::PREFORMATTED);
+        }
+        flags
+    }
+
+    #[inline]
+    pub(crate) fn post_text_separator(self) -> Option<PendingSeparator> {
+        if self.contains(Self::BREAK) || self.contains(Self::LINE_SEP) {
+            Some(PendingSeparator::LineBreak)
+        } else if self.contains(Self::CELL) {
+            Some(PendingSeparator::Tab)
+        } else {
+            None
+        }
     }
 }
 

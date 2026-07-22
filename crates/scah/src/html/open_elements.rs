@@ -1,7 +1,7 @@
 use crate::ParseError;
 use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
-use crate::html::text_state::{TextEdgePolicy, TextElementFlags};
+use crate::html::text_edge::TextEdgePolicy;
 use crate::store::ElementId;
 
 /// Sentinel for an inactive deferred content-start offset.
@@ -69,12 +69,12 @@ impl SavedElement {
 pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
     tag: TagFlags,
-    pub text_flags: TextElementFlags,
     pub saved: Vec<SavedElement>,
 }
 
 impl<'html> OpenElement<'html> {
     #[inline]
+    #[allow(dead_code)] // retained for tests / debugging open-stack tag identity
     pub fn tag(&self) -> TagFlags {
         self.tag
     }
@@ -104,19 +104,13 @@ impl<'html> OpenElementStack<'html> {
         len >= MAX_ELEMENT_DEPTH as usize
     }
 
-    pub fn push_classified(
-        &mut self,
-        name: &'html str,
-        tag: TagFlags,
-        text_flags: TextElementFlags,
-    ) -> Result<(), ParseError> {
+    pub fn push_classified(&mut self, name: &'html str, tag: TagFlags) -> Result<(), ParseError> {
         if Self::would_exceed_max_depth(self.entries.len()) {
             return Err(ParseError::MaximumDepthExceeded);
         }
         self.entries.push(OpenElement {
             name,
             tag,
-            text_flags,
             saved: Vec::new(),
         });
         Ok(())
@@ -124,7 +118,7 @@ impl<'html> OpenElementStack<'html> {
 
     #[cfg(test)]
     pub fn push(&mut self, name: &'html str) -> Result<(), ParseError> {
-        self.push_classified(name, TagFlags::classify(name), TextElementFlags::empty())
+        self.push_classified(name, TagFlags::classify(name))
     }
 
     pub fn attach_saved(
@@ -144,6 +138,21 @@ impl<'html> OpenElementStack<'html> {
                 text_edge_policy,
             ));
         }
+    }
+
+    #[inline]
+    pub fn attach_saved_without_text(
+        &mut self,
+        element_id: ElementId,
+        inner_html_start: Option<usize>,
+    ) {
+        self.attach_saved(
+            element_id,
+            inner_html_start,
+            None,
+            None,
+            TextEdgePolicy::TrimCollapsedSeparators,
+        );
     }
 
     #[cfg(test)]
@@ -271,7 +280,7 @@ impl<'html> OpenElementStack<'html> {
 mod tests {
     use super::{OpenElementStack, SavedElement};
     use crate::engine::MAX_ELEMENT_DEPTH;
-    use crate::html::text_state::TextEdgePolicy;
+    use crate::html::text_edge::TextEdgePolicy;
     use crate::store::ElementId;
 
     #[test]
