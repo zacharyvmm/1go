@@ -670,8 +670,9 @@ mod tests {
             'query: 'html,
             Q: QuerySpec<'query>,
         {
-            let no_extra_allocations =
-                queries.iter().all(|query| query.exit_at_section_end().is_some());
+            let no_extra_allocations = queries
+                .iter()
+                .all(|query| query.exit_at_section_end().is_some());
 
             let selectors = QueryMultiplexer::new(queries);
             let mut parser = if no_extra_allocations {
@@ -698,8 +699,9 @@ mod tests {
             'query: 'html,
             Q: QuerySpec<'query>,
         {
-            let no_extra_allocations =
-                queries.iter().all(|query| query.exit_at_section_end().is_some());
+            let no_extra_allocations = queries
+                .iter()
+                .all(|query| query.exit_at_section_end().is_some());
 
             let selectors = QueryMultiplexer::new(queries);
 
@@ -732,8 +734,7 @@ mod tests {
                 "<span>filler</span>".repeat(5_000)
             );
 
-            let general_queries =
-                [Query::first("#hit", Save::none()).unwrap().build()];
+            let general_queries = [Query::first("#hit", Save::none()).unwrap().build()];
             let specialized_queries = [general_queries[0].clone()];
 
             let (general_store, general_position) =
