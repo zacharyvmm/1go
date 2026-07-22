@@ -1,5 +1,6 @@
 //! Primary main-vs-PR gate benchmark for the standard parse() API.
 //! Compatible with both main and PR branches.
+//! Evaluates standard parse() throughput and latency against main base.
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use scah::{Query, Save, parse};
 use std::hint::black_box;
