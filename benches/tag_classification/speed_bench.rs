@@ -203,5 +203,160 @@ fn bench_bulk_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_bulk_comparison);
+/// Historical combined classifier (parser + text bits in one `TagFlags`-shaped
+/// lookup) retained only for microbenchmark A/B against the split design.
+#[inline]
+fn classify_combined_old(name: &str) -> u32 {
+    let flags = classify_combined_old_lowercase(name);
+    if flags != 0 || !name.as_bytes().iter().any(u8::is_ascii_uppercase) {
+        return flags;
+    }
+    if name.len() > 10 {
+        return 0;
+    }
+    let mut lowercase = [0_u8; 10];
+    for (output, input) in lowercase.iter_mut().zip(name.bytes()) {
+        *output = input.to_ascii_lowercase();
+    }
+    let lowercase = unsafe { std::str::from_utf8_unchecked(&lowercase[..name.len()]) };
+    classify_combined_old_lowercase(lowercase)
+}
+
+#[inline]
+fn classify_combined_old_lowercase(name: &str) -> u32 {
+    // Bit layout mirrors the pre-split TagFlags TEXT_* packing used on the PR
+    // before parser/text separation (not the production TagFlags type).
+    const VOID: u32 = 1 << 0;
+    const CLOSES_P: u32 = 1 << 1;
+    const P: u32 = 1 << 2;
+    const BUTTON: u32 = 1 << 3;
+    const LI: u32 = 1 << 4;
+    const DT_DD: u32 = 1 << 5;
+    const OPTION: u32 = 1 << 6;
+    const OPTGROUP: u32 = 1 << 7;
+    const TR: u32 = 1 << 8;
+    const CELL: u32 = 1 << 9;
+    const TABLE_SCOPE: u32 = 1 << 10;
+    const DEFAULT_BARRIER: u32 = 1 << 11;
+    const LIST_BARRIER: u32 = 1 << 12;
+    const TABLE_BARRIER: u32 = 1 << 13;
+    const HTML_TEMPLATE: u32 = 1 << 14;
+    const RAW_SCRIPT: u32 = 1 << 15;
+    const RAW_STYLE: u32 = 1 << 16;
+    const RAW_TEXTAREA: u32 = 1 << 17;
+    const RAW_TITLE: u32 = 1 << 18;
+    const TEXT_BLOCK: u32 = 1 << 19;
+    const TEXT_BREAK: u32 = 1 << 20;
+    const TEXT_ROW: u32 = 1 << 21;
+    const TEXT_CELL: u32 = 1 << 22;
+    const TEXT_SUPPRESSED: u32 = 1 << 23;
+    const TEXT_PREFORMATTED: u32 = 1 << 24;
+
+    match name {
+        "area" | "base" | "col" | "embed" | "img" | "input" | "link" | "meta" | "param"
+        | "source" | "track" | "wbr" => VOID,
+        "br" => VOID | TEXT_BREAK,
+        "hr" => VOID | CLOSES_P | TEXT_BREAK,
+        "address" | "article" | "aside" | "blockquote" | "div" | "dl" | "fieldset" | "footer"
+        | "form" | "header" | "main" | "nav" | "section" => CLOSES_P | TEXT_BLOCK,
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => CLOSES_P | TEXT_BLOCK,
+        "p" => CLOSES_P | P | TEXT_BLOCK,
+        "ol" | "ul" => CLOSES_P | LIST_BARRIER | TEXT_BLOCK,
+        "table" => CLOSES_P | DEFAULT_BARRIER | TABLE_BARRIER | TEXT_BLOCK,
+        "button" => BUTTON,
+        "li" => LI | TEXT_BLOCK,
+        "dt" | "dd" => DT_DD | TEXT_BLOCK,
+        "option" => OPTION,
+        "optgroup" => OPTGROUP,
+        "tr" => TR | TABLE_SCOPE | TEXT_ROW | TEXT_BLOCK,
+        "td" | "th" => CELL | DEFAULT_BARRIER | TEXT_CELL,
+        "thead" | "tbody" | "tfoot" | "colgroup" => TABLE_SCOPE | TEXT_BLOCK,
+        "caption" => TABLE_SCOPE | TEXT_BLOCK,
+        "applet" | "marquee" | "object" => DEFAULT_BARRIER,
+        "html" => HTML_TEMPLATE | TABLE_BARRIER,
+        "template" => HTML_TEMPLATE | TABLE_BARRIER | TEXT_SUPPRESSED,
+        "script" => RAW_SCRIPT | TEXT_SUPPRESSED,
+        "style" => RAW_STYLE | TEXT_SUPPRESSED,
+        "textarea" => RAW_TEXTAREA | TEXT_PREFORMATTED,
+        "title" => RAW_TITLE,
+        "pre" => CLOSES_P | TEXT_BLOCK | TEXT_PREFORMATTED,
+        "body" | "details" | "dialog" | "figcaption" | "figure" | "hgroup" | "legend" | "menu"
+        | "summary" => TEXT_BLOCK,
+        _ => 0,
+    }
+}
+
+/// Parser-only classifier matching `main` @ 30750d8 (embedded for A/B).
+#[inline]
+fn classify_parser_old(name: &str) -> TagFlags {
+    // After the split, production `TagFlags::classify` *is* the main parser-only
+    // table. Keep an explicit call site name for the microbenchmark legend.
+    TagFlags::classify(name)
+}
+
+/// Prose-document tag mix from `prose_html()` open/close names.
+const PROSE_TAG_MIX: &[&str] = &[
+    "article",
+    "p",
+    "strong",
+    "p",
+    "strong",
+    "p",
+    "strong",
+    "div",
+    "span",
+    "a",
+    "br",
+    "custom-element",
+    "P",
+    "DIV",
+    "Br",
+];
+
+fn bench_parser_vs_text_classify(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tag_classification_parser_vs_text");
+    group.sample_size(100);
+
+    let tags: Vec<&str> = PROSE_TAG_MIX.iter().copied().cycle().take(10_000).collect();
+    group.throughput(Throughput::Elements(tags.len() as u64));
+
+    group.bench_function("parser_tag_classify_old", |b| {
+        b.iter(|| {
+            for tag in &tags {
+                black_box(classify_parser_old(black_box(tag)));
+            }
+        })
+    });
+    group.bench_function("parser_tag_classify_new", |b| {
+        b.iter(|| {
+            for tag in &tags {
+                black_box(TagFlags::classify(black_box(tag)));
+            }
+        })
+    });
+    group.bench_function("combined_old_single_flags", |b| {
+        b.iter(|| {
+            for tag in &tags {
+                black_box(classify_combined_old(black_box(tag)));
+            }
+        })
+    });
+    group.bench_function("combined_text_tag_classify", |b| {
+        b.iter(|| {
+            for tag in &tags {
+                black_box(scah::bench_internals::ClassifiedTag::classify(black_box(
+                    tag,
+                )));
+            }
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_bulk_comparison,
+    bench_parser_vs_text_classify
+);
 criterion_main!(benches);
