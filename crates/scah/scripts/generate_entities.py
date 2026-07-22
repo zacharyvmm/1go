@@ -143,6 +143,7 @@ def generate_table(source: dict, source_hash: str) -> str:
         "// Layout: sorted names/values as raw UTF-8 blobs plus exclusive-end",
         "// offset tables. Kept relocation-free so no-text binaries do not pay",
         "// for a large relocated `.data` entity image.",
+        "#![rustfmt::skip]",
         "",
         f"pub(super) const MAX_NAME_LEN: usize = {max(len(name) for name, _ in entries)};",
         f"pub(super) const NAMED_ENTITY_COUNT: usize = {len(entries)};",

@@ -8,6 +8,7 @@
 // Layout: sorted names/values as raw UTF-8 blobs plus exclusive-end
 // offset tables. Kept relocation-free so no-text binaries do not pay
 // for a large relocated `.data` entity image.
+#![rustfmt::skip]
 
 pub(super) const MAX_NAME_LEN: usize = 32;
 pub(super) const NAMED_ENTITY_COUNT: usize = 2231;
