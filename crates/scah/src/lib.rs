@@ -135,10 +135,13 @@ pub mod bench_internals {
     pub use crate::engine::cursor::ScopedCursor;
     #[cfg(feature = "bench-internals")]
     pub use crate::engine::multiplexer::CursorStatsSnapshot;
+    #[cfg(feature = "bench-internals")]
     use crate::engine::multiplexer::QueryMultiplexer;
     #[cfg(feature = "bench-internals")]
     pub use crate::html::TextPathStats;
+    #[cfg(feature = "bench-internals")]
     use crate::store::Store;
+    #[cfg(feature = "bench-internals")]
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
 
     /// Parse HTML and return peak cursor counts with the result store.
@@ -219,64 +222,6 @@ pub mod bench_internals {
 
         let stats = parser.selectors.cursor_stats_snapshot();
         Ok((parser.finish(), stats))
-    }
-
-    /// Parse HTML with NoTextParser and return the final reader position.
-    #[doc(hidden)]
-    pub fn parse_no_text_with_position<'html, 'query: 'html, Q>(
-        html: &'html str,
-        queries: &'query [Q],
-    ) -> Result<(Store<'html, 'query>, usize), ParseError>
-    where
-        Q: QuerySpec<'query>,
-    {
-        if queries.is_empty() {
-            return Err(ParseError::EmptyQueries);
-        }
-        let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
-        let selectors = QueryMultiplexer::new(queries);
-        let requirements = selectors.text_requirements();
-        if requirements.raw_text || requirements.text {
-            return Err(ParseError::TextCaptureRequired);
-        }
-        let mut parser = if no_extra_allocations {
-            crate::NoTextParser::new(selectors)
-        } else {
-            crate::NoTextParser::with_capacity(selectors, html.len())
-        };
-        let mut reader = Reader::new(html);
-        while parser.next(&mut reader) {}
-        if let Some(err) = parser.take_parse_error() {
-            return Err(err);
-        }
-        Ok((parser.finish(), reader.get_position()))
-    }
-
-    /// Parse HTML with XHtmlParser directly and return the final reader position.
-    #[doc(hidden)]
-    pub fn parse_general_with_position<'html, 'query: 'html, Q>(
-        html: &'html str,
-        queries: &'query [Q],
-    ) -> Result<(Store<'html, 'query>, usize), ParseError>
-    where
-        Q: QuerySpec<'query>,
-    {
-        if queries.is_empty() {
-            return Err(ParseError::EmptyQueries);
-        }
-        let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
-        let selectors = QueryMultiplexer::new(queries);
-        let mut parser = if no_extra_allocations {
-            XHtmlParser::new(selectors)
-        } else {
-            XHtmlParser::with_capacity(selectors, html.len())
-        };
-        let mut reader = Reader::new(html);
-        while parser.next(&mut reader) {}
-        if let Some(err) = parser.take_parse_error() {
-            return Err(err);
-        }
-        Ok((parser.finish(), reader.get_position()))
     }
 }
 
@@ -711,6 +656,98 @@ mod tests {
                 "div > div p peak resident cursor slots {} at depth {depth} exceeds budget",
                 stats.peak_resident_cursor_slots
             );
+        }
+    }
+
+    mod parser_implementation_parity_tests {
+        use super::*;
+
+        fn parse_general_with_position<'html, 'query, Q>(
+            html: &'html str,
+            queries: &'query [Q],
+        ) -> Result<(Store<'html, 'query>, usize), ParseError>
+        where
+            'query: 'html,
+            Q: QuerySpec<'query>,
+        {
+            let no_extra_allocations =
+                queries.iter().all(|query| query.exit_at_section_end().is_some());
+
+            let selectors = QueryMultiplexer::new(queries);
+            let mut parser = if no_extra_allocations {
+                XHtmlParser::new(selectors)
+            } else {
+                XHtmlParser::with_capacity(selectors, html.len())
+            };
+
+            let mut reader = Reader::new(html);
+            while parser.next(&mut reader) {}
+
+            if let Some(error) = parser.take_parse_error() {
+                return Err(error);
+            }
+
+            Ok((parser.finish(), reader.get_position()))
+        }
+
+        fn parse_no_text_with_position<'html, 'query, Q>(
+            html: &'html str,
+            queries: &'query [Q],
+        ) -> Result<(Store<'html, 'query>, usize), ParseError>
+        where
+            'query: 'html,
+            Q: QuerySpec<'query>,
+        {
+            let no_extra_allocations =
+                queries.iter().all(|query| query.exit_at_section_end().is_some());
+
+            let selectors = QueryMultiplexer::new(queries);
+
+            let requirements = selectors.text_requirements();
+            assert!(
+                !requirements.raw_text && !requirements.text,
+                "test helper requires no-text queries"
+            );
+
+            let mut parser = if no_extra_allocations {
+                NoTextParser::new(selectors)
+            } else {
+                NoTextParser::with_capacity(selectors, html.len())
+            };
+
+            let mut reader = Reader::new(html);
+            while parser.next(&mut reader) {}
+
+            if let Some(error) = parser.take_parse_error() {
+                return Err(error);
+            }
+
+            Ok((parser.finish(), reader.get_position()))
+        }
+
+        #[test]
+        fn parity_early_exit_reader_position() {
+            let html = format!(
+                "<div id=\"hit\">x</div>{}",
+                "<span>filler</span>".repeat(5_000)
+            );
+
+            let general_queries =
+                [Query::first("#hit", Save::none()).unwrap().build()];
+            let specialized_queries = [general_queries[0].clone()];
+
+            let (general_store, general_position) =
+                parse_general_with_position(&html, &general_queries).unwrap();
+
+            let (specialized_store, specialized_position) =
+                parse_no_text_with_position(&html, &specialized_queries).unwrap();
+
+            assert!(general_position < html.len());
+            assert!(specialized_position < html.len());
+            assert_eq!(general_position, specialized_position);
+
+            assert_eq!(general_store.get("#hit").unwrap().count(), 1);
+            assert_eq!(specialized_store.get("#hit").unwrap().count(), 1);
         }
     }
 }

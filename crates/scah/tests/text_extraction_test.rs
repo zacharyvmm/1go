@@ -1429,33 +1429,6 @@ fn parity_nested_query_relative_lookup() {
 }
 
 #[test]
-fn parity_early_exit_reader_position() {
-    let html = format!(
-        "<div id=\"hit\">x</div>{}",
-        "<span>filler</span>".repeat(5_000)
-    );
-    let q1 = [Query::first("#hit", Save::none()).unwrap().build()];
-    let q2 = [q1[0].clone()];
-
-    let (gen_store, gen_pos) =
-        scah::bench_internals::parse_general_with_position(&html, &q1).unwrap();
-    let (spec_store, spec_pos) =
-        scah::bench_internals::parse_no_text_with_position(&html, &q2).unwrap();
-
-    assert!(gen_pos < html.len(), "general parser must stop before EOF");
-    assert!(
-        spec_pos < html.len(),
-        "specialized parser must stop before EOF"
-    );
-    assert_eq!(
-        gen_pos, spec_pos,
-        "both parsers must stop at the exact same byte position"
-    );
-    assert_eq!(gen_store.get("#hit").unwrap().count(), 1);
-    assert_eq!(spec_store.get("#hit").unwrap().count(), 1);
-}
-
-#[test]
 fn real_maximum_depth_boundary_succeeds() {
     // 65,533 open <div> tags + 1 <p> tag = 65,534 total open elements (exact MAX_ELEMENT_DEPTH limit)
     let opens = "<div>".repeat(65_533);
