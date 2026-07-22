@@ -135,13 +135,10 @@ pub mod bench_internals {
     pub use crate::engine::cursor::ScopedCursor;
     #[cfg(feature = "bench-internals")]
     pub use crate::engine::multiplexer::CursorStatsSnapshot;
-    #[cfg(feature = "bench-internals")]
     use crate::engine::multiplexer::QueryMultiplexer;
     #[cfg(feature = "bench-internals")]
     pub use crate::html::TextPathStats;
-    #[cfg(feature = "bench-internals")]
     use crate::store::Store;
-    #[cfg(feature = "bench-internals")]
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
 
     /// Parse HTML and return peak cursor counts with the result store.
@@ -222,6 +219,64 @@ pub mod bench_internals {
 
         let stats = parser.selectors.cursor_stats_snapshot();
         Ok((parser.finish(), stats))
+    }
+
+    /// Parse HTML with NoTextParser and return the final reader position.
+    #[doc(hidden)]
+    pub fn parse_no_text_with_position<'html, 'query: 'html, Q>(
+        html: &'html str,
+        queries: &'query [Q],
+    ) -> Result<(Store<'html, 'query>, usize), ParseError>
+    where
+        Q: QuerySpec<'query>,
+    {
+        if queries.is_empty() {
+            return Err(ParseError::EmptyQueries);
+        }
+        let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
+        let selectors = QueryMultiplexer::new(queries);
+        let requirements = selectors.text_requirements();
+        if requirements.raw_text || requirements.text {
+            return Err(ParseError::TextCaptureRequired);
+        }
+        let mut parser = if no_extra_allocations {
+            crate::NoTextParser::new(selectors)
+        } else {
+            crate::NoTextParser::with_capacity(selectors, html.len())
+        };
+        let mut reader = Reader::new(html);
+        while parser.next(&mut reader) {}
+        if let Some(err) = parser.take_parse_error() {
+            return Err(err);
+        }
+        Ok((parser.finish(), reader.get_position()))
+    }
+
+    /// Parse HTML with XHtmlParser directly and return the final reader position.
+    #[doc(hidden)]
+    pub fn parse_general_with_position<'html, 'query: 'html, Q>(
+        html: &'html str,
+        queries: &'query [Q],
+    ) -> Result<(Store<'html, 'query>, usize), ParseError>
+    where
+        Q: QuerySpec<'query>,
+    {
+        if queries.is_empty() {
+            return Err(ParseError::EmptyQueries);
+        }
+        let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
+        let selectors = QueryMultiplexer::new(queries);
+        let mut parser = if no_extra_allocations {
+            XHtmlParser::new(selectors)
+        } else {
+            XHtmlParser::with_capacity(selectors, html.len())
+        };
+        let mut reader = Reader::new(html);
+        while parser.next(&mut reader) {}
+        if let Some(err) = parser.take_parse_error() {
+            return Err(err);
+        }
+        Ok((parser.finish(), reader.get_position()))
     }
 }
 

@@ -1101,7 +1101,389 @@ fn text_sidecar_aligned_for_multiple_matching_queries() {
     assert_eq!(by_class.text(&store), None);
 }
 
-use scah::{ParseError, parse_without_text_capture};
+use scah::{ParseError, QueryMultiplexer, Reader, Store, XHtmlParser, parse_without_text_capture};
+
+/// Directly constructs `XHtmlParser` with capacity preallocation and parses HTML.
+fn parse_with_general_parser<'html>(
+    html: &'html str,
+    queries: &'html [Query],
+) -> Result<Store<'html, 'html>, ParseError> {
+    let selectors = QueryMultiplexer::new(queries);
+    let mut parser = XHtmlParser::with_capacity(selectors, html.len());
+    let mut reader = Reader::new(html);
+
+    while parser.next(&mut reader) {}
+
+    if let Some(error) = parser.take_parse_error() {
+        return Err(error);
+    }
+
+    Ok(parser.finish())
+}
+
+/// Directly constructs `XHtmlParser` without preallocation (`new`) and parses HTML.
+fn parse_with_general_parser_new<'html>(
+    html: &'html str,
+    queries: &'html [Query],
+) -> Result<Store<'html, 'html>, ParseError> {
+    let selectors = QueryMultiplexer::new(queries);
+    let mut parser = XHtmlParser::new(selectors);
+    let mut reader = Reader::new(html);
+
+    while parser.next(&mut reader) {}
+
+    if let Some(error) = parser.take_parse_error() {
+        return Err(error);
+    }
+
+    Ok(parser.finish())
+}
+
+/// Assert complete Store equivalence between general XHtmlParser and specialized NoTextParser.
+fn assert_store_equivalent(general: &Store, specialized: &Store, selectors_to_check: &[&str]) {
+    assert_eq!(
+        general.elements.len(),
+        specialized.elements.len(),
+        "element count mismatch"
+    );
+
+    // Flat arena equality
+    for (g, s) in general.elements.iter().zip(specialized.elements.iter()) {
+        assert_eq!(g.name, s.name, "element name mismatch");
+        assert_eq!(g.id, s.id, "element id mismatch");
+        assert_eq!(g.inner_html, s.inner_html, "inner_html mismatch");
+        assert_eq!(
+            g.attributes(general),
+            s.attributes(specialized),
+            "attributes mismatch"
+        );
+        assert_eq!(
+            g.has_raw_text(general),
+            s.has_raw_text(specialized),
+            "has_raw_text mismatch"
+        );
+        assert_eq!(
+            g.has_text(general),
+            s.has_text(specialized),
+            "has_text mismatch"
+        );
+        assert_eq!(
+            g.raw_text(general),
+            None,
+            "general raw_text must be None for no-text queries"
+        );
+        assert_eq!(
+            s.raw_text(specialized),
+            None,
+            "specialized raw_text must be None for no-text queries"
+        );
+        assert_eq!(
+            g.text(general),
+            None,
+            "general text must be None for no-text queries"
+        );
+        assert_eq!(
+            s.text(specialized),
+            None,
+            "specialized text must be None for no-text queries"
+        );
+    }
+
+    // Check Store::get() results for every selector
+    for &selector in selectors_to_check {
+        let general_matches: Vec<_> = general
+            .get(selector)
+            .map(|it| it.collect())
+            .unwrap_or_default();
+        let spec_matches: Vec<_> = specialized
+            .get(selector)
+            .map(|it| it.collect())
+            .unwrap_or_default();
+        assert_eq!(
+            general_matches.len(),
+            spec_matches.len(),
+            "Store::get('{selector}') count mismatch"
+        );
+        for (g_el, s_el) in general_matches.iter().zip(spec_matches.iter()) {
+            assert_eq!(
+                g_el.name, s_el.name,
+                "Store::get('{selector}') element name mismatch"
+            );
+            assert_eq!(
+                g_el.id, s_el.id,
+                "Store::get('{selector}') element id mismatch"
+            );
+            assert_eq!(
+                g_el.inner_html, s_el.inner_html,
+                "Store::get('{selector}') inner_html mismatch"
+            );
+            assert_eq!(
+                g_el.attributes(general),
+                s_el.attributes(specialized),
+                "Store::get('{selector}') attributes mismatch"
+            );
+        }
+    }
+}
+
+#[test]
+fn parity_ordinary_nested_html() {
+    let html = "<div><section><p class=\"intro\">Hello <span>world</span></p></section></div>";
+    let selectors = [
+        "div",
+        "section",
+        "p",
+        "p.intro",
+        "span",
+        "div p",
+        "section > p",
+    ];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let general_new = parse_with_general_parser_new(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+        assert_store_equivalent(&general_new, &spec, &selectors);
+    }
+}
+
+#[test]
+fn parity_void_elements() {
+    let html = "<div><input type=\"text\" value=\"val\"><img src=\"x\"><br><hr></div>";
+    let selectors = ["input", "img", "br", "hr", "div > input"];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+        assert_eq!(general.get("input").unwrap().count(), 1);
+        assert_eq!(general.get("img").unwrap().count(), 1);
+        assert_eq!(general.get("br").unwrap().count(), 1);
+        assert_eq!(general.get("hr").unwrap().count(), 1);
+    }
+
+    // First early exit with void elements
+    let first_q = [Query::first("input", Save::none()).unwrap().build()];
+    let gen_first = parse_with_general_parser_new(html, &first_q).unwrap();
+    let spec_first = parse_without_text_capture(html, &first_q).unwrap();
+    assert_store_equivalent(&gen_first, &spec_first, &["input"]);
+    assert_eq!(gen_first.get("input").unwrap().count(), 1);
+}
+
+#[test]
+fn parity_raw_text_elements() {
+    let html = "<main><script>if (a < b) { x = \"</style>\"; }</script><style>p { color: red; }</style></main>";
+    let selectors = ["main", "script", "style", "main > script", "main > style"];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+    }
+}
+
+#[test]
+fn parity_implied_paragraph_closes() {
+    let html = "<div><p>one<p>two<p>three</div>";
+    let selectors = ["p", "div > p"];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+        assert_eq!(general.get("p").unwrap().count(), 3);
+        assert_eq!(spec.get("p").unwrap().count(), 3);
+
+        if save.inner_html {
+            let gen_inners: Vec<_> = general.get("p").unwrap().map(|p| p.inner_html).collect();
+            let spec_inners: Vec<_> = spec.get("p").unwrap().map(|p| p.inner_html).collect();
+            assert_eq!(gen_inners, vec![Some("one"), Some("two"), Some("three")]);
+            assert_eq!(spec_inners, gen_inners);
+        }
+    }
+}
+
+#[test]
+fn parity_mismatched_closes() {
+    let html = "<div><p>mismatched <span>content</div></span></p>";
+    let selectors = ["div", "p", "span", "div p"];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+    }
+}
+
+#[test]
+fn parity_table_structures() {
+    let html = "<table><thead><tr><th>Header</th></tr></thead><tbody><tr><td>A</td><td>B</td></tr></tbody></table>";
+    let selectors = ["table", "thead", "tbody", "tr", "th", "td", "table td"];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+    }
+}
+
+#[test]
+fn parity_eof_open_elements() {
+    let html = "<div><section><p>unclosed";
+    let selectors = ["div", "section", "p", "div p"];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+    }
+}
+
+#[test]
+fn parity_mixed_case_tags() {
+    let html = "<DIV><P Class=\"Test\">Upper</P><BR></DIV>";
+    let selectors = ["div", "p", "p.Test", "br"];
+
+    for save in [Save::none(), Save::only_inner_html()] {
+        let queries: Vec<_> = selectors
+            .iter()
+            .map(|s| Query::all(s, save).unwrap().build())
+            .collect();
+
+        let general = parse_with_general_parser(html, &queries).unwrap();
+        let spec = parse_without_text_capture(html, &queries).unwrap();
+
+        assert_store_equivalent(&general, &spec, &selectors);
+    }
+}
+
+#[test]
+fn parity_nested_query_relative_lookup() {
+    let html = "<div><section><p>child 1</p><p>child 2</p></section></div>";
+
+    let q1 = [Query::all("div", Save::only_inner_html())
+        .unwrap()
+        .then(|div| Ok([div.all("p", Save::only_inner_html())?]))
+        .unwrap()
+        .build()];
+    let q2 = [q1[0].clone()];
+
+    let general = parse_with_general_parser(html, &q1).unwrap();
+    let spec = parse_without_text_capture(html, &q2).unwrap();
+
+    let gen_parent = general.get("div").unwrap().next().unwrap();
+    let spec_parent = spec.get("div").unwrap().next().unwrap();
+
+    let gen_children: Vec<_> = gen_parent.get(&general, "p").unwrap().collect();
+    let spec_children: Vec<_> = spec_parent.get(&spec, "p").unwrap().collect();
+
+    assert_eq!(gen_children.len(), spec_children.len());
+    assert_eq!(gen_children.len(), 2);
+    for (g_c, s_c) in gen_children.iter().zip(spec_children.iter()) {
+        assert_eq!(g_c.name, s_c.name);
+        assert_eq!(g_c.inner_html, s_c.inner_html);
+    }
+}
+
+#[test]
+fn parity_early_exit_reader_position() {
+    let html = format!(
+        "<div id=\"hit\">x</div>{}",
+        "<span>filler</span>".repeat(5_000)
+    );
+    let q1 = [Query::first("#hit", Save::none()).unwrap().build()];
+    let q2 = [q1[0].clone()];
+
+    let (gen_store, gen_pos) =
+        scah::bench_internals::parse_general_with_position(&html, &q1).unwrap();
+    let (spec_store, spec_pos) =
+        scah::bench_internals::parse_no_text_with_position(&html, &q2).unwrap();
+
+    assert!(gen_pos < html.len(), "general parser must stop before EOF");
+    assert!(
+        spec_pos < html.len(),
+        "specialized parser must stop before EOF"
+    );
+    assert_eq!(
+        gen_pos, spec_pos,
+        "both parsers must stop at the exact same byte position"
+    );
+    assert_eq!(gen_store.get("#hit").unwrap().count(), 1);
+    assert_eq!(spec_store.get("#hit").unwrap().count(), 1);
+}
+
+#[test]
+fn real_maximum_depth_boundary_succeeds() {
+    // 65,533 open <div> tags + 1 <p> tag = 65,534 total open elements (exact MAX_ELEMENT_DEPTH limit)
+    let opens = "<div>".repeat(65_533);
+    let html = format!("{opens}<p>leaf</p>");
+    let q1 = [Query::all("p", Save::none()).unwrap().build()];
+    let q2 = [q1[0].clone()];
+
+    let general_store = parse_with_general_parser(&html, &q1).unwrap();
+    let spec_store = parse_without_text_capture(&html, &q2).unwrap();
+
+    assert_eq!(general_store.get("p").unwrap().count(), 1);
+    assert_eq!(spec_store.get("p").unwrap().count(), 1);
+}
+
+#[test]
+fn real_maximum_depth_boundary_plus_one_fails() {
+    // 65,534 open <div> tags + 1 <p> tag = 65,535 total open elements (exceeds MAX_ELEMENT_DEPTH limit)
+    let opens = "<div>".repeat(65_534);
+    let html = format!("{opens}<p>leaf</p>");
+    let q1 = [Query::all("p", Save::none()).unwrap().build()];
+    let q2 = [q1[0].clone()];
+
+    let gen_err = parse_with_general_parser(&html, &q1).unwrap_err();
+    let spec_err = parse_without_text_capture(&html, &q2).unwrap_err();
+
+    assert_eq!(gen_err, ParseError::MaximumDepthExceeded);
+    assert_eq!(spec_err, ParseError::MaximumDepthExceeded);
+}
 
 #[test]
 fn parse_without_text_capture_rejects_raw_text() {
@@ -1122,6 +1504,15 @@ fn parse_without_text_capture_rejects_normalized_text() {
 }
 
 #[test]
+fn parse_without_text_capture_rejects_all() {
+    let queries = &[Query::all("p", Save::all()).unwrap().build()];
+
+    let err = parse_without_text_capture("<p>x</p>", queries).unwrap_err();
+
+    assert_eq!(err, ParseError::TextCaptureRequired);
+}
+
+#[test]
 fn parse_without_text_capture_accepts_inner_html() {
     let queries = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
 
@@ -1132,83 +1523,45 @@ fn parse_without_text_capture_accepts_inner_html() {
 }
 
 #[test]
-fn parse_dispatches_to_text_parser_when_required() {
-    let queries = &[Query::all("p", Save::only_text()).unwrap().build()];
+fn parse_without_text_capture_accepts_none() {
+    let queries = &[Query::all("p", Save::none()).unwrap().build()];
 
-    let store = parse("<p>Hello</p>", queries).unwrap();
+    let store = parse_without_text_capture("<p>x</p>", queries).unwrap();
     let element = store.get("p").unwrap().next().unwrap();
 
-    assert_eq!(element.text(&store), Some("Hello"));
-}
-
-fn assert_store_equivalent(normal: &scah::Store, specialized: &scah::Store) {
-    assert_eq!(
-        normal.elements.len(),
-        specialized.elements.len(),
-        "element count mismatch"
-    );
-    for (n, s) in normal.elements.iter().zip(specialized.elements.iter()) {
-        assert_eq!(n.name, s.name, "element name mismatch");
-        assert_eq!(n.id, s.id, "element id mismatch");
-        assert_eq!(n.inner_html, s.inner_html, "inner_html mismatch");
-        assert_eq!(
-            n.attributes(normal),
-            s.attributes(specialized),
-            "attributes mismatch"
-        );
-    }
+    assert_eq!(element.name, "p");
+    assert!(element.inner_html.is_none());
 }
 
 #[test]
-fn normal_and_no_text_parser_parity() {
-    let documents = [
-        // ordinary nested HTML
-        "<div><section><p class=\"intro\">Hello <span>world</span></p></section></div>".to_string(),
-        // void elements
-        "<div><input type=\"text\" value=\"val\"><img src=\"a.jpg\"><br><hr></div>".to_string(),
-        // raw-text script/style tags
-        "<main><script>if (a < b) { console.log('</style>'); }</script><style>p { color: red; }</style></main>".to_string(),
-        // implied paragraph closes
-        "<div><p>Paragraph 1<p>Paragraph 2<p>Paragraph 3</div>".to_string(),
-        // mismatched closes
-        "<div><p>mismatched <span>content</div></span></p>".to_string(),
-        // table structures
-        "<table><thead><tr><th>Header</th></tr></thead><tbody><tr><td>Cell 1</td><td>Cell 2</td></tr></tbody></table>".to_string(),
-        // EOF with unclosed tags
-        "<div><section><p>unclosed paragraph".to_string(),
-        // mixed-case tags
-        "<DIV><P Class=\"Test\">Upper</P><br/></DIV>".to_string(),
-        // maximum-depth boundary
-        format!("{opens}<p id=\"deep\">leaf</p>{closes}", opens = "<div>".repeat(50), closes = "</div>".repeat(50)),
-    ];
-
-    for html in &documents {
-        // Test Save::none() with All
-        let q_none = &[Query::all("p", Save::none()).unwrap().build()];
-        let normal_none = parse(html, q_none).unwrap();
-        let spec_none = parse_without_text_capture(html, q_none).unwrap();
-        assert_store_equivalent(&normal_none, &spec_none);
-
-        // Test Save::only_inner_html() with All
-        let q_inner = &[Query::all("p", Save::only_inner_html()).unwrap().build()];
-        let normal_inner = parse(html, q_inner).unwrap();
-        let spec_inner = parse_without_text_capture(html, q_inner).unwrap();
-        assert_store_equivalent(&normal_inner, &spec_inner);
-
-        // Test Save::only_inner_html() with First
-        let q_first = &[Query::first("p", Save::only_inner_html()).unwrap().build()];
-        let normal_first = parse(html, q_first).unwrap();
-        let spec_first = parse_without_text_capture(html, q_first).unwrap();
-        assert_store_equivalent(&normal_first, &spec_first);
-
-        // Test nested .then() queries
-        let q_then = &[Query::all("div", Save::only_inner_html())
+fn parse_dispatches_correctly_for_all_save_modes() {
+    let raw_q = &[Query::all("p", Save::only_raw_text()).unwrap().build()];
+    let store_raw = parse("<p>Hello</p>", raw_q).unwrap();
+    assert_eq!(
+        store_raw
+            .get("p")
             .unwrap()
-            .then(|div| Ok([div.all("p", Save::only_inner_html())?]))
+            .next()
             .unwrap()
-            .build()];
-        let normal_then = parse(html, q_then).unwrap();
-        let spec_then = parse_without_text_capture(html, q_then).unwrap();
-        assert_store_equivalent(&normal_then, &spec_then);
-    }
+            .raw_text(&store_raw),
+        Some("Hello")
+    );
+
+    let text_q = &[Query::all("p", Save::only_text()).unwrap().build()];
+    let store_text = parse("<p>Hello</p>", text_q).unwrap();
+    assert_eq!(
+        store_text
+            .get("p")
+            .unwrap()
+            .next()
+            .unwrap()
+            .text(&store_text),
+        Some("Hello")
+    );
+
+    let both_q = &[Query::all("p", Save::all()).unwrap().build()];
+    let store_both = parse("<p>Hello</p>", both_q).unwrap();
+    let p = store_both.get("p").unwrap().next().unwrap();
+    assert_eq!(p.raw_text(&store_both), Some("Hello"));
+    assert_eq!(p.text(&store_both), Some("Hello"));
 }
