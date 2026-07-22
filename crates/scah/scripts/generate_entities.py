@@ -143,7 +143,6 @@ def generate_table(source: dict, source_hash: str) -> str:
         "// Layout: sorted names/values as raw UTF-8 blobs plus exclusive-end",
         "// offset tables. Kept relocation-free so no-text binaries do not pay",
         "// for a large relocated `.data` entity image.",
-        "#![rustfmt::skip]",
         "",
         f"pub(super) const MAX_NAME_LEN: usize = {max(len(name) for name, _ in entries)};",
         f"pub(super) const NAMED_ENTITY_COUNT: usize = {len(entries)};",
@@ -178,7 +177,32 @@ def generate_table(source: dict, source_hash: str) -> str:
 
 def generate_from_bytes(raw: bytes) -> str:
     source, source_hash = load_source(raw)
-    return generate_table(source, source_hash)
+    table = generate_table(source, source_hash)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        suffix=".rs",
+        delete=False,
+    ) as handle:
+        handle.write(table)
+        temporary = Path(handle.name)
+    try:
+        rustfmt_file(temporary)
+        return temporary.read_text(encoding="utf-8")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def rustfmt_file(path: Path) -> None:
+    """Format `path` with rustfmt so CI `cargo fmt --check` stays green."""
+    import shutil
+    import subprocess
+
+    rustfmt = shutil.which("rustfmt")
+    if rustfmt is None:
+        return
+    subprocess.run([rustfmt, str(path)], check=True)
 
 
 def atomic_write_text(destination: Path, content: str) -> None:
@@ -195,6 +219,7 @@ def atomic_write_text(destination: Path, content: str) -> None:
         handle.write(content)
         temporary = Path(handle.name)
     temporary.replace(destination)
+    rustfmt_file(destination)
 
 
 def atomic_write_bytes(destination: Path, content: bytes) -> None:
