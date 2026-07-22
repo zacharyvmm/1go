@@ -219,6 +219,8 @@ where
         self.next_impl(reader, raw, text)
     }
 
+    /// Core parser loop step. Annotated `#[inline]` based on empirical A/B measurements
+    /// showing optimal performance across raw, text, and combined extraction modes.
     #[inline]
     fn next_impl(&mut self, reader: &mut Reader<'html>, raw: bool, text: bool) -> bool {
         let captures_any = raw || text;
