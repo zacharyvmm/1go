@@ -492,7 +492,8 @@ where
                 self.finish_push_cursor(candidate, runner, store, create_reason)
             }
             Combinator::NextSibling | Combinator::SubsequentSibling => {
-                unreachable!("plain executor received a sibling transition")
+                debug_assert!(false, "plain executor received a sibling transition");
+                self.finish_push_cursor(candidate, runner, store, create_reason)
             }
         }
     }

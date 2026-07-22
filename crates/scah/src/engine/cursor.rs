@@ -388,6 +388,15 @@ impl ScopedCursor {
         *flags |= FLAG_CHILD_OBLIGATION;
     }
 
+    /// Whether this moving cursor is an exact-depth child (`>`) obligation.
+    #[cfg(test)]
+    pub(crate) fn is_child_obligation(&self) -> bool {
+        matches!(
+            self.mode,
+            CursorMode::Moving { flags, .. } if flags & FLAG_CHILD_OBLIGATION != 0
+        )
+    }
+
     #[cfg(test)]
     pub fn spawn_moving(&self, at_depth: super::DepthSize, next_position: Position) -> Self {
         Self {
@@ -550,8 +559,15 @@ impl ScopedCursor {
             ..
         } = &mut self.mode
         {
+            // Preserve child-obligation identity through First-winner ownership.
+            // Matching is already gated by COMPLETE, so the bit is inert until
+            // `complete_after_close` clears unwind; it must not leak into clones.
+            let retained = *flags & FLAG_CHILD_OBLIGATION;
             *unwind_depth = selected_depth;
-            *flags = CursorActivity::Complete.to_flags() | FLAG_HAS_UNWIND | FLAG_FIRST_WINNER;
+            *flags = retained
+                | CursorActivity::Complete.to_flags()
+                | FLAG_HAS_UNWIND
+                | FLAG_FIRST_WINNER;
         }
 
         self.debug_assert_moving_invariants();
@@ -565,6 +581,7 @@ impl ScopedCursor {
                 unwind_depth,
                 ..
             } => {
+                // Cancellation ends the logical cursor; drop child identity.
                 *flags = CursorActivity::Complete.to_flags();
                 *unwind_depth = 0;
             }
@@ -1038,15 +1055,59 @@ mod tests {
         assert!(cursor.can_match_at(7));
 
         cursor.mark_child_obligation();
+        assert!(cursor.is_child_obligation());
         assert!(!cursor.can_match_at(5));
         assert!(cursor.can_match_at(6));
         assert!(!cursor.can_match_at(7));
 
         cursor.block_until_close(6);
+        assert!(cursor.is_child_obligation());
         assert!(!cursor.can_match_at(6));
         cursor.reactivate_after_close();
+        assert!(cursor.is_child_obligation());
         assert!(cursor.can_match_at(6));
         assert!(!cursor.can_match_at(7));
+    }
+
+    #[test]
+    fn child_obligation_flag_lifecycle_across_cursor_transitions() {
+        let mut child = ScopedCursor::new_moving_with_last(
+            5,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            5,
+        );
+        child.mark_child_obligation();
+
+        let anchored = child.anchor_clone(6);
+        assert!(anchored.is_anchored());
+        assert!(!anchored.is_child_obligation());
+
+        let sibling = ScopedCursor::new_sibling(
+            4,
+            5,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            super::CursorLifetime::AdjacentSibling,
+        );
+        assert!(!sibling.is_child_obligation());
+
+        let mut first_winner = child.clone();
+        first_winner.select_first_until_close(6, 5);
+        assert!(first_winner.is_first_winner());
+        assert!(first_winner.is_child_obligation());
+        first_winner.complete_after_close();
+        assert!(first_winner.is_child_obligation());
+
+        let mut cancelled = child;
+        cancelled.cancel_complete();
+        assert!(!cancelled.is_child_obligation());
     }
 
     #[test]
