@@ -283,8 +283,7 @@ impl ClassifiedTag {
     /// Single lookup returning both parser and text flags.
     ///
     /// Use this on normalized-text paths so the tag name is matched once.
-    #[cold]
-    #[inline(never)]
+    #[inline]
     pub fn classify(name: &str) -> Self {
         let classified = Self::classify_lowercase(name);
         if classified.parser.0 != 0
