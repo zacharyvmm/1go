@@ -139,8 +139,8 @@ Control what data is captured per selector:
 | Attribute prefix | `a[href^="https"]` | Working |
 | Attribute suffix | `a[href$=".com"]` | Working |
 | Attribute substring | `a[href*="example"]` | Working |
-| Adjacent sibling | `h1 + p` | Coming soon |
-| General sibling | `h1 ~ p` | Coming soon |
+| Adjacent sibling | `h1 + p` | Working |
+| General sibling | `h1 ~ p` | Working |
 
 > Full API documentation: [docs.rs/scah](https://docs.rs/scah)
 
