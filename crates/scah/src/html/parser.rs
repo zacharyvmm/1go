@@ -133,23 +133,21 @@ where
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
         let features = self.selectors.features();
-        if features.has_sibling_queries {
-            self.next_with_siblings(reader)
-        } else if features.has_retiring_runners {
-            self.next_plain::<true>(reader)
-        } else {
-            self.next_plain::<false>(reader)
+        match (features.has_sibling_queries, features.has_retiring_runners) {
+            (false, false) => self.next_plain::<false>(reader),
+            (false, true) => self.next_plain::<true>(reader),
+            (true, false) => self.next_with_siblings::<false>(reader),
+            (true, true) => self.next_with_siblings::<true>(reader),
         }
     }
 
     pub(crate) fn run(&mut self, reader: &mut Reader<'html>) {
         let features = self.selectors.features();
-        if features.has_sibling_queries {
-            self.run_with_siblings(reader);
-        } else if features.has_retiring_runners {
-            self.run_plain::<true>(reader);
-        } else {
-            self.run_plain::<false>(reader);
+        match (features.has_sibling_queries, features.has_retiring_runners) {
+            (false, false) => self.run_plain::<false>(reader),
+            (false, true) => self.run_plain::<true>(reader),
+            (true, false) => self.run_with_siblings::<false>(reader),
+            (true, true) => self.run_with_siblings::<true>(reader),
         }
     }
 
@@ -159,8 +157,8 @@ where
     }
 
     #[inline(never)]
-    fn run_with_siblings(&mut self, reader: &mut Reader<'html>) {
-        while self.next_with_siblings(reader) {}
+    fn run_with_siblings<const RETIREMENT: bool>(&mut self, reader: &mut Reader<'html>) {
+        while self.next_with_siblings::<RETIREMENT>(reader) {}
     }
 
     /// Parser event path for query sets without sibling combinators.
@@ -356,7 +354,7 @@ where
         !early_exit && !reader.eof()
     }
 
-    fn next_with_siblings(&mut self, reader: &mut Reader<'html>) -> bool {
+    fn next_with_siblings<const RETIREMENT: bool>(&mut self, reader: &mut Reader<'html>) -> bool {
         if self.parse_error.is_some() {
             return false;
         }
@@ -364,7 +362,7 @@ where
             loop {
                 reader.next_until(b'<');
                 if reader.peek().is_none() {
-                    self.drain_open_elements_with_siblings(reader);
+                    self.drain_open_elements_with_siblings::<RETIREMENT>(reader);
                     return false;
                 }
 
@@ -397,7 +395,8 @@ where
                     }
 
                     let closing_tag = &close_tag[2..];
-                    let early_exit = self.handle_close_tag_with_siblings(closing_tag, reader);
+                    let early_exit =
+                        self.handle_close_tag_with_siblings::<RETIREMENT>(closing_tag, reader);
                     return !early_exit && !reader.eof();
                 } else {
                     reader.skip();
@@ -409,7 +408,7 @@ where
         reader.next_until(b'<');
 
         if reader.peek().is_none() {
-            self.drain_open_elements_with_siblings(reader);
+            self.drain_open_elements_with_siblings::<RETIREMENT>(reader);
             return false;
         }
 
@@ -467,7 +466,7 @@ where
                 self.position.reader_position = tag_start_position;
                 self.open_elements
                     .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
-                self.drain_implied_closes_with_siblings(
+                self.drain_implied_closes_with_siblings::<RETIREMENT>(
                     reader,
                     Some(ImpliedCloseReason::OpenTagRule),
                     None,
@@ -527,12 +526,20 @@ where
                     self.temp_state
                         .sibling_callback_arena_mut()
                         .truncate(callback_start);
-                    early_exit = self.selectors.back(
-                        self.element.name,
-                        &self.position,
-                        reader,
-                        &mut self.store,
-                    ) || early_exit;
+                    if RETIREMENT {
+                        early_exit = self.selectors.back(
+                            self.element.name,
+                            &self.position,
+                            reader,
+                            &mut self.store,
+                        ) || early_exit;
+                    } else {
+                        self.selectors.back_dense_nonretiring(
+                            self.element.name,
+                            &self.position,
+                            &mut self.store,
+                        );
+                    }
                 } else {
                     for save_hit in &self.temp_state.save_hits {
                         self.open_elements.attach_saved(
@@ -554,7 +561,8 @@ where
                 self.element.clear();
             }
             XHtmlTag::Close(closing_tag) => {
-                early_exit = self.handle_close_tag_with_siblings(closing_tag, reader) || early_exit;
+                early_exit = self.handle_close_tag_with_siblings::<RETIREMENT>(closing_tag, reader)
+                    || early_exit;
             }
         }
 
@@ -742,7 +750,7 @@ where
         self.eof_drained = true;
     }
 
-    fn pop_open_element_with_siblings(
+    fn pop_open_element_with_siblings<const RETIREMENT: bool>(
         &mut self,
         open_element: OpenElement<'html>,
         close_depth: crate::engine::DepthSize,
@@ -751,9 +759,19 @@ where
     ) -> bool {
         self.finalize_open_element(&open_element, reader);
         self.position.element_depth = close_depth;
-        let early_exit =
+        // Sibling queries that cannot early-exit take the same dense close as
+        // plain ones; only a `First` query needs retirement bookkeeping.
+        let early_exit = if RETIREMENT {
             self.selectors
-                .back(open_element.name, &self.position, reader, &mut self.store);
+                .back(open_element.name, &self.position, reader, &mut self.store)
+        } else {
+            self.selectors.back_dense_nonretiring(
+                open_element.name,
+                &self.position,
+                &mut self.store,
+            );
+            false
+        };
 
         let callback_start = open_element.sibling_callback_start();
         self.finish_sibling_callback_range(callback_start, close_depth, activate_sibling_callbacks);
@@ -788,7 +806,7 @@ where
 
     /// Drain the implied-closes vector, finalizing each element, and restore
     /// the vector's capacity for reuse. Returns `true` on early exit.
-    fn drain_implied_closes_with_siblings(
+    fn drain_implied_closes_with_siblings<const RETIREMENT: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -818,7 +836,7 @@ where
             }
             // Only the final pop in a batch can have later siblings under its parent.
             let parent_survives_batch = activate_sibling_callbacks && index + 1 == total;
-            early_exit = self.pop_open_element_with_siblings(
+            early_exit = self.pop_open_element_with_siblings::<RETIREMENT>(
                 open_element,
                 close_depth,
                 reader,
@@ -832,7 +850,7 @@ where
 
     /// Apply a close tag: trace, pop from the open-element stack, and run
     /// the close-element path. Returns `true` on early exit.
-    fn handle_close_tag_with_siblings(
+    fn handle_close_tag_with_siblings<const RETIREMENT: bool>(
         &mut self,
         closing_tag: &'html str,
         reader: &Reader<'html>,
@@ -848,14 +866,14 @@ where
 
         self.open_elements
             .close_by_end_tag_into(closing_tag, &mut self.temp_state.closing_elements);
-        self.pop_closing_elements_with_siblings(
+        self.pop_closing_elements_with_siblings::<RETIREMENT>(
             reader,
             Some(ImpliedCloseReason::MismatchedEndTag),
             Some(closing_tag),
         )
     }
 
-    fn pop_closing_elements_with_siblings(
+    fn pop_closing_elements_with_siblings<const RETIREMENT: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -883,7 +901,7 @@ where
                 );
             }
             let parent_survives_batch = index + 1 == total;
-            early_exit = self.pop_open_element_with_siblings(
+            early_exit = self.pop_open_element_with_siblings::<RETIREMENT>(
                 open_element,
                 close_depth,
                 reader,
@@ -922,7 +940,10 @@ where
         }
     }
 
-    fn drain_open_elements_with_siblings(&mut self, reader: &Reader<'html>) {
+    fn drain_open_elements_with_siblings<const RETIREMENT: bool>(
+        &mut self,
+        reader: &Reader<'html>,
+    ) {
         if self.eof_drained {
             return;
         }
@@ -936,7 +957,7 @@ where
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
-        self.drain_implied_closes_with_siblings(
+        self.drain_implied_closes_with_siblings::<RETIREMENT>(
             reader,
             Some(ImpliedCloseReason::EofDrain),
             None,
@@ -1014,6 +1035,51 @@ mod tests {
         assert_eq!(
             actual_first.get("p").unwrap().count(),
             expected_first.get("p").unwrap().count()
+        );
+    }
+
+    /// Sibling query sets are specialized on retirement just like plain ones.
+    ///
+    /// A sibling set with no `First` cannot early-exit, so it takes the dense
+    /// close path. Without this the `(siblings, no retirement)` dispatch arm has
+    /// no coverage asserting it reaches the same results as the retiring one.
+    #[test]
+    fn specialized_sibling_modes_match_parse_results_across_retirement() {
+        let html = "<main><h1></h1><p id='one'></p><p id='two'></p></main>";
+
+        let all_queries = &[Query::all("h1 ~ p", Save::none()).unwrap().build()];
+        assert!(
+            !QueryMultiplexer::new(all_queries)
+                .features()
+                .has_retiring_runners
+        );
+        let expected_all = parse(html, all_queries).unwrap();
+        let mut all_parser = XHtmlParser::new(QueryMultiplexer::new(all_queries));
+        let mut all_reader = Reader::new(html);
+        while all_parser.next(&mut all_reader) {}
+        assert!(all_parser.selectors.active_set_is_dense());
+        let actual_all = all_parser.matches();
+        assert_eq!(actual_all.get("h1 ~ p").unwrap().count(), 2);
+        assert_eq!(
+            actual_all.get("h1 ~ p").unwrap().count(),
+            expected_all.get("h1 ~ p").unwrap().count()
+        );
+
+        let first_queries = &[Query::first("h1 ~ p", Save::none()).unwrap().build()];
+        assert!(
+            QueryMultiplexer::new(first_queries)
+                .features()
+                .has_retiring_runners
+        );
+        let expected_first = parse(html, first_queries).unwrap();
+        let mut first_parser = XHtmlParser::new(QueryMultiplexer::new(first_queries));
+        let mut first_reader = Reader::new(html);
+        while first_parser.next(&mut first_reader) {}
+        let actual_first = first_parser.matches();
+        assert_eq!(actual_first.get("h1 ~ p").unwrap().count(), 1);
+        assert_eq!(
+            actual_first.get("h1 ~ p").unwrap().count(),
+            expected_first.get("h1 ~ p").unwrap().count()
         );
     }
 
