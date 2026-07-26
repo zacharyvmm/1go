@@ -167,6 +167,7 @@ impl<'html> OpenElementStack<'html> {
         popped
     }
 
+    #[inline(always)]
     pub fn prepare_for_open_into(&mut self, tag: TagFlags, popped: &mut Vec<OpenElement<'html>>) {
         popped.clear();
 
@@ -199,6 +200,7 @@ impl<'html> OpenElementStack<'html> {
         popped
     }
 
+    #[inline(always)]
     pub fn close_by_end_tag_into(&mut self, name: &str, popped: &mut Vec<OpenElement<'html>>) {
         popped.clear();
         let tag = TagFlags::classify(name);

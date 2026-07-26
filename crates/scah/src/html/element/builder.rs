@@ -103,6 +103,7 @@ impl<'html> XHtmlElement<'html> {
         attribute_tape.truncate(idx);
     }
 
+    #[inline(always)]
     pub fn from(&mut self, reader: &mut Reader<'html>, attribute_tape: &mut Vec<Attribute<'html>>) {
         let mut assign = false;
         let mut key = None;
@@ -193,6 +194,7 @@ impl<'html> IElement<'html> for XHtmlElement<'html> {
 
 // TODO: Parse the closing tag for the XHtmlTag
 impl<'a> XHtmlTag<'a> {
+    #[inline(always)]
     pub fn from(reader: &mut Reader<'a>) -> Option<Self> {
         reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', 0x0C, b'<']);
         if let Some(character) = reader.peek() {
