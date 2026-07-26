@@ -43,11 +43,6 @@ path = "text_extraction/speed_bench.rs"
 harness = false
 
 [[bench]]
-name = "speed_bench_text_gate_compare"
-path = "text_extraction/gate_compare_bench.rs"
-harness = false
-
-[[bench]]
 name = "speed_bench_simple_all"
 path = "simple/all/speed_bench.rs"
 harness = false

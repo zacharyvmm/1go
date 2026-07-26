@@ -1632,7 +1632,6 @@ dependencies = [
 name = "scah"
 version = "0.0.21"
 dependencies = [
- "criterion",
  "pretty_assertions",
  "scah-macros",
  "scah-query-ir",
