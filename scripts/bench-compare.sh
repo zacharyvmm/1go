@@ -49,6 +49,33 @@ metadata_value() {
 
 # ── Test-only synchronization hooks ─────────────────────────────────────────
 
+block_capture_for_test() {
+    local hook="$1"
+
+    if [ -z "$hook" ]; then
+        return
+    fi
+
+    local marker="$attempt"
+    local started="$hook.started"
+    local released="$hook.released"
+    local started_tmp="$started.tmp.$$"
+
+    # Remove the previous acknowledgement before atomically publishing the
+    # next marker. The releaser echoes the marker back, so a stale release can
+    # never satisfy a later capture attempt.
+    rm -f "$released"
+    printf '%s\n' "$marker" > "$started_tmp"
+    mv -f "$started_tmp" "$started"
+
+    while [ ! -f "$released" ] ||
+        [ "$(cat "$released")" != "$marker" ]; do
+        sleep 0.05
+    done
+
+    rm -f "$released"
+}
+
 block_before_capture_retry_for_test() {
     local hook="${SCAH_BENCH_TEST_BLOCK_BEFORE_CAPTURE_RETRY:-}"
 
@@ -130,15 +157,8 @@ capture_source_state() {
             > "$UNTRACKED_LIST"
 
         # Test hook: block after untracked list so tests can mutate files.
-        if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST:-}" ]; then
-            printf '%s\n' "$attempt" \
-                > "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.started"
-            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.released"
-            while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.released" ]; do
-                sleep 0.05
-            done
-            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST}.released"
-        fi
+        block_capture_for_test \
+            "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_LIST:-}"
 
         # Stage untracked entries into a temporary capture directory.
         CAPTURED_UNTRACKED="$TEMP_ROOT/captured-untracked"
@@ -159,15 +179,8 @@ capture_source_state() {
         fi
 
         # Test hook: block after capture so tests can mutate files post-capture.
-        if [ -n "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE:-}" ]; then
-            printf '%s\n' "$attempt" \
-                > "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.started"
-            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.released"
-            while [ ! -e "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.released" ]; do
-                sleep 0.05
-            done
-            rm -f "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE}.released"
-        fi
+        block_capture_for_test \
+            "${SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE:-}"
 
         # ── Independent verification ──────────────────────────────────────
 

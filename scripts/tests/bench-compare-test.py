@@ -38,6 +38,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 import sys
 import hashlib
 
@@ -486,7 +487,7 @@ def run_bench_compare_bg(repo, stub_dir, block_file, stdout, stderr,
         env=env,
         stdout=stdout,
         stderr=stderr,
-        preexec_fn=os.setsid,
+        start_new_session=True,
     )
     return p
 
@@ -682,46 +683,150 @@ def run_capture_hook_bg(repo, stub_dir, block_file, hook_env_key, extra_env=None
         env=env,
         stdout=f_out,
         stderr=f_err,
-        preexec_fn=os.setsid,
+        start_new_session=True,
     )
     return proc, f_out, f_err, stdout_path, stderr_path
 
 
-def release_capture_hook(block_file):
-    with open(block_file + ".released", "w") as f:
-        f.write("\n")
+def release_capture_hook(block_file, marker=b"\n"):
+    released = block_file + ".released"
+    released_tmp = f"{released}.tmp.{os.getpid()}.{threading.get_ident()}"
+    with open(released_tmp, "wb") as fh:
+        fh.write(marker)
+    os.replace(released_tmp, released)
 
 
 def wait_for_capture_hook_start(block_file, timeout=30.0):
     return wait_for_block(block_file, timeout=timeout)
 
 
-def capture_hook_releaser(block_file, stop_event, mutate_fn=None, repeat_mutate=False):
+def capture_hook_releaser(
+    block_file,
+    stop_event,
+    mutate_fn=None,
+    repeat_mutate=False,
+    errors=None,
+):
     """Release each capture-hook iteration; optionally mutate once or always."""
     started = block_file + ".started"
     released = block_file + ".released"
     last_started_marker = None
     mutated = False
-    while not stop_event.is_set():
-        if os.path.exists(started):
-            with open(started, "rb") as fh:
-                marker = fh.read()
-            marker_changed = marker != last_started_marker
-            hook_waiting = not os.path.exists(released)
-            if marker_changed or hook_waiting:
+    try:
+        while not stop_event.is_set():
+            if os.path.exists(started):
+                with open(started, "rb") as fh:
+                    marker = fh.read()
+                marker_changed = marker != last_started_marker
                 if marker_changed:
                     last_started_marker = marker
                     if mutate_fn is not None and (repeat_mutate or not mutated):
                         mutate_fn()
                         mutated = True
-                if not os.path.exists(released):
-                    release_capture_hook(block_file)
-        time.sleep(0.01)
+                if marker and (
+                    marker_changed or not _release_matches(released, marker)
+                ):
+                    release_capture_hook(block_file, marker)
+            stop_event.wait(0.01)
+    except Exception:
+        if errors is None:
+            raise
+        errors.append(traceback.format_exc())
+        stop_event.set()
 
 
-def continuous_capture_mutator(block_file, mutate_fn, stop_event):
+def _release_matches(released, marker):
+    try:
+        with open(released, "rb") as fh:
+            return fh.read() == marker
+    except FileNotFoundError:
+        return False
+
+
+def _terminate_process_group(proc):
+    try:
+        if proc.poll() is not None:
+            return
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+    except OSError:
+        pass
+
+
+def wait_for_capture_hook_process(
+    proc,
+    worker,
+    stop_event,
+    worker_errors,
+    f_out,
+    f_err,
+    stdout_path,
+    stderr_path,
+    timeout=120,
+):
+    """Wait for a hooked process and always clean up its process group."""
+    deadline = time.monotonic() + timeout
+    failure = None
+    try:
+        while proc.poll() is None:
+            if worker_errors:
+                failure = "capture-hook worker failed:\n" + worker_errors[0]
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = f"bench-compare timed out after {timeout} seconds"
+                break
+            try:
+                proc.wait(timeout=min(0.1, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        try:
+            if proc.poll() is None:
+                _terminate_process_group(proc)
+        finally:
+            stop_event.set()
+            try:
+                worker.join(timeout=5)
+            finally:
+                try:
+                    f_out.close()
+                finally:
+                    f_err.close()
+
+    with open(stdout_path, encoding="utf-8", errors="replace") as fh:
+        stdout = fh.read()
+    with open(stderr_path, encoding="utf-8", errors="replace") as fh:
+        stderr = fh.read()
+
+    if worker.is_alive():
+        failure = failure or "capture-hook worker did not stop within 5 seconds"
+    if worker_errors:
+        failure = failure or "capture-hook worker failed:\n" + worker_errors[0]
+    if failure is not None:
+        raise RuntimeError(
+            f"{failure}\nbench-compare stdout:\n{stdout}\n"
+            f"bench-compare stderr:\n{stderr}"
+        )
+    return stderr
+
+
+def continuous_capture_mutator(block_file, mutate_fn, stop_event, errors=None):
     """Mutate on every capture-hook iteration until stop_event is set."""
-    capture_hook_releaser(block_file, stop_event, mutate_fn, repeat_mutate=True)
+    capture_hook_releaser(
+        block_file,
+        stop_event,
+        mutate_fn,
+        repeat_mutate=True,
+        errors=errors,
+    )
 
 
 def read_metadata(repo):
@@ -3075,6 +3180,22 @@ def _unix_socket_supported():
         return False
 
 
+def _bind_unix_socket_in(directory, name):
+    """Bind via a short relative path to avoid macOS's AF_UNIX path limit."""
+    source = (
+        "import socket, sys; "
+        "sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); "
+        "sock.bind(sys.argv[1]); sock.close()"
+    )
+    subprocess.run(
+        [sys.executable, "-c", source, name],
+        cwd=directory,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_capture_race_fifo_after_capture_continuous(tmp):
     print()
     print("=== Special-file race: FIFO after capture (continuous) ===")
@@ -3168,11 +3289,14 @@ def test_capture_race_socket_after_capture_continuous(tmp):
         sock_path = os.path.join(repo, "late.sock")
         if os.path.exists(sock_path):
             return
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(sock_path)
-        sock.close()
+        _bind_unix_socket_in(repo, "late.sock")
 
-    test_dir = os.path.join(tmp, "special-socket-continuous")
+    # Keep this deliberately beyond common AF_UNIX limits. The socket helper
+    # must bind relative to the repository, regardless of its absolute path.
+    test_dir = os.path.join(
+        tmp,
+        "special-socket-continuous-" + ("long-path-" * 8),
+    )
     repo = os.path.join(test_dir, "repo")
     create_test_repo(repo)
     write_file(repo, "generated.rs", "v1\n")
@@ -3185,29 +3309,32 @@ def test_capture_race_socket_after_capture_continuous(tmp):
     make_stub_cargo(stub_dir, cargo_log)
 
     stop_event = threading.Event()
+    worker_errors = []
     mutator = threading.Thread(
         target=continuous_capture_mutator,
-        args=(block, mutate, stop_event),
+        args=(block, mutate, stop_event, worker_errors),
         daemon=True,
     )
     mutator.start()
     time.sleep(0.05)
 
-    proc, f_out, f_err, _, stderr_path = run_capture_hook_bg(
+    proc, f_out, f_err, stdout_path, stderr_path = run_capture_hook_bg(
         repo,
         stub_dir,
         block,
         "SCAH_BENCH_TEST_BLOCK_AFTER_UNTRACKED_CAPTURE",
     )
 
-    proc.wait(timeout=120)
-    stop_event.set()
-    mutator.join(timeout=5)
-    f_out.close()
-    f_err.close()
-
-    with open(stderr_path) as fh:
-        stderr = fh.read()
+    stderr = wait_for_capture_hook_process(
+        proc,
+        mutator,
+        stop_event,
+        worker_errors,
+        f_out,
+        f_err,
+        stdout_path,
+        stderr_path,
+    )
 
     assert_ne("continuous socket race exit nonzero", 0, proc.returncode)
     assert_text_contains(
