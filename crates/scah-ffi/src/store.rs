@@ -199,14 +199,14 @@ unsafe fn parse_string_view<'a>(
     }
 }
 
-/// Leaf-path string view parse that skips UTF-8 re-validation.
+/// Checked leaf-path string view parse without diagnostic allocation.
 ///
 /// # Safety
 ///
-/// Same as [`parse_string_view`], and `view` bytes must already be valid UTF-8.
+/// Same pointer and lifetime requirements as [`parse_string_view`].
 #[inline(always)]
-unsafe fn parse_string_view_unchecked<'a>(view: ScahStringView) -> Result<&'a str, ScahStatus> {
-    unsafe { view.as_str_unchecked() }
+unsafe fn parse_string_view_leaf<'a>(view: ScahStringView) -> Result<&'a str, ScahStatus> {
+    unsafe { view.as_str() }
 }
 
 fn resolve_element(
@@ -350,11 +350,15 @@ unsafe fn leaf_fill_from_status(
         }
         return ScahStatus::BufferTooSmall;
     }
-    walk_from_first(store, first, len, out_ids, capacity);
+    let written = walk_from_first(store, first, len, out_ids, capacity);
     unsafe {
-        *out_written = len;
+        *out_written = written;
     }
-    ScahStatus::Ok
+    if written == len {
+        ScahStatus::Ok
+    } else {
+        ScahStatus::IndexOutOfBounds
+    }
 }
 
 #[inline(always)]
@@ -524,6 +528,9 @@ fn walk_from_first(
     };
     let write_len = len.min(capacity);
     for i in 0..len {
+        let Some(element) = store.store().elements.get(cursor) else {
+            return i;
+        };
         if i < write_len && !out_ids.is_null() {
             unsafe {
                 *out_ids.add(i) = cursor;
@@ -532,12 +539,7 @@ fn walk_from_first(
         if i + 1 == len {
             break;
         }
-        let next = store
-            .store()
-            .elements
-            .get(cursor)
-            .and_then(|el| el.next_sibling)
-            .map(|id| id.index());
+        let next = element.next_sibling.map(|id| id.index());
         match next {
             Some(n) => cursor = n,
             None => return i + 1,
@@ -812,6 +814,9 @@ pub unsafe extern "C" fn scah_store_get_span(
 ///
 /// When `capacity < len`, returns [`ScahStatus::BufferTooSmall`] with
 /// `*out_written = len` and no diagnostic allocation.
+/// When the supplied span is invalid or ends early, returns
+/// [`ScahStatus::IndexOutOfBounds`] with `*out_written` set to the number of
+/// valid prefix IDs copied.
 ///
 /// # Safety
 ///
@@ -831,19 +836,17 @@ pub unsafe extern "C" fn scah_store_fill_ids(
         clear_out_usize(out_written);
         ffi_guard_leaf(out_error, || {
             let store = require_ref(store)?;
-            if out_written.is_null() {
-                return Err(ScahStatus::NullPointer);
+            match leaf_fill_from_status(
+                &store.inner,
+                Some(first),
+                len,
+                out_ids,
+                capacity,
+                out_written,
+            ) {
+                ScahStatus::Ok => Ok(()),
+                status => Err(status),
             }
-            if capacity > 0 && out_ids.is_null() {
-                return Err(ScahStatus::NullPointer);
-            }
-            if len > capacity {
-                *out_written = len;
-                return Err(ScahStatus::BufferTooSmall);
-            }
-            walk_from_first(&store.inner, Some(first), len, out_ids, capacity);
-            *out_written = len;
-            Ok(())
         })
     }
 }
@@ -930,7 +933,7 @@ pub unsafe extern "C" fn scah_store_get_ids_fill(
                 return ScahStatus::NullPointer;
             }
             let store = &*store;
-            let query = match parse_string_view_unchecked(query) {
+            let query = match parse_string_view_leaf(query) {
                 Ok(q) => q,
                 Err(status) => return status,
             };
@@ -1051,19 +1054,17 @@ pub unsafe extern "C" fn scah_element_list_fill_ids(
         clear_out_usize(out_written);
         ffi_guard_leaf(out_error, || {
             let list = require_ref(list)?;
-            if out_written.is_null() {
-                return Err(ScahStatus::NullPointer);
+            match leaf_fill_from_status(
+                &list.store,
+                list.first,
+                list.len,
+                out_ids,
+                capacity,
+                out_written,
+            ) {
+                ScahStatus::Ok => Ok(()),
+                status => Err(status),
             }
-            if capacity > 0 && out_ids.is_null() {
-                return Err(ScahStatus::NullPointer);
-            }
-            if list.len > capacity {
-                *out_written = list.len;
-                return Err(ScahStatus::BufferTooSmall);
-            }
-            walk_from_first(&list.store, list.first, list.len, out_ids, capacity);
-            *out_written = list.len;
-            Ok(())
         })
     }
 }
@@ -1332,7 +1333,7 @@ pub unsafe extern "C" fn scah_element_get_attribute(
             return ScahStatus::NullPointer;
         }
         let list = &*owner;
-        let key = match parse_string_view_unchecked(key) {
+        let key = match parse_string_view_leaf(key) {
             Ok(k) => k,
             Err(status) => return status,
         };
@@ -1576,7 +1577,7 @@ pub unsafe extern "C" fn scah_element_get_ids_fill(
                 return ScahStatus::NullPointer;
             }
             let list = &*owner;
-            let query = match parse_string_view_unchecked(query) {
+            let query = match parse_string_view_leaf(query) {
                 Ok(q) => q,
                 Err(status) => return status,
             };
@@ -1756,7 +1757,7 @@ pub unsafe extern "C" fn scah_store_element_get_attribute(
         if store.is_null() {
             return ScahStatus::NullPointer;
         }
-        let key = match parse_string_view_unchecked(key) {
+        let key = match parse_string_view_leaf(key) {
             Ok(k) => k,
             Err(status) => return status,
         };
@@ -1821,7 +1822,7 @@ pub unsafe extern "C" fn scah_store_element_get_ids_fill(
             return ScahStatus::NullPointer;
         }
         let store = &*store;
-        let query = match parse_string_view_unchecked(query) {
+        let query = match parse_string_view_leaf(query) {
             Ok(q) => q,
             Err(status) => return status,
         };
@@ -2495,6 +2496,120 @@ mod tests {
         }
     }
 
+    #[test]
+    fn leaf_apis_reject_invalid_utf8_and_clear_outputs() {
+        let query = build_simple_query("a");
+        let mut store: *mut ScahStore = std::ptr::null_mut();
+        let mut err: *mut ScahError = std::ptr::null_mut();
+        let queries = [query as *const ScahQuery];
+        assert_eq!(
+            unsafe {
+                scah_parse(
+                    view("<a href='value'>link</a>"),
+                    queries.as_ptr(),
+                    1,
+                    &mut store,
+                    &mut err,
+                )
+            },
+            ScahStatus::Ok
+        );
+
+        let mut list: *mut ScahElementList = std::ptr::null_mut();
+        let mut found = 0u8;
+        assert_eq!(
+            unsafe { scah_store_get(store, view("a"), &mut list, &mut found, &mut err) },
+            ScahStatus::Ok
+        );
+        let element = first_id(list);
+        let invalid_bytes = [0xff];
+        let invalid = ScahStringView {
+            data: invalid_bytes.as_ptr(),
+            len: invalid_bytes.len(),
+        };
+
+        let mut ids = [usize::MAX; 1];
+        let mut written = usize::MAX;
+        found = 1;
+        assert_eq!(
+            unsafe {
+                scah_store_get_ids_fill(
+                    store,
+                    invalid,
+                    ids.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    ids.len(),
+                    &mut written,
+                    std::ptr::null_mut(),
+                    &mut found,
+                    &mut err,
+                )
+            },
+            ScahStatus::InvalidUtf8
+        );
+        assert_eq!((written, found), (0, 0));
+        assert_eq!(ids, [usize::MAX]);
+        assert!(err.is_null());
+
+        for via_store in [false, true] {
+            let mut value = sentinel_optional();
+            let status = if via_store {
+                unsafe {
+                    scah_store_element_get_attribute(store, element, invalid, &mut value, &mut err)
+                }
+            } else {
+                unsafe { scah_element_get_attribute(list, element, invalid, &mut value, &mut err) }
+            };
+            assert_eq!(status, ScahStatus::InvalidUtf8);
+            assert_optional_cleared(value);
+            assert!(err.is_null());
+        }
+
+        for via_store in [false, true] {
+            ids[0] = usize::MAX;
+            written = usize::MAX;
+            found = 1;
+            let status = if via_store {
+                unsafe {
+                    scah_store_element_get_ids_fill(
+                        store,
+                        element,
+                        invalid,
+                        ids.as_mut_ptr(),
+                        ids.len(),
+                        &mut written,
+                        &mut found,
+                        &mut err,
+                    )
+                }
+            } else {
+                unsafe {
+                    scah_element_get_ids_fill(
+                        list,
+                        element,
+                        invalid,
+                        ids.as_mut_ptr(),
+                        ids.len(),
+                        &mut written,
+                        std::ptr::null_mut(),
+                        &mut found,
+                        &mut err,
+                    )
+                }
+            };
+            assert_eq!(status, ScahStatus::InvalidUtf8);
+            assert_eq!((written, found), (0, 0));
+            assert_eq!(ids, [usize::MAX]);
+            assert!(err.is_null());
+        }
+
+        unsafe {
+            scah_element_list_free(list);
+            scah_store_free(store);
+            scah_query_free(query);
+        }
+    }
+
     /// Caller-buffer contract: only `written` prefix slots are initialized.
     #[test]
     fn ids_fill_exposes_only_written_prefix() {
@@ -2621,6 +2736,101 @@ mod tests {
         );
         assert_eq!(span_written, 2);
         assert_eq!(span_ids, filled);
+
+        // Invalid spans report exactly the valid prefix initialized by the call.
+        let mut checked = [usize::MAX; 3];
+        let mut checked_written = usize::MAX;
+        assert_eq!(
+            unsafe {
+                scah_store_fill_ids(
+                    store,
+                    usize::MAX,
+                    1,
+                    checked.as_mut_ptr(),
+                    checked.len(),
+                    &mut checked_written,
+                    &mut err,
+                )
+            },
+            ScahStatus::IndexOutOfBounds
+        );
+        assert_eq!(checked_written, 0);
+        assert_eq!(checked, [usize::MAX; 3]);
+
+        checked_written = usize::MAX;
+        assert_eq!(
+            unsafe {
+                scah_store_fill_ids(
+                    store,
+                    first,
+                    span_len + 1,
+                    checked.as_mut_ptr(),
+                    checked.len(),
+                    &mut checked_written,
+                    &mut err,
+                )
+            },
+            ScahStatus::IndexOutOfBounds
+        );
+        assert_eq!(checked_written, span_len);
+        assert_eq!(&checked[..span_len], &filled);
+        assert_eq!(checked[span_len], usize::MAX);
+
+        checked_written = 0;
+        assert_eq!(
+            unsafe {
+                scah_element_list_fill_from(
+                    list3,
+                    first,
+                    span_len,
+                    checked.as_mut_ptr(),
+                    checked.len(),
+                    &mut checked_written,
+                    &mut err,
+                )
+            },
+            ScahStatus::Ok
+        );
+        assert_eq!(checked_written, 2);
+        assert_eq!(&checked[..2], &filled);
+
+        checked = [usize::MAX; 3];
+        checked_written = usize::MAX;
+        assert_eq!(
+            unsafe {
+                scah_element_list_fill_from(
+                    list3,
+                    usize::MAX,
+                    1,
+                    checked.as_mut_ptr(),
+                    checked.len(),
+                    &mut checked_written,
+                    &mut err,
+                )
+            },
+            ScahStatus::IndexOutOfBounds
+        );
+        assert_eq!(checked_written, 0);
+        assert_eq!(checked, [usize::MAX; 3]);
+
+        checked_written = usize::MAX;
+        assert_eq!(
+            unsafe {
+                scah_element_list_fill_from(
+                    list3,
+                    first,
+                    span_len + 1,
+                    checked.as_mut_ptr(),
+                    checked.len(),
+                    &mut checked_written,
+                    &mut err,
+                )
+            },
+            ScahStatus::IndexOutOfBounds
+        );
+        assert_eq!(checked_written, span_len);
+        assert_eq!(&checked[..span_len], &filled);
+        assert_eq!(checked[span_len], usize::MAX);
 
         unsafe {
             scah_element_list_free(list);
