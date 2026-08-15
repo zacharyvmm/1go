@@ -1,5 +1,5 @@
 use super::element::builder::XHtmlTag;
-use super::indexer::{ScalarTagIndexer, TagEvent, TagIndexer, TagKind};
+use super::indexer::{AutoTagIndexer, TagEvent, TagIndexer, TagKind};
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
 use crate::ParseError;
@@ -31,7 +31,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
     parse_error: Option<ParseError>,
-    indexer: ScalarTagIndexer,
+    indexer: AutoTagIndexer,
     #[cfg(test)]
     attribute_parse_count: usize,
 }
@@ -68,7 +68,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: ScalarTagIndexer,
+            indexer: AutoTagIndexer::default(),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::default(),
@@ -92,7 +92,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: ScalarTagIndexer,
+            indexer: AutoTagIndexer::default(),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::with_capacity_options(
@@ -198,7 +198,7 @@ where
                         );
                         open.attributes_start + attributes.get_position()
                     } else {
-                        open.finish(source)
+                        self.indexer.finish_open(source, &open)
                     };
                     reader.advance_to(end);
                     break XHtmlTag::Open;

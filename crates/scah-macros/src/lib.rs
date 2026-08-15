@@ -6,7 +6,210 @@ use scah_query_ir::{
     SelectionKind, Transition,
 };
 use syn::parse::{Parse, ParseStream};
-use syn::{Expr, LitStr, Result, Token, braced, parenthesized};
+use syn::{Expr, LitByte, LitStr, Result, Token, braced, bracketed, parenthesized};
+
+/// Generate exact two-nibble SIMD classification tables at compile time.
+///
+/// The expansion is `([u8; 16], [u8; 16], structural_bits, whitespace_bits)`.
+#[proc_macro]
+pub fn simd_nibble_tables(input: TokenStream) -> TokenStream {
+    let parsed = syn::parse_macro_input!(input as SimdTableInput);
+    match generate_simd_mapping(&parsed.structural, &parsed.whitespace) {
+        Some(mapping) => {
+            let tlo = mapping.tlo;
+            let thi = mapping.thi;
+            let structural_bits = mapping.structural_bits;
+            let whitespace_bits = mapping.whitespace_bits;
+            quote! {
+                ([#(#tlo),*], [#(#thi),*], #structural_bits, #whitespace_bits)
+            }
+            .into()
+        }
+        None => syn::Error::new(
+            Span::call_site(),
+            "SIMD nibble classifier is unsatisfiable for these byte domains",
+        )
+        .to_compile_error()
+        .into(),
+    }
+}
+
+struct SimdTableInput {
+    structural: Vec<u8>,
+    whitespace: Vec<u8>,
+}
+
+impl Parse for SimdTableInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let structural_name: syn::Ident = input.parse()?;
+        if structural_name != "structural" {
+            return Err(syn::Error::new(
+                structural_name.span(),
+                "expected `structural`",
+            ));
+        }
+        input.parse::<Token![:]>()?;
+        let structural = parse_byte_array(input)?;
+        input.parse::<Token![,]>()?;
+
+        let whitespace_name: syn::Ident = input.parse()?;
+        if whitespace_name != "whitespace" {
+            return Err(syn::Error::new(
+                whitespace_name.span(),
+                "expected `whitespace`",
+            ));
+        }
+        input.parse::<Token![:]>()?;
+        let whitespace = parse_byte_array(input)?;
+        let _ = input.parse::<Token![,]>();
+
+        Ok(Self {
+            structural,
+            whitespace,
+        })
+    }
+}
+
+fn parse_byte_array(input: ParseStream<'_>) -> Result<Vec<u8>> {
+    let content;
+    bracketed!(content in input);
+    let values = content.parse_terminated(LitByte::parse, Token![,])?;
+    Ok(values.into_iter().map(|value| value.value()).collect())
+}
+
+struct SimdMapping {
+    tlo: [u8; 16],
+    thi: [u8; 16],
+    structural_bits: u8,
+    whitespace_bits: u8,
+}
+
+fn generate_simd_mapping(structural: &[u8], whitespace: &[u8]) -> Option<SimdMapping> {
+    let mut targets = Vec::with_capacity(structural.len() + whitespace.len());
+    let mut is_structural = Vec::with_capacity(targets.capacity());
+    for (&byte, domain) in structural
+        .iter()
+        .map(|byte| (byte, true))
+        .chain(whitespace.iter().map(|byte| (byte, false)))
+    {
+        if targets.contains(&byte) {
+            return None;
+        }
+        targets.push(byte);
+        is_structural.push(domain);
+    }
+
+    let mut assigned = vec![0; targets.len()];
+    let mut tlo = [0; 16];
+    let mut thi = [0; 16];
+    if !solve_simd_mapping(
+        0,
+        &targets,
+        &is_structural,
+        &mut assigned,
+        &mut tlo,
+        &mut thi,
+        0,
+        0,
+    ) {
+        return None;
+    }
+
+    let mut structural_bits = 0;
+    let mut whitespace_bits = 0;
+    for (index, mask) in assigned.into_iter().enumerate() {
+        if is_structural[index] {
+            structural_bits |= mask;
+        } else {
+            whitespace_bits |= mask;
+        }
+    }
+
+    Some(SimdMapping {
+        tlo,
+        thi,
+        structural_bits,
+        whitespace_bits,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_simd_mapping(
+    index: usize,
+    targets: &[u8],
+    is_structural: &[bool],
+    assigned: &mut [u8],
+    tlo: &mut [u8; 16],
+    thi: &mut [u8; 16],
+    structural_used: u8,
+    whitespace_used: u8,
+) -> bool {
+    if index == targets.len() {
+        return true;
+    }
+
+    let byte = targets[index];
+    let lo = (byte & 0x0f) as usize;
+    let hi = (byte >> 4) as usize;
+    let structural = is_structural[index];
+
+    for shift in 0..8 {
+        let mask = 1 << shift;
+        if structural && whitespace_used & mask != 0 || !structural && structural_used & mask != 0 {
+            continue;
+        }
+
+        let old_lo = tlo[lo];
+        let old_hi = thi[hi];
+        tlo[lo] |= mask;
+        thi[hi] |= mask;
+        assigned[index] = mask;
+
+        let mut valid = true;
+        for candidate in u8::MIN..=u8::MAX {
+            let value = tlo[(candidate & 0x0f) as usize] & thi[(candidate >> 4) as usize];
+            if value == 0 {
+                continue;
+            }
+
+            if let Some(target_index) = targets.iter().position(|target| *target == candidate) {
+                if target_index <= index {
+                    valid &= value == assigned[target_index];
+                } else {
+                    valid &= value.is_power_of_two();
+                }
+            } else {
+                valid = false;
+            }
+
+            if !valid {
+                break;
+            }
+        }
+
+        if valid {
+            let next_structural = structural_used | if structural { mask } else { 0 };
+            let next_whitespace = whitespace_used | if structural { 0 } else { mask };
+            if solve_simd_mapping(
+                index + 1,
+                targets,
+                is_structural,
+                assigned,
+                tlo,
+                thi,
+                next_structural,
+                next_whitespace,
+            ) {
+                return true;
+            }
+        }
+
+        tlo[lo] = old_lo;
+        thi[hi] = old_hi;
+    }
+
+    false
+}
 
 #[proc_macro]
 pub fn query(input: TokenStream) -> TokenStream {
