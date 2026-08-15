@@ -2,6 +2,10 @@ use std::ops::Range;
 
 use super::simd_classifier::{BlockClassifier, ClassMasks};
 
+/// Pay SIMD classification only after a scalar probe shows that the current
+/// delimiter span is not one of HTML's common short spans.
+const SCALAR_SEARCH_PREFIX: usize = 32;
+
 /// The kind of completed structural span discovered by a [`TagIndexer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TagKind {
@@ -169,6 +173,17 @@ impl PackedTagIndexer {
         mut predicate: impl FnMut(u8) -> bool,
     ) -> Option<usize> {
         let mut position = from;
+        let scalar_end = source
+            .len()
+            .min(position.saturating_add(SCALAR_SEARCH_PREFIX));
+        if let Some(offset) = source[position..scalar_end]
+            .iter()
+            .position(|byte| predicate(*byte))
+        {
+            return Some(position + offset);
+        }
+        position = scalar_end;
+
         while position < source.len() {
             let base = position & !15;
             if base + 16 > source.len() {
@@ -620,6 +635,27 @@ mod tests {
         assert_eq!(
             packed.find_raw_text_close(html.as_bytes(), 0, "</script"),
             None
+        );
+    }
+
+    #[test]
+    fn hybrid_search_uses_scalar_for_short_spans_and_packed_masks_for_long_spans() {
+        let mut packed = PackedTagIndexer::default();
+        let short = "short text<a>";
+        assert!(matches!(
+            packed.next(short.as_bytes(), 0),
+            Some(TagEvent::Open(_))
+        ));
+        assert!(!packed.cache_valid, "short search should remain scalar");
+
+        let long = format!("{}<a>", "x".repeat(SCALAR_SEARCH_PREFIX + 32));
+        assert!(matches!(
+            packed.next(long.as_bytes(), 0),
+            Some(TagEvent::Open(_))
+        ));
+        assert!(
+            packed.cache_valid,
+            "long search should classify packed blocks"
         );
     }
 }
