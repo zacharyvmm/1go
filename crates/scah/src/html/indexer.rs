@@ -78,6 +78,15 @@ pub(crate) trait TagIndexer {
     fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
         open.finish(source)
     }
+
+    fn find_raw_text_close(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        close_tag: &str,
+    ) -> Option<usize> {
+        find_raw_text_close_scalar(source, from, close_tag.as_bytes())
+    }
 }
 
 /// Scalar reference backend for [`TagIndexer`].
@@ -285,6 +294,50 @@ fn find_unquoted_tag_end(source: &[u8], mut position: usize) -> usize {
     source.len()
 }
 
+#[inline]
+fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
+    matches!(
+        byte,
+        None | Some(b' ' | b'\t' | b'\n' | 0x0C | b'\r' | b'/' | b'>')
+    )
+}
+
+fn raw_text_candidate_matches(source: &[u8], start: usize, close_tag: &[u8]) -> bool {
+    let end = start + close_tag.len();
+    source
+        .get(start..end)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(close_tag))
+        && is_raw_text_end_terminator(source.get(end).copied())
+}
+
+fn find_raw_text_close_scalar(source: &[u8], from: usize, close_tag: &[u8]) -> Option<usize> {
+    let mut position = from;
+    while let Some(offset) = source[position..].iter().position(|byte| *byte == b'<') {
+        let candidate = position + offset;
+        if raw_text_candidate_matches(source, candidate, close_tag) {
+            return Some(candidate);
+        }
+        position = candidate + 1;
+    }
+    None
+}
+
+fn find_raw_text_close_packed(
+    search: &mut impl StructuralSearch,
+    source: &[u8],
+    from: usize,
+    close_tag: &[u8],
+) -> Option<usize> {
+    let mut position = from;
+    while let Some(candidate) = search.find_byte(source, position, b'<') {
+        if raw_text_candidate_matches(source, candidate, close_tag) {
+            return Some(candidate);
+        }
+        position = candidate + 1;
+    }
+    None
+}
+
 fn next_event(search: &mut impl StructuralSearch, source: &[u8], from: usize) -> Option<TagEvent> {
     let start = search.find_byte(source, from, b'<')?;
     let mut position = start + 1;
@@ -382,6 +435,15 @@ impl TagIndexer for PackedTagIndexer {
         open.end_hint
             .unwrap_or_else(|| self.find_tag_end(source, open.attributes_start))
     }
+
+    fn find_raw_text_close(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        close_tag: &str,
+    ) -> Option<usize> {
+        find_raw_text_close_packed(self, source, from, close_tag.as_bytes())
+    }
 }
 
 impl TagIndexer for AutoTagIndexer {
@@ -396,6 +458,18 @@ impl TagIndexer for AutoTagIndexer {
         match &mut self.backend {
             AutoBackend::Scalar(indexer) => indexer.finish_open(source, open),
             AutoBackend::Packed(indexer) => indexer.finish_open(source, open),
+        }
+    }
+
+    fn find_raw_text_close(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        close_tag: &str,
+    ) -> Option<usize> {
+        match &mut self.backend {
+            AutoBackend::Scalar(indexer) => indexer.find_raw_text_close(source, from, close_tag),
+            AutoBackend::Packed(indexer) => indexer.find_raw_text_close(source, from, close_tag),
         }
     }
 }
@@ -491,5 +565,38 @@ mod tests {
         ] {
             assert_packed_matches_scalar(source);
         }
+    }
+
+    #[test]
+    fn raw_text_search_skips_near_misses_and_matches_case_insensitively() {
+        let html = "x </scripts> <fake> y </ScRiPt >tail";
+        let expected = html.find("</ScRiPt").unwrap();
+        let mut scalar = ScalarTagIndexer;
+        let mut packed = PackedTagIndexer::default();
+
+        assert_eq!(
+            scalar.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            Some(expected)
+        );
+        assert_eq!(
+            packed.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn raw_text_search_handles_long_content_without_a_close() {
+        let html = format!("{}<scripted>", "x < y ".repeat(1_024));
+        let mut scalar = ScalarTagIndexer;
+        let mut packed = PackedTagIndexer::default();
+
+        assert_eq!(
+            scalar.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            None
+        );
+        assert_eq!(
+            packed.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            None
+        );
     }
 }
