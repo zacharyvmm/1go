@@ -155,7 +155,9 @@ where
                 continue;
             }
 
-            if self.query.is_save_point(&position) {
+            if self.query.is_save_point(&position)
+                && self.query.get_selection(position.selection).save.attributes
+            {
                 interest.require_all();
                 return;
             }

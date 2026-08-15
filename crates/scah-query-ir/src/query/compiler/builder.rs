@@ -27,7 +27,7 @@ use super::transition::Transition;
 /// assert!(!save.inner_html);
 /// assert!(save.text_content);
 /// ```
-#[derive(PartialEq, Debug, Default, Clone, Copy)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub struct Save {
     /// When `true`, the raw HTML between the element's opening and closing
     /// tags is stored as [`Element::inner_html`](crate::Element::inner_html).
@@ -35,6 +35,15 @@ pub struct Save {
     /// When `true`, the concatenated text content of the element is stored
     /// and retrievable via [`Element::text_content()`](crate::Element::text_content).
     pub text_content: bool,
+    /// When `true`, the matched element's `id`, `class`, and generic
+    /// attributes are retained in the result store.
+    pub attributes: bool,
+}
+
+impl Default for Save {
+    fn default() -> Self {
+        Self::none()
+    }
 }
 
 impl Save {
@@ -43,6 +52,7 @@ impl Save {
         Self {
             inner_html: true,
             text_content: false,
+            attributes: true,
         }
     }
 
@@ -51,6 +61,7 @@ impl Save {
         Self {
             inner_html: false,
             text_content: true,
+            attributes: true,
         }
     }
 
@@ -59,6 +70,7 @@ impl Save {
         Self {
             inner_html: true,
             text_content: true,
+            attributes: true,
         }
     }
 
@@ -70,7 +82,25 @@ impl Save {
         Self {
             inner_html: false,
             text_content: false,
+            attributes: true,
         }
+    }
+
+    /// Save only the element name. Selector attributes are still parsed as
+    /// needed for matching but are not copied into the result store.
+    pub const fn name_only() -> Self {
+        Self {
+            inner_html: false,
+            text_content: false,
+            attributes: false,
+        }
+    }
+
+    /// Disable result attribute capture while preserving the selected content
+    /// policy.
+    pub const fn without_attributes(mut self) -> Self {
+        self.attributes = false;
+        self
     }
 }
 
@@ -277,7 +307,7 @@ impl<'query> QueryBuilder<'query> {
                 SelectionKind::All => return None,
 
                 // This is it need's to find the </{element}> to get either inner_html or text_content
-                SelectionKind::First => section.save != Save::none(),
+                SelectionKind::First => section.save.inner_html || section.save.text_content,
             };
             if stop_here {
                 return Some(index);
@@ -389,6 +419,9 @@ mod tests {
         assert_eq!(query.exit_at_section(), Some(QuerySectionId(0)));
 
         let query = Query::first("a", Save::none()).unwrap();
+        assert_eq!(query.exit_at_section(), Some(QuerySectionId(0)));
+
+        let query = Query::first("a", Save::name_only()).unwrap();
         assert_eq!(query.exit_at_section(), Some(QuerySectionId(0)));
 
         let query = Query::all("p", Save::all())
