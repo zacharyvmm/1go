@@ -10,14 +10,15 @@ use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
 use crate::engine::MAX_ELEMENT_DEPTH;
-use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
+use crate::engine::multiplexer::{DocumentPosition, ElementPreflight, QueryMultiplexer, SaveHit};
 use crate::store::Store;
 
 #[derive(Default)]
-struct ParserTempState<'html> {
+struct ParserTempState<'html, 'query> {
     closing_elements: Vec<OpenElement<'html>>,
     implied_closes: Vec<OpenElement<'html>>,
     save_hits: Vec<SaveHit>,
+    preflight: ElementPreflight<'query>,
 }
 
 pub struct XHtmlParser<'html, 'query, Q> {
@@ -26,7 +27,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     store: Store<'html, 'query>,
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
-    temp_state: ParserTempState<'html>,
+    temp_state: ParserTempState<'html, 'query>,
     capture_text_content: bool,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
@@ -184,8 +185,9 @@ where
                     let name = open.name(source);
                     self.element.set_name(name);
 
-                    let attribute_interest = self.selectors.attribute_interest_for(name);
-                    let end = if !attribute_interest.is_empty() {
+                    self.selectors
+                        .prepare_element(name, &mut self.temp_state.preflight);
+                    let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {
                             self.attribute_parse_count += 1;
@@ -194,7 +196,7 @@ where
                         self.element.parse_attributes(
                             &mut attributes,
                             &mut self.store.attributes,
-                            &attribute_interest,
+                            &self.temp_state.preflight.attribute_interest,
                         );
                         open.attributes_start + attributes.get_position()
                     } else {
@@ -273,11 +275,12 @@ where
                     }
                 );
 
-                self.selectors.next_into(
+                self.selectors.next_prepared_into(
                     &self.element,
                     &self.position,
                     &mut self.store,
                     &mut self.temp_state.save_hits,
+                    &self.temp_state.preflight,
                 );
                 if is_self_closing {
                     early_exit = self.selectors.back(

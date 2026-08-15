@@ -16,6 +16,14 @@ pub(crate) struct AttributeInterest<'query> {
 
 impl<'query> AttributeInterest<'query> {
     #[inline]
+    pub fn clear(&mut self) {
+        self.all = false;
+        self.id = false;
+        self.class = false;
+        self.keys.clear();
+    }
+
+    #[inline]
     pub fn require_all(&mut self) {
         self.all = true;
         self.keys.clear();

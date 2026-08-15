@@ -143,7 +143,8 @@ where
         &self,
         name: &str,
         interest: &mut AttributeInterest<'query>,
-    ) {
+    ) -> bool {
+        let mut viable = false;
         for cursor in &self.cursors {
             if !cursor.is_active() {
                 continue;
@@ -154,16 +155,18 @@ where
             if !predicate.matches_name(name) {
                 continue;
             }
+            viable = true;
 
             if self.query.is_save_point(&position)
                 && self.query.get_selection(position.selection).save.attributes
             {
                 interest.require_all();
-                return;
+                return true;
             }
 
             interest.add_predicate(predicate);
         }
+        viable
     }
 
     pub fn save_element(
