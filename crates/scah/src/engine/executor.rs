@@ -1,3 +1,4 @@
+use super::attribute_interest::AttributeInterest;
 use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
 use crate::debug::ScopedCursorReason;
@@ -138,17 +139,29 @@ where
     /// is safe, while skipping attributes needed by a viable transition is
     /// not. Save points always need the complete element because attributes
     /// are part of the stored result even when the selector itself is tag-only.
-    pub(crate) fn requires_attributes_for(&self, name: &str) -> bool {
-        self.cursors.iter().any(|cursor| {
+    pub(crate) fn extend_attribute_interest_for(
+        &self,
+        name: &str,
+        interest: &mut AttributeInterest<'query>,
+    ) {
+        for cursor in &self.cursors {
             if !cursor.is_active() {
-                return false;
+                continue;
             }
 
             let position = cursor.position;
             let predicate = &self.query.get_transition(position.state).predicate;
-            predicate.matches_name(name)
-                && (predicate.requires_attributes() || self.query.is_save_point(&position))
-        })
+            if !predicate.matches_name(name) {
+                continue;
+            }
+
+            if self.query.is_save_point(&position) {
+                interest.require_all();
+                return;
+            }
+
+            interest.add_predicate(predicate);
+        }
     }
 
     pub fn save_element(

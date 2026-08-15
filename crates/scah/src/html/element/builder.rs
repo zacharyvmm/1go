@@ -1,5 +1,6 @@
 use super::tokenizer::ElementAttributeToken;
 use crate::Reader;
+use crate::engine::attribute_interest::AttributeInterest;
 use crate::html::tag::TagFlags;
 use scah_query_ir::{Attribute, IElement};
 
@@ -66,9 +67,10 @@ impl<'html> XHtmlElement<'html> {
         &mut self,
         reader: &mut Reader<'html>,
         attribute_tape: &mut Vec<Attribute<'html>>,
+        interest: &AttributeInterest<'_>,
     ) {
         debug_assert!(!self.name.is_empty());
-        self.from(reader, attribute_tape);
+        self.parse_from(reader, attribute_tape, Some(interest));
     }
 
     fn add_to_element(
@@ -90,6 +92,51 @@ impl<'html> XHtmlElement<'html> {
             self.id = attribute.value;
         } else {
             attribute_tape.push(attribute);
+        }
+    }
+
+    fn add_selected_attribute(
+        &mut self,
+        attribute: Attribute<'html>,
+        attribute_tape: &mut Vec<Attribute<'html>>,
+        interest: &AttributeInterest<'_>,
+    ) {
+        if attribute.key.eq_ignore_ascii_case("class") {
+            if !interest.includes_class() {
+                return;
+            }
+            if self.class.is_none() && attribute.value.is_some() {
+                self.class = attribute.value;
+            } else {
+                // Preserve valueless and duplicate class attributes so
+                // `[class]` selectors retain the existing fallback behavior.
+                attribute_tape.push(attribute);
+            }
+        } else if attribute.key.eq_ignore_ascii_case("id") {
+            if !interest.includes_id() {
+                return;
+            }
+            if self.id.is_none() && attribute.value.is_some() {
+                self.id = attribute.value;
+            } else {
+                attribute_tape.push(attribute);
+            }
+        } else if interest.includes_attribute(attribute.key) {
+            attribute_tape.push(attribute);
+        }
+    }
+
+    #[inline]
+    fn add_parsed_attribute(
+        &mut self,
+        attribute: Attribute<'html>,
+        attribute_tape: &mut Vec<Attribute<'html>>,
+        interest: Option<&AttributeInterest<'_>>,
+    ) {
+        if let Some(interest) = interest {
+            self.add_selected_attribute(attribute, attribute_tape, interest);
+        } else {
+            self.add_to_element(attribute, attribute_tape);
         }
     }
 
@@ -125,6 +172,15 @@ impl<'html> XHtmlElement<'html> {
     }
 
     pub fn from(&mut self, reader: &mut Reader<'html>, attribute_tape: &mut Vec<Attribute<'html>>) {
+        self.parse_from(reader, attribute_tape, None);
+    }
+
+    fn parse_from(
+        &mut self,
+        reader: &mut Reader<'html>,
+        attribute_tape: &mut Vec<Attribute<'html>>,
+        interest: Option<&AttributeInterest<'_>>,
+    ) {
         let mut assign = false;
         let mut key = None;
         let start_len = attribute_tape.len();
@@ -143,21 +199,23 @@ impl<'html> XHtmlElement<'html> {
                     }
                     Some(k) => {
                         if assign {
-                            self.add_to_element(
+                            self.add_parsed_attribute(
                                 Attribute {
                                     key: k,
                                     value: Some(string_value),
                                 },
                                 attribute_tape,
+                                interest,
                             );
                             key = None;
                         } else {
-                            self.add_to_element(
+                            self.add_parsed_attribute(
                                 Attribute {
                                     key: k,
                                     value: None,
                                 },
                                 attribute_tape,
+                                interest,
                             );
                             key = Some(string_value)
                         }
@@ -172,12 +230,13 @@ impl<'html> XHtmlElement<'html> {
         }
 
         if let Some(attribute) = key {
-            self.add_to_element(
+            self.add_parsed_attribute(
                 Attribute {
                     key: attribute,
                     value: None,
                 },
                 attribute_tape,
+                interest,
             );
         }
 
@@ -288,6 +347,10 @@ fn skip_html_comment(reader: &mut Reader<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        AttributeSelection, AttributeSelectionKind, AttributeSelections, ClassSelections,
+        ElementPredicate,
+    };
 
     #[test]
     fn test_key_no_quote_and_value_with_quote() {
@@ -704,6 +767,37 @@ mod tests {
                 key: "title",
                 value: Some(r#"hello \'world\' end"#),
             }
+        );
+    }
+
+    #[test]
+    fn selected_attribute_parsing_retains_only_query_fields() {
+        let mut interest = AttributeInterest::default();
+        interest.add_predicate(&ElementPredicate {
+            name: Some("a"),
+            id: None,
+            classes: ClassSelections::from_static(&["promoted"]),
+            attributes: AttributeSelections::from(vec![AttributeSelection {
+                name: "href",
+                value: None,
+                kind: AttributeSelectionKind::Presence,
+            }]),
+        });
+
+        let mut reader =
+            Reader::new(" class='promoted' href='/kept' rel='discarded' data-extra='discarded'>");
+        let mut element = XHtmlElement::default();
+        element.set_name("a");
+        let mut attributes = vec![];
+        element.parse_attributes(&mut reader, &mut attributes, &interest);
+
+        assert_eq!(element.class, Some("promoted"));
+        assert_eq!(
+            element.attributes,
+            &[Attribute {
+                key: "href",
+                value: Some("/kept"),
+            }]
         );
     }
 }
