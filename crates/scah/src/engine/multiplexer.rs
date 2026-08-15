@@ -117,6 +117,15 @@ where
             .any(|runner| runner.query().requires_text_content())
     }
 
+    /// Whether the active query frontier may inspect or save attributes for
+    /// this element name.
+    #[inline]
+    pub(crate) fn requires_attributes_for(&self, name: &str) -> bool {
+        self.runners
+            .iter()
+            .any(|runner| runner.requires_attributes_for(name))
+    }
+
     pub(crate) fn next_into(
         &mut self,
         xhtml_element: &XHtmlElement<'html>,

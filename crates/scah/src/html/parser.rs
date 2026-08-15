@@ -1,4 +1,5 @@
 use super::element::builder::XHtmlTag;
+use super::indexer::{ScalarTagIndexer, TagEvent, TagIndexer, TagKind};
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
 use crate::ParseError;
@@ -30,6 +31,9 @@ pub struct XHtmlParser<'html, 'query, Q> {
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
     parse_error: Option<ParseError>,
+    indexer: ScalarTagIndexer,
+    #[cfg(test)]
+    attribute_parse_count: usize,
 }
 
 /// A raw-text end tag is only "appropriate" when the tag name is immediately
@@ -64,6 +68,9 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
+            indexer: ScalarTagIndexer,
+            #[cfg(test)]
+            attribute_parse_count: 0,
             store: Store::default(),
         }
     }
@@ -85,6 +92,9 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
+            indexer: ScalarTagIndexer,
+            #[cfg(test)]
+            attribute_parse_count: 0,
             store: Store::with_capacity_options(
                 capacity,
                 crate::CapacityOptions {
@@ -144,36 +154,59 @@ where
             }
         }
 
-        // move until it finds the first `<`
-        reader.next_until(b'<');
+        let source = reader.source();
+        let tag = loop {
+            let Some(span) = self.indexer.next(source, reader.get_position()) else {
+                reader.advance_to(source.len());
+                self.drain_open_elements(reader);
+                return false;
+            };
 
-        if reader.peek().is_none() {
-            self.drain_open_elements(reader);
-            return false;
-        }
+            match span {
+                TagEvent::Complete(span) if span.kind == TagKind::Ignored => {
+                    self.position.reader_position = span.start;
+                    if self.capture_text_content
+                        && self.store.text_content.text_start.is_some()
+                        && let Some(position) = self
+                            .store
+                            .text_content
+                            .push(reader, self.position.reader_position)
+                    {
+                        self.position.text_content_position = position;
+                    }
+                    reader.advance_to(span.end);
+                    if self.capture_text_content {
+                        self.store.text_content.set_start(reader.get_position());
+                    }
+                }
+                TagEvent::Open(open) => {
+                    self.position.reader_position = open.start;
+                    let name = open.name(source);
+                    self.element.set_name(name);
 
-        let tag = {
-            let mut tag: Option<XHtmlTag> = None;
-
-            while tag.is_none() {
-                self.position.reader_position = reader.get_position();
-                tag = XHtmlTag::from(reader);
-                if let Some(XHtmlTag::Open) = tag {
-                    self.element.from(reader, &mut self.store.attributes);
-                } else if self.capture_text_content
-                    && tag.is_none()
-                    && self.store.text_content.text_start.is_some()
-                    && let Some(position) = self
-                        .store
-                        .text_content
-                        .push(reader, self.position.reader_position)
-                {
-                    self.position.text_content_position = position;
-                    self.store.text_content.set_start(reader.get_position());
+                    let end = if self.selectors.requires_attributes_for(name) {
+                        #[cfg(test)]
+                        {
+                            self.attribute_parse_count += 1;
+                        }
+                        let mut attributes = Reader::from_bytes(&source[open.attributes_start..]);
+                        self.element
+                            .parse_attributes(&mut attributes, &mut self.store.attributes);
+                        open.attributes_start + attributes.get_position()
+                    } else {
+                        open.finish(source)
+                    };
+                    reader.advance_to(end);
+                    break XHtmlTag::Open;
+                }
+                TagEvent::Complete(span) => {
+                    debug_assert_eq!(span.kind, TagKind::Close);
+                    self.position.reader_position = span.start;
+                    let name = span.name(source);
+                    reader.advance_to(span.end);
+                    break XHtmlTag::Close(name);
                 }
             }
-
-            tag.unwrap()
         };
         let tag_start_position = self.position.reader_position;
 
@@ -1516,5 +1549,42 @@ mod tests {
         let store = parse(html, queries).expect("parse succeeds");
 
         assert_eq!(store.get("a").unwrap().count(), 1);
+    }
+
+    #[test]
+    fn tag_only_prefixes_skip_attributes_but_saved_elements_keep_them() {
+        let html = concat!(
+            "<main data-unused='root'>",
+            "<section data-unused='middle'>",
+            "<a href='/kept' rel='next'>link</a>",
+            "</section></main>"
+        );
+        let queries = &[Query::all("main a", Save::none()).unwrap().build()];
+        let mut reader = Reader::new(html);
+        let mut parser = XHtmlParser::new(QueryMultiplexer::new(queries));
+
+        while parser.next(&mut reader) {}
+
+        // `main` is a tag-only, non-save transition and `section` cannot
+        // match either active name. Only the terminal `a` needs attributes,
+        // both for saving and for preserving the public result contract.
+        assert_eq!(parser.attribute_parse_count, 1);
+        let store = parser.matches();
+        let anchor = store.get("main a").unwrap().next().unwrap();
+        assert_eq!(anchor.attribute(&store, "href"), Some("/kept"));
+        assert_eq!(anchor.attribute(&store, "rel"), Some("next"));
+    }
+
+    #[test]
+    fn attribute_selectors_parse_each_name_viable_candidate() {
+        let html = "<main><div class='miss'></div><div class='hit'></div></main>";
+        let queries = &[Query::all("div.hit", Save::none()).unwrap().build()];
+        let mut reader = Reader::new(html);
+        let mut parser = XHtmlParser::new(QueryMultiplexer::new(queries));
+
+        while parser.next(&mut reader) {}
+
+        assert_eq!(parser.attribute_parse_count, 2);
+        assert_eq!(parser.matches().get("div.hit").unwrap().count(), 1);
     }
 }

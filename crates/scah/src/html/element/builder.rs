@@ -50,6 +50,27 @@ pub enum XHtmlTag<'html> {
 }
 
 impl<'html> XHtmlElement<'html> {
+    /// Set the name discovered by the structural indexer without parsing the
+    /// remainder of the tag.
+    #[inline]
+    pub(crate) fn set_name(&mut self, name: &'html str) {
+        self.name = name;
+    }
+
+    /// Parse only the attribute portion of an opening tag.
+    ///
+    /// The reader must begin at the first byte after the already-discovered
+    /// element name. Keeping this separate lets tag-only query paths avoid
+    /// attribute tokenization entirely.
+    pub(crate) fn parse_attributes(
+        &mut self,
+        reader: &mut Reader<'html>,
+        attribute_tape: &mut Vec<Attribute<'html>>,
+    ) {
+        debug_assert!(!self.name.is_empty());
+        self.from(reader, attribute_tape);
+    }
+
     fn add_to_element(
         &mut self,
         attribute: Attribute<'html>,
@@ -191,7 +212,9 @@ impl<'html> IElement<'html> for XHtmlElement<'html> {
     }
 }
 
-// TODO: Parse the closing tag for the XHtmlTag
+// Retained as a focused tokenizer reference for the builder tests. Production
+// parsing now obtains tag boundaries from `html::indexer`.
+#[cfg(test)]
 impl<'a> XHtmlTag<'a> {
     pub fn from(reader: &mut Reader<'a>) -> Option<Self> {
         reader.next_while_list(&[b' ', b'\n', b'\r', b'\t', 0x0C, b'<']);
@@ -233,6 +256,7 @@ impl<'a> XHtmlTag<'a> {
 /// sequence, and comments containing bare `>` characters. An unterminated
 /// comment simply stops at end of input instead of panicking or swallowing
 /// the remainder of the document past a stray `>`.
+#[cfg(test)]
 fn skip_html_comment(reader: &mut Reader<'_>) {
     // Abrupt closes immediately after `<!--`.
     if reader.peek() == Some(b'>') {

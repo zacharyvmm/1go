@@ -131,6 +131,26 @@ where
         self.query
     }
 
+    /// Return whether any currently active cursor may need attributes for a
+    /// tag with `name`.
+    ///
+    /// This deliberately ignores depth guards: doing a little extra parsing
+    /// is safe, while skipping attributes needed by a viable transition is
+    /// not. Save points always need the complete element because attributes
+    /// are part of the stored result even when the selector itself is tag-only.
+    pub(crate) fn requires_attributes_for(&self, name: &str) -> bool {
+        self.cursors.iter().any(|cursor| {
+            if !cursor.is_active() {
+                return false;
+            }
+
+            let position = cursor.position;
+            let predicate = &self.query.get_transition(position.state).predicate;
+            predicate.matches_name(name)
+                && (predicate.requires_attributes() || self.query.is_save_point(&position))
+        })
+    }
+
     pub fn save_element(
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
         tree: &Q,

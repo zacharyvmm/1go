@@ -36,6 +36,22 @@ impl<'a> AttributeSelection<'a> {
 }
 
 impl<'a> ElementPredicate<'a> {
+    /// Whether the tag name alone can rule this predicate out.
+    #[inline]
+    pub fn matches_name(&self, name: &str) -> bool {
+        self.name
+            .is_none_or(|expected| expected.eq_ignore_ascii_case(name))
+    }
+
+    /// Whether evaluating this predicate needs `id`, `class`, or generic
+    /// attributes in addition to the element name.
+    #[inline]
+    pub fn requires_attributes(&self) -> bool {
+        self.id.is_some()
+            || !self.classes.as_slice().is_empty()
+            || !self.attributes.as_slice().is_empty()
+    }
+
     fn matches_classes(&self, element_classes: &str) -> bool {
         let selector_classes = self.classes.as_slice();
         match selector_classes.len() {
@@ -73,9 +89,7 @@ impl<'a> ElementPredicate<'a> {
     }
 
     pub fn matches_element<'b, E: IElement<'b>>(&self, other: &E) -> bool {
-        if let Some(name) = self.name
-            && !name.eq_ignore_ascii_case(other.name())
-        {
+        if !self.matches_name(other.name()) {
             return false;
         }
 
