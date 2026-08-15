@@ -36,13 +36,21 @@ impl PySave {
         Self { save: Save::none() }
     }
 
+    #[staticmethod]
+    pub fn name_only() -> Self {
+        Self {
+            save: Save::name_only(),
+        }
+    }
+
     #[new]
-    #[pyo3(signature = (inner_html=false, text_content=false))]
-    pub fn new(inner_html: bool, text_content: bool) -> Self {
+    #[pyo3(signature = (inner_html=false, text_content=false, attributes=true))]
+    pub fn new(inner_html: bool, text_content: bool, attributes: bool) -> Self {
         Self {
             save: Save {
                 inner_html,
                 text_content,
+                attributes,
             },
         }
     }
