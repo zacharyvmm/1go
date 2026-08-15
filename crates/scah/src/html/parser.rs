@@ -37,17 +37,6 @@ pub struct XHtmlParser<'html, 'query, Q> {
     attribute_parse_count: usize,
 }
 
-/// A raw-text end tag is only "appropriate" when the tag name is immediately
-/// followed by HTML whitespace, a `/`, or `>` (or end of input). This prevents
-/// a longer name such as `</styles>` from prematurely closing `<style>`.
-#[inline]
-fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
-    matches!(
-        byte,
-        None | Some(b' ' | b'\t' | b'\n' | 0x0C | b'\r' | b'/' | b'>')
-    )
-}
-
 impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
 where
     Q: QuerySpec<'query>,
@@ -111,48 +100,40 @@ where
             return false;
         }
         if let Some(close_tag) = self.raw_text_close {
-            loop {
-                reader.next_until(b'<');
-                if reader.peek().is_none() {
-                    self.drain_open_elements(reader);
-                    return false;
-                }
+            let source = reader.source();
+            let Some(close_position) =
+                self.indexer
+                    .find_raw_text_close(source, reader.get_position(), close_tag)
+            else {
+                reader.advance_to(source.len());
+                self.drain_open_elements(reader);
+                return false;
+            };
+            reader.advance_to(close_position);
 
-                // `close_tag` is the `</name` prefix. It is only the real end
-                // tag when the name is followed by an appropriate terminator
-                // (HTML whitespace, `/`, or `>`), so `</styles>` does not close
-                // `<style>` and `</style >` does. Consume an appropriate raw
-                // end tag here instead of delegating to `XHtmlTag::from`: that
-                // parser intentionally keeps text after `/` as part of the
-                // closing tag name, which would leave `<style>` open for a
-                // tolerated form such as `</style ignored>`.
-                if reader.match_ignore_case(close_tag)
-                    && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
-                {
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                        && let Some(position) =
-                            self.store.text_content.push(reader, reader.get_position())
-                    {
-                        self.position.text_content_position = position;
-                    }
-                    self.raw_text_close = None;
-
-                    self.position.reader_position = reader.get_position();
-                    reader.next_until(b'>');
-                    reader.skip();
-
-                    if self.capture_text_content {
-                        self.store.text_content.set_start(reader.get_position());
-                    }
-
-                    let closing_tag = &close_tag[2..];
-                    let early_exit = self.handle_close_tag(closing_tag, reader);
-                    return !early_exit && !reader.eof();
-                } else {
-                    reader.skip();
-                }
+            // Consume an appropriate raw end tag here instead of delegating
+            // to `XHtmlTag::from`: that parser intentionally keeps text after
+            // `/` as part of the closing tag name, which would leave the raw
+            // element open for a tolerated form such as `</style ignored>`.
+            if self.capture_text_content
+                && self.store.text_content.text_start.is_some()
+                && let Some(position) = self.store.text_content.push(reader, reader.get_position())
+            {
+                self.position.text_content_position = position;
             }
+            self.raw_text_close = None;
+
+            self.position.reader_position = reader.get_position();
+            reader.next_until(b'>');
+            reader.skip();
+
+            if self.capture_text_content {
+                self.store.text_content.set_start(reader.get_position());
+            }
+
+            let closing_tag = &close_tag[2..];
+            let early_exit = self.handle_close_tag(closing_tag, reader);
+            return !early_exit && !reader.eof();
         }
 
         let source = reader.source();
