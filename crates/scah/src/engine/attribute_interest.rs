@@ -58,6 +58,32 @@ impl<'query> AttributeInterest<'query> {
         }
     }
 
+    pub fn merge(&mut self, other: &Self) {
+        if self.all || other.is_empty() {
+            return;
+        }
+        if other.all {
+            self.require_all();
+            return;
+        }
+
+        self.id |= other.id;
+        self.class |= other.class;
+        for &key in &other.keys {
+            if !self
+                .keys
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(key))
+            {
+                if self.keys.len() == INLINE_ATTRIBUTE_KEYS {
+                    self.require_all();
+                    return;
+                }
+                self.keys.push(key);
+            }
+        }
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         !self.all && !self.id && !self.class && self.keys.is_empty()
@@ -164,5 +190,37 @@ mod tests {
         assert!(interest.requires_all());
         assert!(interest.keys.is_empty());
         assert!(!interest.keys.spilled());
+    }
+
+    #[test]
+    fn merge_deduplicates_compiled_interest() {
+        let mut left = AttributeInterest::default();
+        left.add_predicate(&ElementPredicate {
+            name: None,
+            id: Some("hero"),
+            classes: ClassSelections::default(),
+            attributes: AttributeSelections::from(vec![AttributeSelection {
+                name: "href",
+                value: None,
+                kind: AttributeSelectionKind::Presence,
+            }]),
+        });
+        let mut right = AttributeInterest::default();
+        right.add_predicate(&ElementPredicate {
+            name: None,
+            id: None,
+            classes: ClassSelections::from_static(&["promoted"]),
+            attributes: AttributeSelections::from(vec![AttributeSelection {
+                name: "HREF",
+                value: None,
+                kind: AttributeSelectionKind::Presence,
+            }]),
+        });
+
+        left.merge(&right);
+
+        assert!(left.includes_id());
+        assert!(left.includes_class());
+        assert_eq!(left.keys.as_slice(), &["href"]);
     }
 }

@@ -1,5 +1,5 @@
 use super::attribute_interest::AttributeInterest;
-use super::executor::QueryExecutor;
+use super::executor::{QueryExecutor, ascii_case_insensitive_hash};
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
@@ -34,7 +34,7 @@ pub(crate) struct ElementPreflight<'query> {
     runner_epoch: usize,
 }
 
-type Runner<'query, Q> = Vec<QueryExecutor<'query, Q>>;
+type Runner<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
 
 #[cfg(feature = "bench-internals")]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,8 +141,13 @@ where
         preflight.attribute_interest.clear();
         preflight.runner_indices.clear();
         preflight.runner_epoch = self.runner_epoch;
+        let name_hash = ascii_case_insensitive_hash(name);
         for (runner_index, runner) in self.runners.iter().enumerate() {
-            if runner.extend_attribute_interest_for(name, &mut preflight.attribute_interest) {
+            if runner.extend_attribute_interest_for(
+                name,
+                name_hash,
+                &mut preflight.attribute_interest,
+            ) {
                 preflight.runner_indices.push(runner_index);
             }
         }
