@@ -184,14 +184,18 @@ where
                     let name = open.name(source);
                     self.element.set_name(name);
 
-                    let end = if self.selectors.requires_attributes_for(name) {
+                    let attribute_interest = self.selectors.attribute_interest_for(name);
+                    let end = if !attribute_interest.is_empty() {
                         #[cfg(test)]
                         {
                             self.attribute_parse_count += 1;
                         }
                         let mut attributes = Reader::from_bytes(&source[open.attributes_start..]);
-                        self.element
-                            .parse_attributes(&mut attributes, &mut self.store.attributes);
+                        self.element.parse_attributes(
+                            &mut attributes,
+                            &mut self.store.attributes,
+                            &attribute_interest,
+                        );
                         open.attributes_start + attributes.get_position()
                     } else {
                         open.finish(source)

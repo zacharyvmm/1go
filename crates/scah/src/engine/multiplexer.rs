@@ -1,3 +1,4 @@
+use super::attribute_interest::AttributeInterest;
 use super::executor::QueryExecutor;
 use crate::XHtmlElement;
 use crate::store::ElementId;
@@ -120,10 +121,12 @@ where
     /// Whether the active query frontier may inspect or save attributes for
     /// this element name.
     #[inline]
-    pub(crate) fn requires_attributes_for(&self, name: &str) -> bool {
-        self.runners
-            .iter()
-            .any(|runner| runner.requires_attributes_for(name))
+    pub(crate) fn attribute_interest_for(&self, name: &str) -> AttributeInterest<'query> {
+        let mut interest = AttributeInterest::default();
+        for runner in &self.runners {
+            runner.extend_attribute_interest_for(name, &mut interest);
+        }
+        interest
     }
 
     pub(crate) fn next_into(
