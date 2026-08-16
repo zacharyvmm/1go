@@ -134,6 +134,12 @@ where
             .any(|runner| runner.query().requires_text_content())
     }
 
+    pub(crate) fn allows_early_exit(&self) -> bool {
+        self.runners
+            .iter()
+            .all(|runner| runner.query().exit_at_section_end().is_some())
+    }
+
     /// Whether the active query frontier may inspect or save attributes for
     /// this element name.
     #[inline]
@@ -255,5 +261,17 @@ mod tests {
         assert!(preflight.attribute_interest.includes_class());
         assert!(preflight.attribute_interest.includes_attribute("data-x"));
         assert!(!preflight.attribute_interest.includes_attribute("href"));
+    }
+
+    #[test]
+    fn indexing_policy_requires_every_query_to_allow_early_exit() {
+        let first = [Query::first("a", Save::name_only()).unwrap().build()];
+        assert!(QueryMultiplexer::new(&first).allows_early_exit());
+
+        let mixed = [
+            Query::first("a", Save::name_only()).unwrap().build(),
+            Query::all("span", Save::name_only()).unwrap().build(),
+        ];
+        assert!(!QueryMultiplexer::new(&mixed).allows_early_exit());
     }
 }
