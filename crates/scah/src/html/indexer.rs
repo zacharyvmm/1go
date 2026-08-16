@@ -5,6 +5,17 @@ use super::simd_classifier::{BlockClassifier, ClassMasks};
 /// Pay SIMD classification only after a scalar probe shows that the current
 /// delimiter span is not one of HTML's common short spans.
 const SCALAR_SEARCH_PREFIX: usize = 32;
+const SIMD_BLOCK_BYTES: usize = 16;
+const ROLLING_WINDOW_BLOCKS: usize = 256;
+const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
+const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 64;
+const FULL_INDEX_SAMPLE_BYTES: usize = 4 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexingMode {
+    Rolling,
+    FullDocument,
+}
 
 /// The kind of completed structural span discovered by a [`TagIndexer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +88,8 @@ pub(crate) enum TagEvent {
 /// A future SWAR/SIMD implementation can cache masks or several spans inside
 /// the backend without changing parser or query-executor semantics.
 pub(crate) trait TagIndexer {
+    fn prepare(&mut self, _source: &[u8]) {}
+
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent>;
 
     fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
@@ -137,56 +150,246 @@ impl StructuralSearch for ScalarTagIndexer {
 }
 
 #[derive(Debug, Default)]
+struct MaskCache {
+    source_pointer: usize,
+    source_len: usize,
+    first_block: usize,
+    masks: Vec<ClassMasks>,
+    valid: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexedKind {
+    Open,
+    Close,
+    Ignored,
+}
+
+/// Compact full-document event. `u32` keeps the tape at 24 bytes per tag;
+/// documents larger than 4 GiB fall back to incremental mask traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexedEvent {
+    start: u32,
+    end: u32,
+    name_start: u32,
+    name_end: u32,
+    attributes_start: u32,
+    kind: IndexedKind,
+}
+
+impl IndexedEvent {
+    fn start(self) -> usize {
+        self.start as usize
+    }
+
+    fn into_event(self) -> TagEvent {
+        match self.kind {
+            IndexedKind::Open => TagEvent::Open(OpenTagStart {
+                start: self.start as usize,
+                name: self.name_start as usize..self.name_end as usize,
+                attributes_start: self.attributes_start as usize,
+                end_hint: Some(self.end as usize),
+            }),
+            IndexedKind::Close | IndexedKind::Ignored => TagEvent::Complete(TagSpan {
+                start: self.start as usize,
+                end: self.end as usize,
+                kind: if self.kind == IndexedKind::Close {
+                    TagKind::Close
+                } else {
+                    TagKind::Ignored
+                },
+                name: self.name_start as usize..self.name_end as usize,
+            }),
+        }
+    }
+}
+
+impl MaskCache {
+    fn reset_for(&mut self, source: &[u8]) {
+        let source_pointer = source.as_ptr() as usize;
+        if !self.valid || self.source_pointer != source_pointer || self.source_len != source.len() {
+            self.source_pointer = source_pointer;
+            self.source_len = source.len();
+            self.first_block = 0;
+            self.masks.clear();
+            self.valid = true;
+        }
+    }
+
+    fn refill(
+        &mut self,
+        classifier: BlockClassifier,
+        source: &[u8],
+        first_block: usize,
+        block_count: usize,
+    ) {
+        self.reset_for(source);
+        self.first_block = first_block;
+        self.masks.resize(block_count, ClassMasks::default());
+        for (offset, masks) in self.masks.iter_mut().enumerate() {
+            *masks = classifier.classify(source, (first_block + offset) * SIMD_BLOCK_BYTES);
+        }
+    }
+
+    fn contains(&self, block: usize) -> bool {
+        self.valid && block >= self.first_block && block - self.first_block < self.masks.len()
+    }
+
+    fn get(&self, block: usize) -> ClassMasks {
+        self.masks[block - self.first_block]
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct PackedTagIndexer {
     classifier: BlockClassifier,
-    cached_source: usize,
-    cached_len: usize,
-    cached_base: usize,
-    cached_masks: ClassMasks,
-    cache_valid: bool,
+    mode: IndexingMode,
+    cache: MaskCache,
+    full_events: Vec<IndexedEvent>,
+    full_cursor: usize,
+    indexed_source: usize,
+    indexed_len: usize,
+}
+
+impl Default for PackedTagIndexer {
+    fn default() -> Self {
+        Self::new(IndexingMode::Rolling)
+    }
 }
 
 impl PackedTagIndexer {
-    fn masks(&mut self, source: &[u8], base: usize) -> ClassMasks {
-        let source_pointer = source.as_ptr() as usize;
-        if self.cache_valid
-            && self.cached_source == source_pointer
-            && self.cached_len == source.len()
-            && self.cached_base == base
-        {
-            return self.cached_masks;
+    fn new(mode: IndexingMode) -> Self {
+        Self {
+            classifier: BlockClassifier::default(),
+            mode,
+            cache: MaskCache::default(),
+            full_events: Vec::new(),
+            full_cursor: 0,
+            indexed_source: 0,
+            indexed_len: 0,
         }
-
-        let masks = self.classifier.classify(source, base);
-        self.cached_source = source_pointer;
-        self.cached_len = source.len();
-        self.cached_base = base;
-        self.cached_masks = masks;
-        self.cache_valid = true;
-        masks
     }
 
-    fn find_structural_matching(
+    fn prepare_masks(&mut self, source: &[u8]) {
+        self.cache.reset_for(source);
+        if self.mode == IndexingMode::FullDocument && self.cache.masks.is_empty() {
+            let block_count = source.len() / SIMD_BLOCK_BYTES;
+            self.cache.refill(self.classifier, source, 0, block_count);
+        }
+    }
+
+    fn prepare_full_index(&mut self, source: &[u8]) {
+        let source_pointer = source.as_ptr() as usize;
+        if self.indexed_source == source_pointer && self.indexed_len == source.len() {
+            return;
+        }
+
+        self.prepare_masks(source);
+        self.full_events.clear();
+        self.full_cursor = 0;
+        self.indexed_source = source_pointer;
+        self.indexed_len = source.len();
+        if source.len() > u32::MAX as usize {
+            return;
+        }
+
+        self.full_events.reserve(source.len() / 64);
+        let mut position = 0;
+        while let Some(event) = next_event(self, source, position) {
+            let indexed = match event {
+                TagEvent::Open(open) => {
+                    let end = self.find_tag_end(source, open.attributes_start);
+                    position = end.max(open.start + 1);
+                    IndexedEvent {
+                        start: open.start as u32,
+                        end: end as u32,
+                        name_start: open.name.start as u32,
+                        name_end: open.name.end as u32,
+                        attributes_start: open.attributes_start as u32,
+                        kind: IndexedKind::Open,
+                    }
+                }
+                TagEvent::Complete(span) => {
+                    position = span.end.max(span.start + 1);
+                    IndexedEvent {
+                        start: span.start as u32,
+                        end: span.end as u32,
+                        name_start: span.name.start as u32,
+                        name_end: span.name.end as u32,
+                        attributes_start: 0,
+                        kind: if span.kind == TagKind::Close {
+                            IndexedKind::Close
+                        } else {
+                            IndexedKind::Ignored
+                        },
+                    }
+                }
+            };
+            self.full_events.push(indexed);
+            if position >= source.len() {
+                break;
+            }
+        }
+    }
+
+    fn next_indexed(&mut self, from: usize) -> Option<TagEvent> {
+        while self
+            .full_events
+            .get(self.full_cursor)
+            .is_some_and(|event| event.start() < from)
+        {
+            self.full_cursor += 1;
+        }
+        self.full_events
+            .get(self.full_cursor)
+            .copied()
+            .map(IndexedEvent::into_event)
+    }
+
+    fn masks(&mut self, source: &[u8], base: usize) -> ClassMasks {
+        debug_assert_eq!(base % SIMD_BLOCK_BYTES, 0);
+        debug_assert!(base + SIMD_BLOCK_BYTES <= source.len());
+        self.prepare_masks(source);
+        let block = base / SIMD_BLOCK_BYTES;
+        if !self.cache.contains(block) {
+            debug_assert_eq!(self.mode, IndexingMode::Rolling);
+            let total_blocks = source.len() / SIMD_BLOCK_BYTES;
+            let block_count = ROLLING_WINDOW_BLOCKS.min(total_blocks - block);
+            self.cache
+                .refill(self.classifier, source, block, block_count);
+        }
+        self.cache.get(block)
+    }
+
+    #[inline]
+    fn uses_scalar_prefix(&self) -> bool {
+        self.mode == IndexingMode::Rolling
+    }
+
+    fn find_mask_matching(
         &mut self,
         source: &[u8],
         from: usize,
+        mask_for: impl Fn(ClassMasks) -> u16,
         mut predicate: impl FnMut(u8) -> bool,
     ) -> Option<usize> {
         let mut position = from;
-        let scalar_end = source
-            .len()
-            .min(position.saturating_add(SCALAR_SEARCH_PREFIX));
-        if let Some(offset) = source[position..scalar_end]
-            .iter()
-            .position(|byte| predicate(*byte))
-        {
-            return Some(position + offset);
+        if self.uses_scalar_prefix() {
+            let scalar_end = source
+                .len()
+                .min(position.saturating_add(SCALAR_SEARCH_PREFIX));
+            if let Some(offset) = source[position..scalar_end]
+                .iter()
+                .position(|byte| predicate(*byte))
+            {
+                return Some(position + offset);
+            }
+            position = scalar_end;
         }
-        position = scalar_end;
 
         while position < source.len() {
-            let base = position & !15;
-            if base + 16 > source.len() {
+            let base = position & !(SIMD_BLOCK_BYTES - 1);
+            if base + SIMD_BLOCK_BYTES > source.len() {
                 return source[position..]
                     .iter()
                     .position(|byte| predicate(*byte))
@@ -194,7 +397,7 @@ impl PackedTagIndexer {
             }
 
             let offset = position - base;
-            let mut mask = self.masks(source, base).structural & (u16::MAX << offset);
+            let mut mask = mask_for(self.masks(source, base)) & (u16::MAX << offset);
             while mask != 0 {
                 let lane = mask.trailing_zeros() as usize;
                 let candidate = base + lane;
@@ -203,15 +406,30 @@ impl PackedTagIndexer {
                 }
                 mask &= mask - 1;
             }
-            position = base + 16;
+            position = base + SIMD_BLOCK_BYTES;
         }
         None
     }
 }
 
+impl PackedTagIndexer {
+    fn find_structural_matching(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        predicate: impl FnMut(u8) -> bool,
+    ) -> Option<usize> {
+        self.find_mask_matching(source, from, |masks| masks.structural, predicate)
+    }
+}
+
 impl StructuralSearch for PackedTagIndexer {
     fn find_byte(&mut self, source: &[u8], from: usize, needle: u8) -> Option<usize> {
-        self.find_structural_matching(source, from, |byte| byte == needle)
+        if needle == b'<' {
+            self.find_mask_matching(source, from, |masks| masks.less_than, |byte| byte == needle)
+        } else {
+            self.find_structural_matching(source, from, |byte| byte == needle)
+        }
     }
 
     fn find_tag_end(&mut self, source: &[u8], from: usize) -> usize {
@@ -242,29 +460,6 @@ impl StructuralSearch for PackedTagIndexer {
         }
 
         source.len()
-    }
-}
-
-#[derive(Debug)]
-enum AutoBackend {
-    Scalar(ScalarTagIndexer),
-    Packed(PackedTagIndexer),
-}
-
-#[derive(Debug)]
-pub(crate) struct AutoTagIndexer {
-    backend: AutoBackend,
-}
-
-impl Default for AutoTagIndexer {
-    fn default() -> Self {
-        let packed = PackedTagIndexer::default();
-        let backend = if packed.classifier.is_accelerated() {
-            AutoBackend::Packed(packed)
-        } else {
-            AutoBackend::Scalar(ScalarTagIndexer)
-        };
-        Self { backend }
     }
 }
 
@@ -357,8 +552,6 @@ fn next_event(search: &mut impl StructuralSearch, source: &[u8], from: usize) ->
     let start = search.find_byte(source, from, b'<')?;
     let mut position = start + 1;
 
-    // Match the legacy parser's tolerance for whitespace and repeated
-    // `<` bytes before a tag name.
     while source
         .get(position)
         .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
@@ -442,8 +635,21 @@ impl TagIndexer for ScalarTagIndexer {
 }
 
 impl TagIndexer for PackedTagIndexer {
+    fn prepare(&mut self, source: &[u8]) {
+        if self.mode == IndexingMode::FullDocument {
+            self.prepare_full_index(source);
+        } else {
+            self.prepare_masks(source);
+        }
+    }
+
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
-        next_event(self, source, from)
+        if self.mode == IndexingMode::FullDocument && source.len() <= u32::MAX as usize {
+            self.prepare_full_index(source);
+            self.next_indexed(from)
+        } else {
+            next_event(self, source, from)
+        }
     }
 
     fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
@@ -461,18 +667,106 @@ impl TagIndexer for PackedTagIndexer {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct AutoTagIndexer {
+    scalar: ScalarTagIndexer,
+    rolling: Option<PackedTagIndexer>,
+    full: Option<PackedTagIndexer>,
+    allow_full_index: bool,
+    prepared_source: usize,
+    prepared_len: usize,
+}
+
+impl Default for AutoTagIndexer {
+    fn default() -> Self {
+        Self::new(IndexingMode::Rolling)
+    }
+}
+
+impl AutoTagIndexer {
+    pub(crate) fn new(mode: IndexingMode) -> Self {
+        let classifier = BlockClassifier::default();
+        let accelerated = classifier.is_accelerated();
+        Self {
+            scalar: ScalarTagIndexer,
+            rolling: accelerated.then(|| PackedTagIndexer::new(IndexingMode::Rolling)),
+            full: None,
+            allow_full_index: mode == IndexingMode::FullDocument,
+            prepared_source: 0,
+            prepared_len: 0,
+        }
+    }
+
+    fn should_build_full_index(source: &[u8], classifier: BlockClassifier) -> bool {
+        if source.len() < FULL_INDEX_MIN_BYTES || source.len() > u32::MAX as usize {
+            return false;
+        }
+
+        let sample_len = source.len().min(FULL_INDEX_SAMPLE_BYTES);
+        let complete_blocks = sample_len / SIMD_BLOCK_BYTES;
+        let less_than_count: usize = (0..complete_blocks)
+            .map(|block| {
+                classifier
+                    .classify(source, block * SIMD_BLOCK_BYTES)
+                    .less_than
+                    .count_ones() as usize
+            })
+            .sum();
+        let sampled_bytes = complete_blocks * SIMD_BLOCK_BYTES;
+        less_than_count == 0
+            || sampled_bytes / less_than_count.max(1) >= FULL_INDEX_MIN_BYTES_PER_TAG
+    }
+
+    #[cfg(test)]
+    fn uses_full_index(&self) -> bool {
+        self.full.is_some()
+    }
+
+    #[cfg(test)]
+    fn rolling_mask_capacity(&self) -> usize {
+        self.rolling
+            .as_ref()
+            .map_or(0, |indexer| indexer.cache.masks.capacity())
+    }
+
+    fn prepare_policy(&mut self, source: &[u8]) {
+        let source_pointer = source.as_ptr() as usize;
+        if self.prepared_source == source_pointer && self.prepared_len == source.len() {
+            return;
+        }
+        self.prepared_source = source_pointer;
+        self.prepared_len = source.len();
+        self.full = None;
+
+        let Some(rolling) = self.rolling.as_ref() else {
+            return;
+        };
+        if self.allow_full_index && Self::should_build_full_index(source, rolling.classifier) {
+            let mut full = PackedTagIndexer::new(IndexingMode::FullDocument);
+            full.prepare(source);
+            self.full = Some(full);
+        }
+    }
+}
+
 impl TagIndexer for AutoTagIndexer {
+    fn prepare(&mut self, source: &[u8]) {
+        self.prepare_policy(source);
+    }
+
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
-        match &mut self.backend {
-            AutoBackend::Scalar(indexer) => indexer.next(source, from),
-            AutoBackend::Packed(indexer) => indexer.next(source, from),
+        if let Some(indexer) = &mut self.full {
+            indexer.next(source, from)
+        } else {
+            self.scalar.next(source, from)
         }
     }
 
     fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
-        match &mut self.backend {
-            AutoBackend::Scalar(indexer) => indexer.finish_open(source, open),
-            AutoBackend::Packed(indexer) => indexer.finish_open(source, open),
+        if let Some(indexer) = &mut self.full {
+            indexer.finish_open(source, open)
+        } else {
+            self.scalar.finish_open(source, open)
         }
     }
 
@@ -482,9 +776,12 @@ impl TagIndexer for AutoTagIndexer {
         from: usize,
         close_tag: &str,
     ) -> Option<usize> {
-        match &mut self.backend {
-            AutoBackend::Scalar(indexer) => indexer.find_raw_text_close(source, from, close_tag),
-            AutoBackend::Packed(indexer) => indexer.find_raw_text_close(source, from, close_tag),
+        if let Some(indexer) = &mut self.full {
+            indexer.find_raw_text_close(source, from, close_tag)
+        } else if let Some(indexer) = &mut self.rolling {
+            indexer.find_raw_text_close(source, from, close_tag)
+        } else {
+            self.scalar.find_raw_text_close(source, from, close_tag)
         }
     }
 }
@@ -623,7 +920,10 @@ mod tests {
             packed.next(short.as_bytes(), 0),
             Some(TagEvent::Open(_))
         ));
-        assert!(!packed.cache_valid, "short search should remain scalar");
+        assert!(
+            packed.cache.masks.is_empty(),
+            "short search should remain scalar"
+        );
 
         let long = format!("{}<a>", "x".repeat(SCALAR_SEARCH_PREFIX + 32));
         assert!(matches!(
@@ -631,8 +931,75 @@ mod tests {
             Some(TagEvent::Open(_))
         ));
         assert!(
-            packed.cache_valid,
+            !packed.cache.masks.is_empty(),
             "long search should classify packed blocks"
         );
+    }
+
+    #[test]
+    fn full_document_mode_indexes_all_complete_blocks_during_prepare() {
+        let source = "<div></div>".repeat(100);
+        let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
+
+        packed.prepare(source.as_bytes());
+
+        assert_eq!(packed.cache.first_block, 0);
+        assert_eq!(packed.cache.masks.len(), source.len() / SIMD_BLOCK_BYTES);
+    }
+
+    #[test]
+    fn rolling_mode_overwrites_and_reuses_its_bounded_mask_buffer() {
+        let source = "x".repeat((ROLLING_WINDOW_BLOCKS * 2 + 4) * SIMD_BLOCK_BYTES);
+        let mut packed = PackedTagIndexer::new(IndexingMode::Rolling);
+        let first = packed.masks(source.as_bytes(), 0);
+        let allocation = packed.cache.masks.as_ptr();
+
+        let next_block = ROLLING_WINDOW_BLOCKS + 1;
+        let second = packed.masks(source.as_bytes(), next_block * SIMD_BLOCK_BYTES);
+
+        assert_eq!(first, second);
+        assert_eq!(packed.cache.first_block, next_block);
+        assert_eq!(packed.cache.masks.as_ptr(), allocation);
+        assert_eq!(packed.cache.masks.len(), ROLLING_WINDOW_BLOCKS);
+    }
+
+    #[test]
+    fn adaptive_policy_keeps_dense_documents_scalar() {
+        let source = "<div><span>x</span></div>".repeat(1_000);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(!indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_full_indexes_sparse_exhaustive_documents() {
+        let source = format!("<main>{}</main>", "x".repeat(FULL_INDEX_MIN_BYTES));
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
+        let Some(TagEvent::Open(open)) = indexer.next(source.as_bytes(), 0) else {
+            panic!("expected indexed opening tag");
+        };
+        assert_eq!(open.end_hint, Some(6));
+    }
+
+    #[test]
+    fn early_exit_policy_refills_the_rolling_buffer_only_for_long_searches() {
+        let source = format!("{} </script>", "x".repeat(FULL_INDEX_MIN_BYTES));
+        let expected = source.find("</script>").unwrap();
+        let mut indexer = AutoTagIndexer::new(IndexingMode::Rolling);
+
+        indexer.prepare(source.as_bytes());
+        assert!(!indexer.uses_full_index());
+        assert_eq!(indexer.rolling_mask_capacity(), 0);
+        assert_eq!(
+            indexer.find_raw_text_close(source.as_bytes(), 0, "</script"),
+            Some(expected)
+        );
+        assert!(indexer.rolling_mask_capacity() >= ROLLING_WINDOW_BLOCKS);
     }
 }
