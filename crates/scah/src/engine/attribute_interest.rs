@@ -1,4 +1,6 @@
+#[cfg(test)]
 use crate::ElementPredicate;
+use crate::PredicateMetadata;
 use smallvec::SmallVec;
 
 /// Attribute fields required by the currently active query frontier.
@@ -29,6 +31,7 @@ impl<'query> AttributeInterest<'query> {
         self.keys.clear();
     }
 
+    #[cfg(test)]
     pub fn add_predicate(&mut self, predicate: &ElementPredicate<'query>) {
         if self.all {
             return;
@@ -52,6 +55,25 @@ impl<'query> AttributeInterest<'query> {
         }
     }
 
+    pub fn add_metadata(&mut self, metadata: &PredicateMetadata<'query>) {
+        if self.all {
+            return;
+        }
+
+        self.id |= metadata.needs_id();
+        self.class |= metadata.needs_class();
+        for &key in metadata.attribute_names() {
+            if !self
+                .keys
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(key))
+            {
+                self.keys.push(key);
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub fn merge(&mut self, other: &Self) {
         if self.all || other.is_empty() {
             return;
