@@ -960,6 +960,24 @@ fn bench_sparse_index_policy(c: &mut Criterion) {
             black_box(store.get("script").unwrap().count())
         })
     });
+
+    let exhaustive_raw_queries = &[Query::all("span", Save::name_only())
+        .expect("exhaustive raw benchmark selector should compile")
+        .build()];
+    assert_eq!(
+        parse(&raw_html, exhaustive_raw_queries)
+            .unwrap()
+            .get("span")
+            .unwrap()
+            .count(),
+        1
+    );
+    group.bench_function("production_parse_all_raw", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&raw_html), black_box(exhaustive_raw_queries)).unwrap();
+            black_box(store.get("span").unwrap().count())
+        })
+    });
     group.finish();
 }
 
