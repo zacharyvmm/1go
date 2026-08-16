@@ -9,24 +9,17 @@ impl<'html> Arena<Attribute<'html>, AttributeId> {
         if self.is_empty() || attributes.is_empty() {
             return None;
         }
+
         let tape_pointer_range = self.as_ptr_range();
         let slice_ptr = attributes.as_ptr();
-
-        // println!("Tape: {:#?}", tape_pointer_range);
-        // println!("Slice Pointer: {:#?}", slice_ptr);
-
         assert!(
             tape_pointer_range.start == slice_ptr || tape_pointer_range.contains(&slice_ptr),
-            "Attribute Slice is invalid"
+            "attribute slice must belong to the persistent tape"
         );
 
         let start = unsafe { slice_ptr.offset_from_unsigned(tape_pointer_range.start) };
         let end = start + attributes.len();
         assert!(self.len() >= end);
-
-        Some(std::ops::Range {
-            start: start as u32,
-            end: end as u32,
-        })
+        Some(start as u32..end as u32)
     }
 }

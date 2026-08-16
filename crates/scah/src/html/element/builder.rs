@@ -156,21 +156,6 @@ impl<'html> XHtmlElement<'html> {
         self.attributes = &[];
     }
 
-    /*
-     * When a Element is parsed all the Attributes are added to a Tape
-     * If the Element was not saved, then we need to delete these Attributes
-     */
-    pub fn remove_attributes(&self, attribute_tape: &mut Vec<Attribute<'html>>) {
-        if self.attributes.is_empty() {
-            return;
-        }
-        let tape_ptr = attribute_tape.as_ptr();
-        let attr_range_ptr = self.attributes.as_ptr();
-        let idx = unsafe { attr_range_ptr.offset_from_unsigned(tape_ptr) };
-
-        attribute_tape.truncate(idx);
-    }
-
     pub fn from(&mut self, reader: &mut Reader<'html>, attribute_tape: &mut Vec<Attribute<'html>>) {
         self.parse_from(reader, attribute_tape, None);
     }

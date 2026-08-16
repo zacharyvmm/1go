@@ -1,7 +1,8 @@
 use super::element::builder::XHtmlTag;
 use super::indexer::{AutoTagIndexer, IndexingMode, TagEvent, TagIndexer, TagKind};
-use super::open_elements::{OpenElement, OpenElementStack};
+use super::open_elements::{OpenElement, OpenElementStack, SavedElement};
 use super::tag::TagFlags;
+use crate::Attribute;
 use crate::ParseError;
 use crate::QuerySpec;
 use crate::Reader;
@@ -17,6 +18,9 @@ use crate::store::Store;
 struct ParserTempState<'html, 'query> {
     closing_elements: Vec<OpenElement<'html>>,
     implied_closes: Vec<OpenElement<'html>>,
+    saved_elements: Vec<SavedElement>,
+    attributes: Vec<Attribute<'html>>,
+    attribute_start: usize,
     save_hits: Vec<SaveHit>,
     preflight: ElementPreflight<'query>,
 }
@@ -29,6 +33,7 @@ pub struct XHtmlParser<'html, 'query, Q> {
     open_elements: OpenElementStack<'html>,
     temp_state: ParserTempState<'html, 'query>,
     capture_text_content: bool,
+    persist_attributes: bool,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
     parse_error: Option<ParseError>,
@@ -43,6 +48,7 @@ where
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
         let capture_text_content = selectors.requires_text_content();
+        let persist_attributes = selectors.requires_attribute_storage();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
@@ -60,6 +66,7 @@ where
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState::default(),
             capture_text_content,
+            persist_attributes,
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
@@ -90,6 +97,7 @@ where
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState::default(),
             capture_text_content,
+            persist_attributes: reserve_attributes,
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
@@ -180,6 +188,7 @@ where
                     self.position.reader_position = open.start;
                     let name = open.name(source);
                     self.element.set_name(name);
+                    self.temp_state.attribute_start = self.store.attributes.len();
 
                     let tag_flags = TagFlags::classify(name);
                     if tag_flags.can_trigger_implied_close() {
@@ -209,11 +218,20 @@ where
                             self.attribute_parse_count += 1;
                         }
                         let mut attributes = Reader::from_bytes(&source[open.attributes_start..]);
-                        self.element.parse_attributes(
-                            &mut attributes,
-                            &mut self.store.attributes,
-                            &self.temp_state.preflight.attribute_interest,
-                        );
+                        if self.persist_attributes {
+                            self.element.parse_attributes(
+                                &mut attributes,
+                                &mut self.store.attributes,
+                                &self.temp_state.preflight.attribute_interest,
+                            );
+                        } else {
+                            self.temp_state.attributes.clear();
+                            self.element.parse_attributes(
+                                &mut attributes,
+                                &mut self.temp_state.attributes,
+                                &self.temp_state.preflight.attribute_interest,
+                            );
+                        }
                         open.attributes_start + attributes.get_position()
                     } else {
                         self.indexer.finish_open(source, &open)
@@ -269,8 +287,11 @@ where
                         return false;
                     }
                     self.position.element_depth = depth;
-                } else if let Err(err) = self.open_elements.push_classified(self.element.name, tag)
-                {
+                } else if let Err(err) = self.open_elements.push_classified(
+                    self.element.name,
+                    tag,
+                    self.temp_state.saved_elements.len(),
+                ) {
                     self.record_parse_error(err);
                     return false;
                 } else {
@@ -294,6 +315,18 @@ where
                     &mut self.temp_state.save_hits,
                     &self.temp_state.preflight,
                 );
+                if self.persist_attributes {
+                    let attributes_saved = match self.temp_state.save_hits.as_slice() {
+                        [] => false,
+                        [hit] => hit.save_attributes,
+                        hits => hits.iter().any(|hit| hit.save_attributes),
+                    };
+                    if !attributes_saved {
+                        self.store
+                            .attributes
+                            .truncate(self.temp_state.attribute_start);
+                    }
+                }
                 if is_self_closing {
                     early_exit = self.selectors.back(
                         self.element.name,
@@ -304,15 +337,17 @@ where
                 } else {
                     for save_hit in &self.temp_state.save_hits {
                         if save_hit.save_inner_html || save_hit.save_text_content {
-                            self.open_elements.attach_saved(
-                                save_hit.element_id,
-                                save_hit
+                            let saved_index = self.temp_state.saved_elements.len();
+                            self.temp_state.saved_elements.push(SavedElement {
+                                element_id: save_hit.element_id,
+                                inner_html_start: save_hit
                                     .save_inner_html
                                     .then_some(self.position.reader_position),
-                                save_hit
+                                text_content_start: save_hit
                                     .save_text_content
                                     .then_some(self.position.text_content_position),
-                            );
+                            });
+                            self.open_elements.attach_saved(saved_index);
                         }
                     }
                 }
@@ -376,7 +411,10 @@ where
         close_depth: crate::engine::DepthSize,
         reader: &Reader<'html>,
     ) -> bool {
+        let saved_range = OpenElementStack::saved_range(&open_element);
+        debug_assert_eq!(saved_range.end, self.temp_state.saved_elements.len());
         self.finalize_open_element(&open_element, reader);
+        self.temp_state.saved_elements.truncate(saved_range.start);
         self.position.element_depth = close_depth;
         self.selectors
             .back(open_element.name, &self.position, reader, &mut self.store)
@@ -430,6 +468,11 @@ where
             }
         );
 
+        if let Some(open_element) = self.open_elements.pop_matching_top(closing_tag) {
+            let close_depth = self.open_elements.depth().saturating_add(1);
+            return self.pop_open_element(open_element, close_depth, reader);
+        }
+
         self.open_elements
             .close_by_end_tag_into(closing_tag, &mut self.temp_state.closing_elements);
         self.pop_closing_elements(
@@ -474,7 +517,8 @@ where
     }
 
     fn finalize_open_element(&mut self, open_element: &OpenElement<'html>, reader: &Reader<'html>) {
-        for saved in &open_element.saved {
+        for saved_index in OpenElementStack::saved_range(open_element) {
+            let saved = self.temp_state.saved_elements[saved_index];
             let inner_html = saved
                 .inner_html_start
                 .map(|start_idx| reader.slice(start_idx..self.position.reader_position));

@@ -385,10 +385,7 @@ mod tests {
         let store = parse(&html, queries).unwrap();
 
         assert_eq!(store.get("div[data-value]").unwrap().count(), 5_000);
-        assert!(
-            store.attributes.capacity() < 32,
-            "name-only matching should reuse a tiny temporary attribute buffer"
-        );
+        assert_eq!(store.attributes.capacity(), 0);
     }
 
     #[test]

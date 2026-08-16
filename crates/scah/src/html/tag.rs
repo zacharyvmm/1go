@@ -207,4 +207,20 @@ mod tests {
         assert_eq!(TagFlags::classify("custom-element"), TagFlags::default());
         assert_eq!(TagFlags::classify("CUSTOM-ELEMENT"), TagFlags::default());
     }
+
+    #[test]
+    fn only_implied_close_openers_enter_stack_preparation() {
+        for name in ["p", "div", "li", "button", "option", "tr", "td"] {
+            assert!(
+                TagFlags::classify(name).can_trigger_implied_close(),
+                "{name}"
+            );
+        }
+        for name in ["a", "span", "img", "script", "custom-element"] {
+            assert!(
+                !TagFlags::classify(name).can_trigger_implied_close(),
+                "{name}"
+            );
+        }
+    }
 }

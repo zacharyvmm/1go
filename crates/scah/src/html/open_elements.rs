@@ -3,7 +3,7 @@ use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
 use crate::store::ElementId;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SavedElement {
     pub element_id: ElementId,
     pub inner_html_start: Option<usize>,
@@ -13,8 +13,9 @@ pub(crate) struct SavedElement {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
+    saved_start: usize,
     tag: TagFlags,
-    pub saved: Vec<SavedElement>,
+    saved_count: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -41,36 +42,46 @@ impl<'html> OpenElementStack<'html> {
         len >= MAX_ELEMENT_DEPTH as usize
     }
 
-    pub fn push_classified(&mut self, name: &'html str, tag: TagFlags) -> Result<(), ParseError> {
+    pub fn push_classified(
+        &mut self,
+        name: &'html str,
+        tag: TagFlags,
+        saved_start: usize,
+    ) -> Result<(), ParseError> {
         if Self::would_exceed_max_depth(self.entries.len()) {
             return Err(ParseError::MaximumDepthExceeded);
         }
         self.entries.push(OpenElement {
             name,
+            saved_start,
             tag,
-            saved: Vec::new(),
+            saved_count: 0,
         });
         Ok(())
     }
 
     #[cfg(test)]
     pub fn push(&mut self, name: &'html str) -> Result<(), ParseError> {
-        self.push_classified(name, TagFlags::classify(name))
+        self.push_classified(name, TagFlags::classify(name), 0)
     }
 
-    pub fn attach_saved(
-        &mut self,
-        element_id: ElementId,
-        inner_html_start: Option<usize>,
-        text_content_start: Option<usize>,
-    ) {
-        if let Some(open_element) = self.entries.last_mut() {
-            open_element.saved.push(SavedElement {
-                element_id,
-                inner_html_start,
-                text_content_start,
-            });
-        }
+    pub fn attach_saved(&mut self, saved_index: usize) {
+        let open_element = self
+            .entries
+            .last_mut()
+            .expect("saved query hit requires an open element");
+        debug_assert_eq!(
+            open_element.saved_start + open_element.saved_count as usize,
+            saved_index
+        );
+        open_element.saved_count = open_element
+            .saved_count
+            .checked_add(1)
+            .expect("too many saved query hits for one element");
+    }
+
+    pub fn saved_range(open_element: &OpenElement<'html>) -> std::ops::Range<usize> {
+        open_element.saved_start..open_element.saved_start + open_element.saved_count as usize
     }
 
     #[cfg(test)]
@@ -115,14 +126,8 @@ impl<'html> OpenElementStack<'html> {
     pub fn close_by_end_tag_into(&mut self, name: &str, popped: &mut Vec<OpenElement<'html>>) {
         popped.clear();
 
-        if self
-            .entries
-            .last()
-            .is_some_and(|entry| entry.name == name || entry.name.eq_ignore_ascii_case(name))
-        {
-            if let Some(open) = self.entries.pop() {
-                popped.push(open);
-            }
+        if let Some(open) = self.pop_matching_top(name) {
+            popped.push(open);
             return;
         }
 
@@ -134,6 +139,14 @@ impl<'html> OpenElementStack<'html> {
                 }
             }
         }
+    }
+
+    #[inline]
+    pub fn pop_matching_top(&mut self, name: &str) -> Option<OpenElement<'html>> {
+        self.entries
+            .last()
+            .is_some_and(|entry| entry.name == name || entry.name.eq_ignore_ascii_case(name))
+            .then(|| self.entries.pop().expect("matching top element must exist"))
     }
 
     #[cfg(test)]
@@ -203,7 +216,7 @@ impl<'html> OpenElementStack<'html> {
 
 #[cfg(test)]
 mod tests {
-    use super::OpenElementStack;
+    use super::{OpenElement, OpenElementStack};
     use crate::engine::MAX_ELEMENT_DEPTH;
 
     #[test]
@@ -214,6 +227,11 @@ mod tests {
         assert!(OpenElementStack::would_exceed_max_depth(
             MAX_ELEMENT_DEPTH as usize
         ));
+    }
+
+    #[test]
+    fn open_element_keeps_hot_stack_entries_compact() {
+        assert!(std::mem::size_of::<OpenElement<'_>>() <= 32);
     }
 
     #[test]

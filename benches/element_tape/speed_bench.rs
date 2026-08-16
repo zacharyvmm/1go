@@ -1289,11 +1289,97 @@ fn bench_sparse_index_policy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_parser_hot_paths(c: &mut Criterion) {
+    let dense = generate_html(10_000);
+    let name_only_queries = &[Query::all("[data-index]", Save::name_only())
+        .expect("name-only selector should compile")
+        .build()];
+    let content_queries = &[Query::all("span", Save::only_inner_html())
+        .expect("content selector should compile")
+        .build()];
+
+    let well_formed = "<div><span>text</span></div>".repeat(10_000);
+    let misnested = "<div><span>text</div>".repeat(10_000);
+    let unmatched_queries = &[Query::all("never", Save::name_only())
+        .expect("unmatched selector should compile")
+        .build()];
+
+    let mut group = c.benchmark_group("parser_hot_paths");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+
+    group.throughput(Throughput::Bytes(dense.len() as u64));
+    group.bench_function("dense_name_only_attributes", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&dense), black_box(name_only_queries)).unwrap();
+            black_box(store.get("[data-index]").unwrap().count())
+        })
+    });
+    group.bench_function("dense_content_capture", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&dense), black_box(content_queries)).unwrap();
+            black_box(store.get("span").unwrap().count())
+        })
+    });
+
+    group.throughput(Throughput::Bytes(well_formed.len() as u64));
+    group.bench_function("well_formed_closes", |b| {
+        b.iter(|| black_box(parse(black_box(&well_formed), black_box(unmatched_queries)).unwrap()))
+    });
+    group.throughput(Throughput::Bytes(misnested.len() as u64));
+    group.bench_function("misnested_close_recovery", |b| {
+        b.iter(|| black_box(parse(black_box(&misnested), black_box(unmatched_queries)).unwrap()))
+    });
+    group.finish();
+}
+
+fn generate_density_html(elements: usize, padding: usize) -> String {
+    let filler = "x".repeat(padding);
+    let mut html = String::with_capacity(elements * (padding + 13));
+    for _ in 0..elements {
+        html.push_str("<span>");
+        html.push_str(&filler);
+        html.push_str("</span>");
+    }
+    html
+}
+
+fn bench_density_crossover(c: &mut Criterion) {
+    let queries = &[Query::all("span", Save::name_only())
+        .expect("density selector should compile")
+        .build()];
+    let mut group = c.benchmark_group("full_index_density_crossover");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+
+    for padding in [
+        16, 32, 64, 96, 104, 112, 120, 122, 124, 126, 128, 192, 256, 512,
+    ] {
+        let html = generate_density_html(5_000, padding);
+        assert_eq!(
+            parse(&html, queries).unwrap().get("span").unwrap().count(),
+            5_000
+        );
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(padding), &html, |b, html| {
+            b.iter(|| {
+                let store = parse(black_box(html), black_box(queries)).unwrap();
+                black_box(store.get("span").unwrap().count())
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_element_tape,
     bench_production_query_scaling,
     bench_less_than_distance,
-    bench_sparse_index_policy
+    bench_sparse_index_policy,
+    bench_parser_hot_paths,
+    bench_density_crossover
 );
 criterion_main!(benches);
