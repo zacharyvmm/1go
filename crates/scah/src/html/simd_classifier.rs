@@ -1,17 +1,25 @@
-const TABLES: ([u8; 16], [u8; 16], u8, u8) = scah_macros::simd_nibble_tables! {
-    structural: [b'<', b'>', b'"', b'\'', b'='],
+const TABLES: ([u8; 16], [u8; 16], u8, u8, u8, u8, u8) = scah_macros::simd_nibble_tables! {
+    less_than: [b'<'],
+    greater_than: [b'>'],
+    quote: [b'"', b'\''],
+    equals: [b'='],
     whitespace: [b' ', b'\t', b'\n', b'\r', b'\x0c'],
 };
 
 const TLO: [u8; 16] = TABLES.0;
 const THI: [u8; 16] = TABLES.1;
-const STRUCTURAL_BITS: u8 = TABLES.2;
-const WHITESPACE_BITS: u8 = TABLES.3;
+const LESS_THAN_BITS: u8 = TABLES.2;
+const GREATER_THAN_BITS: u8 = TABLES.3;
+const QUOTE_BITS: u8 = TABLES.4;
+const EQUALS_BITS: u8 = TABLES.5;
+#[cfg(test)]
+const WHITESPACE_BITS: u8 = TABLES.6;
+const STRUCTURAL_BITS: u8 = LESS_THAN_BITS | GREATER_THAN_BITS | QUOTE_BITS | EQUALS_BITS;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ClassMasks {
     pub structural: u16,
-    pub whitespace: u16,
+    pub less_than: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,7 +89,7 @@ fn classify_scalar(block: &[u8]) -> ClassMasks {
     for (lane, &byte) in block.iter().enumerate() {
         let class = TLO[(byte & 0x0f) as usize] & THI[(byte >> 4) as usize];
         masks.structural |= u16::from(class & STRUCTURAL_BITS != 0) << lane;
-        masks.whitespace |= u16::from(class & WHITESPACE_BITS != 0) << lane;
+        masks.less_than |= u16::from(class & LESS_THAN_BITS != 0) << lane;
     }
     masks
 }
@@ -102,7 +110,7 @@ unsafe fn classify_neon(pointer: *const u8) -> ClassMasks {
 
     ClassMasks {
         structural: neon_nonzero_mask(vandq_u8(classes, vdupq_n_u8(STRUCTURAL_BITS))),
-        whitespace: neon_nonzero_mask(vandq_u8(classes, vdupq_n_u8(WHITESPACE_BITS))),
+        less_than: neon_nonzero_mask(vandq_u8(classes, vdupq_n_u8(LESS_THAN_BITS))),
     }
 }
 
@@ -146,11 +154,11 @@ unsafe fn classify_ssse3(pointer: *const u8) -> ClassMasks {
     );
     let zero = _mm_setzero_si128();
     let structural = _mm_and_si128(classes, _mm_set1_epi8(STRUCTURAL_BITS as i8));
-    let whitespace = _mm_and_si128(classes, _mm_set1_epi8(WHITESPACE_BITS as i8));
+    let less_than = _mm_and_si128(classes, _mm_set1_epi8(LESS_THAN_BITS as i8));
 
     ClassMasks {
         structural: (!_mm_movemask_epi8(_mm_cmpeq_epi8(structural, zero)) as u16),
-        whitespace: (!_mm_movemask_epi8(_mm_cmpeq_epi8(whitespace, zero)) as u16),
+        less_than: (!_mm_movemask_epi8(_mm_cmpeq_epi8(less_than, zero)) as u16),
     }
 }
 
@@ -166,6 +174,14 @@ mod tests {
             let whitespace = matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c);
             assert_eq!(class & STRUCTURAL_BITS != 0, structural, "byte {byte}");
             assert_eq!(class & WHITESPACE_BITS != 0, whitespace, "byte {byte}");
+            assert_eq!(class & LESS_THAN_BITS != 0, byte == b'<', "byte {byte}");
+            assert_eq!(class & GREATER_THAN_BITS != 0, byte == b'>', "byte {byte}");
+            assert_eq!(
+                class & QUOTE_BITS != 0,
+                matches!(byte, b'"' | b'\''),
+                "byte {byte}"
+            );
+            assert_eq!(class & EQUALS_BITS != 0, byte == b'=', "byte {byte}");
         }
     }
 
