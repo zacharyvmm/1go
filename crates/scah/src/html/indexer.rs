@@ -7,6 +7,8 @@ use super::simd_classifier::{BlockClassifier, ClassMasks};
 const SCALAR_SEARCH_PREFIX: usize = 32;
 const SIMD_BLOCK_BYTES: usize = 16;
 const ROLLING_WINDOW_BLOCKS: usize = 256;
+const FULL_INDEX_CHUNK_BYTES: usize = 64 * 1024;
+const FULL_INDEX_CHUNK_EVENTS: usize = 2_048;
 const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 64;
 const FULL_INDEX_SAMPLE_BYTES: usize = 4 * 1024;
@@ -165,8 +167,9 @@ enum IndexedKind {
     Ignored,
 }
 
-/// Compact full-document event. `u32` keeps the tape at 24 bytes per tag;
-/// documents larger than 4 GiB fall back to incremental mask traversal.
+/// Compact semantic event retained in a bounded full-index batch. `u32` keeps
+/// each record at 24 bytes; documents larger than 4 GiB fall back to the
+/// incremental scanner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IndexedEvent {
     start: u32,
@@ -465,6 +468,8 @@ pub(crate) struct PackedTagIndexer {
     cache: MaskCache,
     full_events: Vec<IndexedEvent>,
     full_cursor: usize,
+    full_scan_position: usize,
+    full_complete: bool,
     indexed_source: usize,
     indexed_len: usize,
 }
@@ -483,6 +488,8 @@ impl PackedTagIndexer {
             cache: MaskCache::default(),
             full_events: Vec::new(),
             full_cursor: 0,
+            full_scan_position: 0,
+            full_complete: false,
             indexed_source: 0,
             indexed_len: 0,
         }
@@ -492,7 +499,7 @@ impl PackedTagIndexer {
         self.cache.reset_for(source);
     }
 
-    fn prepare_full_index(&mut self, source: &[u8]) {
+    fn prepare_chunked_index(&mut self, source: &[u8]) {
         let source_pointer = source.as_ptr() as usize;
         if self.indexed_source == source_pointer && self.indexed_len == source.len() {
             return;
@@ -500,49 +507,85 @@ impl PackedTagIndexer {
 
         self.full_events.clear();
         self.full_cursor = 0;
+        self.full_scan_position = 0;
+        self.full_complete = source.is_empty() || source.len() > u32::MAX as usize;
         self.indexed_source = source_pointer;
         self.indexed_len = source.len();
-        if source.len() > u32::MAX as usize {
+    }
+
+    fn refill_full_events(&mut self, source: &[u8]) {
+        debug_assert_eq!(self.mode, IndexingMode::FullDocument);
+        debug_assert_eq!(self.indexed_source, source.as_ptr() as usize);
+        debug_assert_eq!(self.indexed_len, source.len());
+        if self.full_complete {
             return;
         }
 
-        self.full_events.reserve(source.len() / 64);
+        self.full_events.clear();
+        self.full_cursor = 0;
+        self.full_events.reserve(FULL_INDEX_CHUNK_EVENTS);
+        let chunk_end = self
+            .full_scan_position
+            .saturating_add(FULL_INDEX_CHUNK_BYTES)
+            .min(source.len());
         let mut stream = FusedMaskStream::new(source, self.classifier);
-        let mut position = 0;
+        let mut position = self.full_scan_position;
         while let Some((indexed, next)) = stream.next_event(position) {
             self.full_events.push(indexed);
             position = next;
-            if position >= source.len() {
+            if position >= chunk_end || self.full_events.len() >= FULL_INDEX_CHUNK_EVENTS {
                 break;
             }
         }
+        self.full_scan_position = position;
+        if self.full_events.is_empty() || position >= source.len() {
+            self.full_scan_position = source.len();
+            self.full_complete = true;
+        }
     }
 
-    fn next_indexed(&mut self, from: usize) -> Option<TagEvent> {
-        while self
-            .full_events
-            .get(self.full_cursor)
-            .is_some_and(|event| event.start() < from)
-        {
-            self.full_cursor += 1;
+    fn next_indexed(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
+        loop {
+            while self
+                .full_events
+                .get(self.full_cursor)
+                .is_some_and(|event| event.start() < from)
+            {
+                self.full_cursor += 1;
+            }
+            if let Some(event) = self.full_events.get(self.full_cursor).copied() {
+                return Some(event.into_event());
+            }
+            if self.full_complete {
+                return None;
+            }
+            self.refill_full_events(source);
         }
-        self.full_events
-            .get(self.full_cursor)
-            .copied()
-            .map(IndexedEvent::into_event)
     }
 
     fn find_indexed_raw_text_close(
-        &self,
+        &mut self,
         source: &[u8],
         from: usize,
         close_tag: &[u8],
     ) -> Option<usize> {
-        self.full_events[self.full_cursor..]
-            .iter()
-            .map(|event| event.start())
-            .skip_while(|&start| start < from)
-            .find(|&start| raw_text_candidate_matches(source, start, close_tag))
+        loop {
+            if let Some((index, start)) = self.full_events[self.full_cursor..]
+                .iter()
+                .enumerate()
+                .map(|(offset, event)| (self.full_cursor + offset, event.start()))
+                .skip_while(|(_, start)| *start < from)
+                .find(|(_, start)| raw_text_candidate_matches(source, *start, close_tag))
+            {
+                self.full_cursor = index;
+                return Some(start);
+            }
+            self.full_cursor = self.full_events.len();
+            if self.full_complete {
+                return None;
+            }
+            self.refill_full_events(source);
+        }
     }
 
     fn masks(&mut self, source: &[u8], base: usize) -> ClassMasks {
@@ -835,7 +878,7 @@ impl TagIndexer for ScalarTagIndexer {
 impl TagIndexer for PackedTagIndexer {
     fn prepare(&mut self, source: &[u8]) {
         if self.mode == IndexingMode::FullDocument {
-            self.prepare_full_index(source);
+            self.prepare_chunked_index(source);
         } else {
             self.prepare_masks(source);
         }
@@ -843,8 +886,8 @@ impl TagIndexer for PackedTagIndexer {
 
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
         if self.mode == IndexingMode::FullDocument && source.len() <= u32::MAX as usize {
-            self.prepare_full_index(source);
-            self.next_indexed(from)
+            self.prepare_chunked_index(source);
+            self.next_indexed(source, from)
         } else {
             next_event(self, source, from)
         }
@@ -1164,14 +1207,28 @@ mod tests {
     }
 
     #[test]
-    fn full_document_mode_emits_events_without_materializing_masks() {
-        let source = "<div></div>".repeat(100);
+    fn full_document_mode_reuses_a_bounded_event_batch_without_masks() {
+        let source = "<div></div>".repeat(5_000);
         let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
+        let bytes = source.as_bytes();
 
-        packed.prepare(source.as_bytes());
+        packed.prepare(bytes);
+        let mut position = 0;
+        let mut event_count = 0;
+        let mut max_batch = 0;
+        while let Some(event) = packed.next(bytes, position) {
+            max_batch = max_batch.max(packed.full_events.len());
+            position = match event {
+                TagEvent::Open(open) => open.finish(bytes),
+                TagEvent::Complete(span) => span.end,
+            };
+            event_count += 1;
+        }
 
         assert!(packed.cache.masks.is_empty());
-        assert_eq!(packed.full_events.len(), 200);
+        assert_eq!(event_count, 10_000);
+        assert_eq!(max_batch, FULL_INDEX_CHUNK_EVENTS);
+        assert!(packed.full_events.capacity() >= max_batch);
     }
 
     #[test]
@@ -1243,7 +1300,44 @@ mod tests {
 
             let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
             packed.prepare(bytes);
-            assert_eq!(packed.full_events, expected, "source={source:?}");
+            let mut actual = Vec::new();
+            let mut position = 0;
+            while let Some(event) = packed.next(bytes, position) {
+                let indexed = match event {
+                    TagEvent::Open(open) => {
+                        let end = packed.finish_open(bytes, &open);
+                        position = end.max(open.start + 1);
+                        IndexedEvent {
+                            start: open.start as u32,
+                            end: end as u32,
+                            name_start: open.name.start as u32,
+                            name_end: open.name.end as u32,
+                            attributes_start: open.attributes_start as u32,
+                            kind: IndexedKind::Open,
+                        }
+                    }
+                    TagEvent::Complete(span) => {
+                        position = span.end.max(span.start + 1);
+                        IndexedEvent {
+                            start: span.start as u32,
+                            end: span.end as u32,
+                            name_start: span.name.start as u32,
+                            name_end: span.name.end as u32,
+                            attributes_start: 0,
+                            kind: if span.kind == TagKind::Close {
+                                IndexedKind::Close
+                            } else {
+                                IndexedKind::Ignored
+                            },
+                        }
+                    }
+                };
+                actual.push(indexed);
+                if position >= bytes.len() {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected, "source={source:?}");
         }
     }
 
