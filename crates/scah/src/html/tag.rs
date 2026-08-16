@@ -121,6 +121,20 @@ impl TagFlags {
     }
 
     #[inline]
+    pub(crate) const fn can_trigger_implied_close(self) -> bool {
+        self.0
+            & (Self::CLOSES_P
+                | Self::BUTTON
+                | Self::LI
+                | Self::DT_DD
+                | Self::OPTION
+                | Self::OPTGROUP
+                | Self::TR
+                | Self::CELL)
+            != 0
+    }
+
+    #[inline]
     pub(crate) const fn close_scope(self) -> ScopeKind {
         if self.0 & (Self::LI | Self::DT_DD) != 0 {
             ScopeKind::ListItem
@@ -192,5 +206,21 @@ mod tests {
     fn unknown_names_have_no_flags() {
         assert_eq!(TagFlags::classify("custom-element"), TagFlags::default());
         assert_eq!(TagFlags::classify("CUSTOM-ELEMENT"), TagFlags::default());
+    }
+
+    #[test]
+    fn only_implied_close_openers_enter_stack_preparation() {
+        for name in ["p", "div", "li", "button", "option", "tr", "td"] {
+            assert!(
+                TagFlags::classify(name).can_trigger_implied_close(),
+                "{name}"
+            );
+        }
+        for name in ["a", "span", "img", "script", "custom-element"] {
+            assert!(
+                !TagFlags::classify(name).can_trigger_implied_close(),
+                "{name}"
+            );
+        }
     }
 }

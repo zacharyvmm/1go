@@ -10,8 +10,9 @@ const ROLLING_WINDOW_BLOCKS: usize = 256;
 const FULL_INDEX_CHUNK_BYTES: usize = 64 * 1024;
 const FULL_INDEX_CHUNK_EVENTS: usize = 2_048;
 const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
-const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 64;
+const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
 const FULL_INDEX_SAMPLE_BYTES: usize = 4 * 1024;
+const FULL_INDEX_REFINED_SAMPLE_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IndexingMode {
@@ -948,9 +949,8 @@ impl AutoTagIndexer {
             return false;
         }
 
-        let sample_len = source.len().min(FULL_INDEX_SAMPLE_BYTES);
-        let complete_blocks = sample_len / SIMD_BLOCK_BYTES;
-        let less_than_count: usize = (0..complete_blocks)
+        let mut complete_blocks = source.len().min(FULL_INDEX_SAMPLE_BYTES) / SIMD_BLOCK_BYTES;
+        let mut less_than_count: usize = (0..complete_blocks)
             .map(|block| {
                 classifier
                     .classify(source, block * SIMD_BLOCK_BYTES)
@@ -958,9 +958,26 @@ impl AutoTagIndexer {
                     .count_ones() as usize
             })
             .sum();
-        let sampled_bytes = complete_blocks * SIMD_BLOCK_BYTES;
-        less_than_count == 0
-            || sampled_bytes / less_than_count.max(1) >= FULL_INDEX_MIN_BYTES_PER_TAG
+        if less_than_count == 0 {
+            return true;
+        }
+
+        let coarse_bytes = complete_blocks * SIMD_BLOCK_BYTES;
+        if coarse_bytes / less_than_count == FULL_INDEX_MIN_BYTES_PER_TAG {
+            let refined_blocks =
+                source.len().min(FULL_INDEX_REFINED_SAMPLE_BYTES) / SIMD_BLOCK_BYTES;
+            less_than_count += (complete_blocks..refined_blocks)
+                .map(|block| {
+                    classifier
+                        .classify(source, block * SIMD_BLOCK_BYTES)
+                        .less_than
+                        .count_ones() as usize
+                })
+                .sum::<usize>();
+            complete_blocks = refined_blocks;
+        }
+
+        complete_blocks * SIMD_BLOCK_BYTES / less_than_count >= FULL_INDEX_MIN_BYTES_PER_TAG
     }
 
     #[cfg(test)]
@@ -1355,6 +1372,25 @@ mod tests {
             panic!("expected indexed opening tag");
         };
         assert_eq!(open.end_hint, Some(6));
+    }
+
+    #[test]
+    fn adaptive_policy_refines_density_at_the_crossover() {
+        fn source(padding: usize) -> String {
+            let filler = "x".repeat(padding);
+            format!("<span>{filler}</span>").repeat(5_000)
+        }
+
+        let dense = source(120);
+        let sparse = source(122);
+        let mut dense_indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+        let mut sparse_indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+
+        dense_indexer.prepare(dense.as_bytes());
+        sparse_indexer.prepare(sparse.as_bytes());
+
+        assert!(!dense_indexer.uses_full_index());
+        assert!(sparse_indexer.uses_full_index());
     }
 
     #[test]

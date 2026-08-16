@@ -204,14 +204,6 @@ where
         }
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
-        let attributes_saved = match save_hits.as_slice() {
-            [] => false,
-            [hit] => hit.save_attributes,
-            hits => hits.iter().any(|hit| hit.save_attributes),
-        };
-        if !attributes_saved {
-            xhtml_element.remove_attributes(&mut store.attributes);
-        }
     }
 
     pub(crate) fn back(
