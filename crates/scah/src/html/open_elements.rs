@@ -114,6 +114,18 @@ impl<'html> OpenElementStack<'html> {
 
     pub fn close_by_end_tag_into(&mut self, name: &str, popped: &mut Vec<OpenElement<'html>>) {
         popped.clear();
+
+        if self
+            .entries
+            .last()
+            .is_some_and(|entry| entry.name == name || entry.name.eq_ignore_ascii_case(name))
+        {
+            if let Some(open) = self.entries.pop() {
+                popped.push(open);
+            }
+            return;
+        }
+
         let tag = TagFlags::classify(name);
         if let Some(index) = self.find_matching_index(name, tag.close_scope()) {
             while self.entries.len() > index {
@@ -214,6 +226,18 @@ mod tests {
         assert_eq!(popped.len(), 2);
         assert_eq!(popped[0].name, "span");
         assert_eq!(popped[1].name, "div");
+    }
+
+    #[test]
+    fn test_well_formed_mixed_case_close_pops_top() {
+        let mut stack = OpenElementStack::default();
+        stack.push("div").unwrap();
+        stack.push("SpAn").unwrap();
+
+        let popped = stack.close_by_end_tag("span");
+        assert_eq!(popped.len(), 1);
+        assert_eq!(popped[0].name, "SpAn");
+        assert_eq!(stack.depth(), 1);
     }
 
     #[test]

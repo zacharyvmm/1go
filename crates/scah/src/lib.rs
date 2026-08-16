@@ -351,6 +351,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_name_only_query_skips_attribute_preallocation() {
+        let html = "<div data-value='x'></div>".repeat(5_000);
+        let query = Query::all("div[data-value]", Save::name_only())
+            .unwrap()
+            .build();
+        let queries = &[query];
+
+        let store = parse(&html, queries).unwrap();
+
+        assert_eq!(store.get("div[data-value]").unwrap().count(), 5_000);
+        assert!(
+            store.attributes.capacity() < 32,
+            "name-only matching should reuse a tiny temporary attribute buffer"
+        );
+    }
+
+    #[test]
     fn parse_with_save_text_content_reserves_text_buffer() {
         let html = "<div>text content here</div>".repeat(5_000);
 
