@@ -10,18 +10,17 @@ use syn::{Expr, LitByte, LitStr, Result, Token, braced, bracketed, parenthesized
 
 /// Generate exact two-nibble SIMD classification tables at compile time.
 ///
-/// The expansion is `([u8; 16], [u8; 16], structural_bits, whitespace_bits)`.
+/// The expansion is `([u8; 16], [u8; 16], class_0_bits, class_1_bits, ...)`.
 #[proc_macro]
 pub fn simd_nibble_tables(input: TokenStream) -> TokenStream {
     let parsed = syn::parse_macro_input!(input as SimdTableInput);
-    match generate_simd_mapping(&parsed.structural, &parsed.whitespace) {
+    match generate_simd_mapping(&parsed.classes) {
         Some(mapping) => {
             let tlo = mapping.tlo;
             let thi = mapping.thi;
-            let structural_bits = mapping.structural_bits;
-            let whitespace_bits = mapping.whitespace_bits;
+            let class_bits = mapping.class_bits;
             quote! {
-                ([#(#tlo),*], [#(#thi),*], #structural_bits, #whitespace_bits)
+                ([#(#tlo),*], [#(#thi),*], #(#class_bits),*)
             }
             .into()
         }
@@ -35,38 +34,45 @@ pub fn simd_nibble_tables(input: TokenStream) -> TokenStream {
 }
 
 struct SimdTableInput {
-    structural: Vec<u8>,
-    whitespace: Vec<u8>,
+    classes: Vec<SimdClassInput>,
+}
+
+struct SimdClassInput {
+    name: syn::Ident,
+    bytes: Vec<u8>,
 }
 
 impl Parse for SimdTableInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let structural_name: syn::Ident = input.parse()?;
-        if structural_name != "structural" {
-            return Err(syn::Error::new(
-                structural_name.span(),
-                "expected `structural`",
-            ));
+        let mut classes = Vec::new();
+        while !input.is_empty() {
+            let name: syn::Ident = input.parse()?;
+            if classes
+                .iter()
+                .any(|class: &SimdClassInput| class.name == name)
+            {
+                return Err(syn::Error::new(name.span(), "duplicate SIMD class name"));
+            }
+            input.parse::<Token![:]>()?;
+            let bytes = parse_byte_array(input)?;
+            if bytes.is_empty() {
+                return Err(syn::Error::new(name.span(), "SIMD class cannot be empty"));
+            }
+            classes.push(SimdClassInput { name, bytes });
+            if input.is_empty() {
+                break;
+            }
+            input.parse::<Token![,]>()?;
         }
-        input.parse::<Token![:]>()?;
-        let structural = parse_byte_array(input)?;
-        input.parse::<Token![,]>()?;
 
-        let whitespace_name: syn::Ident = input.parse()?;
-        if whitespace_name != "whitespace" {
-            return Err(syn::Error::new(
-                whitespace_name.span(),
-                "expected `whitespace`",
-            ));
+        if classes.is_empty() {
+            return Err(input.error("expected at least one SIMD class"));
         }
-        input.parse::<Token![:]>()?;
-        let whitespace = parse_byte_array(input)?;
-        let _ = input.parse::<Token![,]>();
+        if classes.len() > 8 {
+            return Err(input.error("two-nibble SIMD mappings support at most eight classes"));
+        }
 
-        Ok(Self {
-            structural,
-            whitespace,
-        })
+        Ok(Self { classes })
     }
 }
 
@@ -80,56 +86,43 @@ fn parse_byte_array(input: ParseStream<'_>) -> Result<Vec<u8>> {
 struct SimdMapping {
     tlo: [u8; 16],
     thi: [u8; 16],
-    structural_bits: u8,
-    whitespace_bits: u8,
+    class_bits: Vec<u8>,
 }
 
-fn generate_simd_mapping(structural: &[u8], whitespace: &[u8]) -> Option<SimdMapping> {
-    let mut targets = Vec::with_capacity(structural.len() + whitespace.len());
-    let mut is_structural = Vec::with_capacity(targets.capacity());
-    for (&byte, domain) in structural
-        .iter()
-        .map(|byte| (byte, true))
-        .chain(whitespace.iter().map(|byte| (byte, false)))
-    {
-        if targets.contains(&byte) {
-            return None;
+fn generate_simd_mapping(classes: &[SimdClassInput]) -> Option<SimdMapping> {
+    let target_count = classes.iter().map(|class| class.bytes.len()).sum();
+    let mut targets = Vec::with_capacity(target_count);
+    let mut target_classes = Vec::with_capacity(target_count);
+    for (class_index, class) in classes.iter().enumerate() {
+        for &byte in &class.bytes {
+            if targets.contains(&byte) {
+                return None;
+            }
+            targets.push(byte);
+            target_classes.push(class_index);
         }
-        targets.push(byte);
-        is_structural.push(domain);
     }
 
     let mut assigned = vec![0; targets.len()];
     let mut tlo = [0; 16];
     let mut thi = [0; 16];
+    let mut class_bits = vec![0; classes.len()];
     if !solve_simd_mapping(
         0,
         &targets,
-        &is_structural,
+        &target_classes,
         &mut assigned,
         &mut tlo,
         &mut thi,
-        0,
-        0,
+        &mut class_bits,
     ) {
         return None;
-    }
-
-    let mut structural_bits = 0;
-    let mut whitespace_bits = 0;
-    for (index, mask) in assigned.into_iter().enumerate() {
-        if is_structural[index] {
-            structural_bits |= mask;
-        } else {
-            whitespace_bits |= mask;
-        }
     }
 
     Some(SimdMapping {
         tlo,
         thi,
-        structural_bits,
-        whitespace_bits,
+        class_bits,
     })
 }
 
@@ -137,12 +130,11 @@ fn generate_simd_mapping(structural: &[u8], whitespace: &[u8]) -> Option<SimdMap
 fn solve_simd_mapping(
     index: usize,
     targets: &[u8],
-    is_structural: &[bool],
+    target_classes: &[usize],
     assigned: &mut [u8],
     tlo: &mut [u8; 16],
     thi: &mut [u8; 16],
-    structural_used: u8,
-    whitespace_used: u8,
+    class_bits: &mut [u8],
 ) -> bool {
     if index == targets.len() {
         return true;
@@ -151,11 +143,15 @@ fn solve_simd_mapping(
     let byte = targets[index];
     let lo = (byte & 0x0f) as usize;
     let hi = (byte >> 4) as usize;
-    let structural = is_structural[index];
+    let class_index = target_classes[index];
 
     for shift in 0..8 {
         let mask = 1 << shift;
-        if structural && whitespace_used & mask != 0 || !structural && structural_used & mask != 0 {
+        if class_bits
+            .iter()
+            .enumerate()
+            .any(|(index, bits)| index != class_index && bits & mask != 0)
+        {
             continue;
         }
 
@@ -164,6 +160,8 @@ fn solve_simd_mapping(
         tlo[lo] |= mask;
         thi[hi] |= mask;
         assigned[index] = mask;
+        let old_class_bits = class_bits[class_index];
+        class_bits[class_index] |= mask;
 
         let mut valid = true;
         for candidate in u8::MIN..=u8::MAX {
@@ -187,25 +185,23 @@ fn solve_simd_mapping(
             }
         }
 
-        if valid {
-            let next_structural = structural_used | if structural { mask } else { 0 };
-            let next_whitespace = whitespace_used | if structural { 0 } else { mask };
-            if solve_simd_mapping(
+        if valid
+            && solve_simd_mapping(
                 index + 1,
                 targets,
-                is_structural,
+                target_classes,
                 assigned,
                 tlo,
                 thi,
-                next_structural,
-                next_whitespace,
-            ) {
-                return true;
-            }
+                class_bits,
+            )
+        {
+            return true;
         }
 
         tlo[lo] = old_lo;
         thi[hi] = old_hi;
+        class_bits[class_index] = old_class_bits;
     }
 
     false
