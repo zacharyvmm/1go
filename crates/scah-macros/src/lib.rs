@@ -385,6 +385,12 @@ fn expand_query(node: &QueryNode) -> Result<proc_macro2::TokenStream> {
         .enumerate()
         .map(class_const_tokens)
         .collect::<Vec<_>>();
+    let metadata_consts = compiled
+        .states
+        .iter()
+        .enumerate()
+        .map(metadata_const_tokens)
+        .collect::<Vec<_>>();
     let states = compiled
         .states
         .iter()
@@ -399,6 +405,7 @@ fn expand_query(node: &QueryNode) -> Result<proc_macro2::TokenStream> {
         {
             #(#attribute_consts)*
             #(#class_consts)*
+            #(#metadata_consts)*
             ::scah::StaticQuery::<#num_states, #num_sections>::new(
                 [#(#states),*],
                 [#(#sections),*],
@@ -406,6 +413,30 @@ fn expand_query(node: &QueryNode) -> Result<proc_macro2::TokenStream> {
             )
         }
     })
+}
+
+fn metadata_const_tokens(
+    (index, transition): (usize, &Transition<'_>),
+) -> proc_macro2::TokenStream {
+    let ident = syn::Ident::new(
+        &format!("__SCAH_ATTRIBUTE_NAMES_{index}"),
+        Span::call_site(),
+    );
+    let mut attribute_names = Vec::new();
+    for attribute in transition.predicate.attributes.as_slice() {
+        if attribute.name.eq_ignore_ascii_case("id")
+            || attribute.name.eq_ignore_ascii_case("class")
+            || attribute_names
+                .iter()
+                .any(|name: &&str| name.eq_ignore_ascii_case(attribute.name))
+        {
+            continue;
+        }
+        attribute_names.push(attribute.name);
+    }
+    quote! {
+        const #ident: &[&'static str] = &[#(#attribute_names),*];
+    }
 }
 
 fn class_const_tokens((index, transition): (usize, &Transition<'_>)) -> proc_macro2::TokenStream {
@@ -439,7 +470,25 @@ fn attribute_const_tokens(
 fn transition_tokens(index: usize, transition: &Transition<'_>) -> proc_macro2::TokenStream {
     let guard = combinator_tokens(&transition.guard);
     let predicate = predicate_tokens(index, &transition.predicate);
-    quote! { ::scah::Transition::new_const(#guard, #predicate) }
+    let name = option_str_tokens(transition.predicate.name);
+    let needs_id = transition.metadata.needs_id();
+    let needs_class = transition.metadata.needs_class();
+    let names_ident = syn::Ident::new(
+        &format!("__SCAH_ATTRIBUTE_NAMES_{index}"),
+        Span::call_site(),
+    );
+    quote! {
+        ::scah::Transition::new_const(
+            #guard,
+            #predicate,
+            ::scah::PredicateMetadata::new_const(
+                #name,
+                #needs_id,
+                #needs_class,
+                ::scah::AttributeNames::from_static(#names_ident),
+            ),
+        )
+    }
 }
 
 fn predicate_tokens(index: usize, predicate: &ElementPredicate<'_>) -> proc_macro2::TokenStream {

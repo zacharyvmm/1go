@@ -2,19 +2,156 @@ use crate::Reader;
 use crate::query::compiler::SelectorParseError;
 use crate::query::selector::{Combinator, ElementPredicate, IElement, Lexer};
 
+#[inline]
+pub const fn ascii_case_insensitive_hash(value: &str) -> u64 {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let lower = if byte >= b'A' && byte <= b'Z' {
+            byte + (b'a' - b'A')
+        } else {
+            byte
+        };
+        hash = (hash ^ lower as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        index += 1;
+    }
+    hash
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum AttributeNames<'query> {
+    Static(&'query [&'query str]),
+    Owned(Box<[&'query str]>),
+}
+
+impl<'query> AttributeNames<'query> {
+    pub const fn from_static(names: &'query [&'query str]) -> Self {
+        Self::Static(names)
+    }
+
+    pub fn as_slice(&self) -> &[&'query str] {
+        match self {
+            Self::Static(names) => names,
+            Self::Owned(names) => names,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct PredicateMetadata<'query> {
+    name: Option<&'query str>,
+    name_hash: u64,
+    needs_id: bool,
+    needs_class: bool,
+    attribute_names: AttributeNames<'query>,
+}
+
+impl<'query> PredicateMetadata<'query> {
+    pub fn compile(predicate: &ElementPredicate<'query>) -> Self {
+        let mut attribute_names = Vec::new();
+        for attribute in predicate.attributes.as_slice() {
+            if attribute.name.eq_ignore_ascii_case("id")
+                || attribute.name.eq_ignore_ascii_case("class")
+                || attribute_names
+                    .iter()
+                    .any(|name: &&str| name.eq_ignore_ascii_case(attribute.name))
+            {
+                continue;
+            }
+            attribute_names.push(attribute.name);
+        }
+
+        Self {
+            name: predicate.name,
+            name_hash: predicate.name.map_or(0, ascii_case_insensitive_hash),
+            needs_id: predicate.id.is_some()
+                || predicate
+                    .attributes
+                    .as_slice()
+                    .iter()
+                    .any(|attribute| attribute.name.eq_ignore_ascii_case("id")),
+            needs_class: !predicate.classes.as_slice().is_empty()
+                || predicate
+                    .attributes
+                    .as_slice()
+                    .iter()
+                    .any(|attribute| attribute.name.eq_ignore_ascii_case("class")),
+            attribute_names: AttributeNames::Owned(attribute_names.into_boxed_slice()),
+        }
+    }
+
+    pub const fn new_const(
+        name: Option<&'query str>,
+        needs_id: bool,
+        needs_class: bool,
+        attribute_names: AttributeNames<'query>,
+    ) -> Self {
+        Self {
+            name,
+            name_hash: match name {
+                Some(name) => ascii_case_insensitive_hash(name),
+                None => 0,
+            },
+            needs_id,
+            needs_class,
+            attribute_names,
+        }
+    }
+
+    #[inline]
+    pub fn matches_name(&self, name: &str, name_hash: u64) -> bool {
+        self.name.is_none_or(|expected| {
+            expected.len() == name.len()
+                && self.name_hash == name_hash
+                && expected.eq_ignore_ascii_case(name)
+        })
+    }
+
+    #[inline]
+    pub fn needs_id(&self) -> bool {
+        self.needs_id
+    }
+
+    #[inline]
+    pub fn needs_class(&self) -> bool {
+        self.needs_class
+    }
+
+    #[inline]
+    pub fn attribute_names(&self) -> &[&'query str] {
+        self.attribute_names.as_slice()
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub struct Transition<'query> {
     pub guard: Combinator,
     pub predicate: ElementPredicate<'query>,
+    pub metadata: PredicateMetadata<'query>,
 }
 
 impl<'query> Transition<'query> {
     pub fn new(guard: Combinator, predicate: ElementPredicate<'query>) -> Self {
-        Self { guard, predicate }
+        let metadata = PredicateMetadata::compile(&predicate);
+        Self {
+            guard,
+            predicate,
+            metadata,
+        }
     }
 
-    pub const fn new_const(guard: Combinator, predicate: ElementPredicate<'query>) -> Self {
-        Self { guard, predicate }
+    pub const fn new_const(
+        guard: Combinator,
+        predicate: ElementPredicate<'query>,
+        metadata: PredicateMetadata<'query>,
+    ) -> Self {
+        Self {
+            guard,
+            predicate,
+            metadata,
+        }
     }
 
     pub fn generate_transitions_from_string(
@@ -55,7 +192,10 @@ impl<'query> Transition<'query> {
 
 #[cfg(test)]
 mod tests {
-    use crate::query::selector::{Attribute, AttributeSelections, ClassSelections, IElement};
+    use crate::query::selector::{
+        Attribute, AttributeSelection, AttributeSelectionKind, AttributeSelections,
+        ClassSelections, IElement,
+    };
 
     use super::*;
 
@@ -83,6 +223,44 @@ mod tests {
         fn attributes(&self) -> &[Attribute<'a>] {
             self.attributes
         }
+    }
+
+    #[test]
+    fn predicate_metadata_compiles_unique_attribute_interests() {
+        let transition = Transition::new(
+            Combinator::Descendant,
+            ElementPredicate {
+                name: Some("ARTICLE"),
+                id: Some("hero"),
+                classes: ClassSelections::from_static(&["featured"]),
+                attributes: AttributeSelections::from(vec![
+                    AttributeSelection {
+                        name: "href",
+                        value: None,
+                        kind: AttributeSelectionKind::Presence,
+                    },
+                    AttributeSelection {
+                        name: "HREF",
+                        value: None,
+                        kind: AttributeSelectionKind::Presence,
+                    },
+                    AttributeSelection {
+                        name: "class",
+                        value: None,
+                        kind: AttributeSelectionKind::Presence,
+                    },
+                ]),
+            },
+        );
+
+        assert!(
+            transition
+                .metadata
+                .matches_name("article", ascii_case_insensitive_hash("article"))
+        );
+        assert!(transition.metadata.needs_id());
+        assert!(transition.metadata.needs_class());
+        assert_eq!(transition.metadata.attribute_names(), &["href"]);
     }
 
     #[test]

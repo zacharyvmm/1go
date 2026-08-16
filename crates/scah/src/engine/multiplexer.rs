@@ -1,9 +1,9 @@
 use super::attribute_interest::AttributeInterest;
-use super::executor::{QueryExecutor, ascii_case_insensitive_hash};
+use super::executor::QueryExecutor;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{QuerySpec, Reader};
+use crate::{QuerySpec, Reader, ascii_case_insensitive_hash};
 use smallvec::SmallVec;
 
 pub(crate) struct DocumentPosition {

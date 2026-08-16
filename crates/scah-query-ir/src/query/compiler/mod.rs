@@ -9,4 +9,4 @@ pub use error::SelectorParseError;
 pub use query::{
     Position, Query, QuerySection, QuerySectionId, QuerySpec, StaticQuery, TransitionId,
 };
-pub use transition::Transition;
+pub use transition::{AttributeNames, PredicateMetadata, Transition, ascii_case_insensitive_hash};
