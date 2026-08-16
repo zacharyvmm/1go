@@ -72,6 +72,7 @@ where
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
         let capture_text_content = selectors.requires_text_content();
+        let reserve_attributes = selectors.requires_attribute_storage();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
@@ -95,12 +96,13 @@ where
             indexer: AutoTagIndexer::new(indexing_mode),
             #[cfg(test)]
             attribute_parse_count: 0,
-            store: Store::with_capacity_options(
+            store: Store::with_capacity_requirements(
                 capacity,
                 crate::CapacityOptions {
                     reserve_text_content: capture_text_content,
                     ..crate::CapacityOptions::default()
                 },
+                reserve_attributes,
             ),
         }
     }
@@ -301,15 +303,17 @@ where
                     ) || early_exit;
                 } else {
                     for save_hit in &self.temp_state.save_hits {
-                        self.open_elements.attach_saved(
-                            save_hit.element_id,
-                            save_hit
-                                .save_inner_html
-                                .then_some(self.position.reader_position),
-                            save_hit
-                                .save_text_content
-                                .then_some(self.position.text_content_position),
-                        );
+                        if save_hit.save_inner_html || save_hit.save_text_content {
+                            self.open_elements.attach_saved(
+                                save_hit.element_id,
+                                save_hit
+                                    .save_inner_html
+                                    .then_some(self.position.reader_position),
+                                save_hit
+                                    .save_text_content
+                                    .then_some(self.position.text_content_position),
+                            );
+                        }
                     }
                 }
 

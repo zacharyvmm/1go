@@ -19,6 +19,7 @@ pub(crate) struct DocumentPosition {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SaveHit {
     pub element_id: ElementId,
+    pub save_attributes: bool,
     pub save_inner_html: bool,
     pub save_text_content: bool,
 }
@@ -135,6 +136,12 @@ where
             .any(|runner| runner.query().requires_text_content())
     }
 
+    pub(crate) fn requires_attribute_storage(&self) -> bool {
+        self.runners
+            .iter()
+            .any(|runner| runner.query().requires_attribute_storage())
+    }
+
     pub(crate) fn allows_early_exit(&self) -> bool {
         self.runners
             .iter()
@@ -202,13 +209,12 @@ where
         }
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
-        let retains_parsed_attributes = save_hits.iter().any(|hit| {
-            store.elements[hit.element_id]
-                .attributes
-                .as_ref()
-                .is_some_and(|range| !range.is_empty())
-        });
-        if !retains_parsed_attributes {
+        let attributes_saved = match save_hits.as_slice() {
+            [] => false,
+            [hit] => hit.save_attributes,
+            hits => hits.iter().any(|hit| hit.save_attributes),
+        };
+        if !attributes_saved {
             xhtml_element.remove_attributes(&mut store.attributes);
         }
     }
