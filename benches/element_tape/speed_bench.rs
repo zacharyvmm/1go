@@ -978,6 +978,31 @@ fn bench_sparse_index_policy(c: &mut Criterion) {
             black_box(store.get("span").unwrap().count())
         })
     });
+
+    let script_padding = "x".repeat(512);
+    let mut many_scripts = String::with_capacity(3 * 1024 * 1024);
+    for _ in 0..4_000 {
+        many_scripts.push_str("<script>const template = \"");
+        many_scripts.push_str("<div data-value='ignored'>not markup</div>");
+        many_scripts.push_str("\"; const padding = '");
+        many_scripts.push_str(&script_padding);
+        many_scripts.push_str("';</script><span>after</span>");
+    }
+    assert_eq!(
+        parse(&many_scripts, exhaustive_raw_queries)
+            .unwrap()
+            .get("span")
+            .unwrap()
+            .count(),
+        4_000
+    );
+    group.throughput(Throughput::Bytes(many_scripts.len() as u64));
+    group.bench_function("production_parse_many_scripts", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&many_scripts), black_box(exhaustive_raw_queries)).unwrap();
+            black_box(store.get("span").unwrap().count())
+        })
+    });
     group.finish();
 }
 
@@ -1065,11 +1090,84 @@ fn bench_density_crossover(c: &mut Criterion) {
     group.finish();
 }
 
+fn generate_long_attribute_html(elements: usize, value_bytes: usize) -> String {
+    let value = "x".repeat(value_bytes);
+    let mut html = String::with_capacity(elements * (value_bytes + 72));
+    for _ in 0..elements {
+        html.push_str("<a class=\"hit\" href=\"/item\" data-padding=\"");
+        html.push_str(&value);
+        html.push_str("\" data-x=\"yes\">x</a>");
+    }
+    html
+}
+
+fn generate_long_text_gap_html(elements: usize, text_bytes: usize) -> String {
+    let text = "x".repeat(text_bytes);
+    let mut html = String::with_capacity(elements * (text_bytes + 56));
+    for _ in 0..elements {
+        html.push_str("<a class=\"hit\" href=\"/item\" data-x=\"yes\">");
+        html.push_str(&text);
+        html.push_str("</a>");
+    }
+    html
+}
+
+fn bench_attribute_span_policy(c: &mut Criterion) {
+    let long_attributes = generate_long_attribute_html(5_000, 256);
+    let long_text_gaps = generate_long_text_gap_html(5_000, 256);
+    let queries = [
+        (
+            "tag_only",
+            "a",
+            Query::all("a", Save::name_only()).unwrap().build(),
+        ),
+        (
+            "selective_attributes",
+            "a.hit[href]",
+            Query::all("a.hit[href]", Save::name_only())
+                .unwrap()
+                .build(),
+        ),
+        (
+            "universal_attribute",
+            "[data-x]",
+            Query::all("[data-x]", Save::name_only()).unwrap().build(),
+        ),
+    ];
+
+    let mut group = c.benchmark_group("full_index_attribute_shape");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+
+    for (shape, html) in [
+        ("long_attributes", &long_attributes),
+        ("long_text_gaps", &long_text_gaps),
+    ] {
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        for (query_name, selector, query) in &queries {
+            let queries = std::slice::from_ref(query);
+            assert_eq!(
+                parse(html, queries).unwrap().get(selector).unwrap().count(),
+                5_000
+            );
+            group.bench_function(BenchmarkId::new(shape, query_name), |b| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(queries)).unwrap();
+                    black_box(store.get(selector).unwrap().count())
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_element_tape,
     bench_sparse_index_policy,
     bench_parser_hot_paths,
-    bench_density_crossover
+    bench_density_crossover,
+    bench_attribute_span_policy
 );
 criterion_main!(benches);

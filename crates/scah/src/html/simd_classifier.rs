@@ -11,14 +11,17 @@ const THI: [u8; 16] = TABLES.1;
 const LESS_THAN_BITS: u8 = TABLES.2;
 const GREATER_THAN_BITS: u8 = TABLES.3;
 const QUOTE_BITS: u8 = TABLES.4;
+#[cfg(test)]
 const EQUALS_BITS: u8 = TABLES.5;
 #[cfg(test)]
 const WHITESPACE_BITS: u8 = TABLES.6;
-const STRUCTURAL_BITS: u8 = LESS_THAN_BITS | GREATER_THAN_BITS | QUOTE_BITS | EQUALS_BITS;
+const TAG_END_BITS: u8 = GREATER_THAN_BITS | QUOTE_BITS;
+#[cfg(test)]
+const STRUCTURAL_BITS: u8 = LESS_THAN_BITS | TAG_END_BITS | EQUALS_BITS;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ClassMasks {
-    pub structural: u16,
+    pub tag_end: u16,
     pub less_than: u16,
 }
 
@@ -88,7 +91,7 @@ fn classify_scalar(block: &[u8]) -> ClassMasks {
     let mut masks = ClassMasks::default();
     for (lane, &byte) in block.iter().enumerate() {
         let class = TLO[(byte & 0x0f) as usize] & THI[(byte >> 4) as usize];
-        masks.structural |= u16::from(class & STRUCTURAL_BITS != 0) << lane;
+        masks.tag_end |= u16::from(class & TAG_END_BITS != 0) << lane;
         masks.less_than |= u16::from(class & LESS_THAN_BITS != 0) << lane;
     }
     masks
@@ -109,7 +112,7 @@ unsafe fn classify_neon(pointer: *const u8) -> ClassMasks {
     let classes = vandq_u8(vqtbl1q_u8(low_table, low), vqtbl1q_u8(high_table, high));
 
     ClassMasks {
-        structural: neon_nonzero_mask(vandq_u8(classes, vdupq_n_u8(STRUCTURAL_BITS))),
+        tag_end: neon_nonzero_mask(vandq_u8(classes, vdupq_n_u8(TAG_END_BITS))),
         less_than: neon_nonzero_mask(vandq_u8(classes, vdupq_n_u8(LESS_THAN_BITS))),
     }
 }
@@ -153,11 +156,11 @@ unsafe fn classify_ssse3(pointer: *const u8) -> ClassMasks {
         _mm_shuffle_epi8(high_table, high),
     );
     let zero = _mm_setzero_si128();
-    let structural = _mm_and_si128(classes, _mm_set1_epi8(STRUCTURAL_BITS as i8));
+    let tag_end = _mm_and_si128(classes, _mm_set1_epi8(TAG_END_BITS as i8));
     let less_than = _mm_and_si128(classes, _mm_set1_epi8(LESS_THAN_BITS as i8));
 
     ClassMasks {
-        structural: (!_mm_movemask_epi8(_mm_cmpeq_epi8(structural, zero)) as u16),
+        tag_end: (!_mm_movemask_epi8(_mm_cmpeq_epi8(tag_end, zero)) as u16),
         less_than: (!_mm_movemask_epi8(_mm_cmpeq_epi8(less_than, zero)) as u16),
     }
 }

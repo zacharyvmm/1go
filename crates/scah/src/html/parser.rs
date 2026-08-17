@@ -49,6 +49,7 @@ where
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
         let capture_text_content = selectors.requires_text_content();
         let persist_attributes = selectors.requires_attribute_storage();
+        let parse_attributes = selectors.requires_attribute_parsing();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
@@ -70,7 +71,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: AutoTagIndexer::new(indexing_mode),
+            indexer: AutoTagIndexer::new(indexing_mode, parse_attributes),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::default(),
@@ -80,6 +81,7 @@ where
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
         let capture_text_content = selectors.requires_text_content();
         let reserve_attributes = selectors.requires_attribute_storage();
+        let parse_attributes = selectors.requires_attribute_parsing();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
@@ -101,7 +103,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: AutoTagIndexer::new(indexing_mode),
+            indexer: AutoTagIndexer::new(indexing_mode, parse_attributes),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::with_capacity_requirements(
@@ -158,6 +160,8 @@ where
         }
 
         let source = reader.source();
+        let mut early_exit = false;
+        let mut open_tag_flags = None;
         let tag = loop {
             let Some(span) = self.indexer.next(source, reader.get_position()) else {
                 reader.advance_to(source.len());
@@ -188,6 +192,26 @@ where
                     self.element.set_name(name);
                     self.temp_state.attribute_start = self.store.attributes.len();
 
+                    let tag_flags = TagFlags::classify(name);
+                    if tag_flags.can_trigger_implied_close() {
+                        self.open_elements
+                            .prepare_for_open_into(tag_flags, &mut self.temp_state.implied_closes);
+                        if !self.temp_state.implied_closes.is_empty() {
+                            if self.capture_text_content
+                                && self.store.text_content.text_start.is_some()
+                                && let Some(position) =
+                                    self.store.text_content.push(reader, open.start)
+                            {
+                                self.position.text_content_position = position;
+                            }
+                            early_exit = self.drain_implied_closes(
+                                reader,
+                                Some(ImpliedCloseReason::OpenTagRule),
+                                None,
+                            ) || early_exit;
+                        }
+                    }
+
                     self.selectors
                         .prepare_element(name, &mut self.temp_state.preflight);
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
@@ -215,6 +239,7 @@ where
                         self.indexer.finish_open(source, &open)
                     };
                     reader.advance_to(end);
+                    open_tag_flags = Some(tag_flags);
                     break XHtmlTag::Open;
                 }
                 TagEvent::Complete(span) => {
@@ -244,28 +269,15 @@ where
 
         // TODO: register the start
         //reader.next_while(|c| c.is_whitespace());
-        let mut early_exit = false;
-
         match tag {
             XHtmlTag::Open => {
-                let tag = TagFlags::classify(self.element.name);
+                let tag = open_tag_flags.expect("opening tags must be classified during preflight");
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
                 }
 
                 self.position.reader_position = tag_start_position;
-                if tag.can_trigger_implied_close() {
-                    self.open_elements
-                        .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
-                    if !self.temp_state.implied_closes.is_empty() {
-                        self.drain_implied_closes(
-                            reader,
-                            Some(ImpliedCloseReason::OpenTagRule),
-                            None,
-                        );
-                    }
-                }
                 self.position.reader_position = reader.get_position();
 
                 let is_self_closing = tag.is_void();
@@ -865,6 +877,19 @@ mod tests {
         assert_eq!(matches[0].inner_html, None);
     }
 
+    #[test]
+    fn full_index_finds_raw_close_after_html_style_quote_inside_script() {
+        let html = format!(
+            "<script>{}const s = \"<div data='unterminated\";</script><span>real</span>",
+            "x".repeat(20_000)
+        );
+        let queries = &[Query::all("span", Save::name_only()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+
+        assert_eq!(store.get("span").unwrap().count(), 1);
+    }
+
     const BASIC_HTML_WITH_SELF_CLOSING_TAG: &str = r#"
         <html>
             <h1>Hello World</h1>
@@ -1149,6 +1174,16 @@ mod tests {
         let p = store.get("p").unwrap().next().unwrap();
         assert_eq!(p.inner_html, Some("Hello"));
         assert_eq!(p.text_content(&store), Some("Hello"));
+    }
+
+    #[test]
+    fn implied_close_updates_query_frontier_before_open_tag_preflight() {
+        let html = "<p><a>one</a><p><a>two</a>";
+        let queries = &[Query::all("p a", Save::name_only()).unwrap().build()];
+
+        let store = parse(html, queries).unwrap();
+
+        assert_eq!(store.get("p a").unwrap().count(), 2);
     }
 
     #[test]
