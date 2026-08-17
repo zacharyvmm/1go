@@ -114,8 +114,8 @@ fn trace_records_first_query_early_exit() {
 #[test]
 #[cfg(debug_assertions)]
 fn trace_records_transition_rejections() {
-    let html = "<main><span>no</span><a>yes</a></main>";
-    let query = Query::all("main > a", Save::all()).unwrap().build();
+    let html = "<main><a>no</a><a class='hit'>yes</a></main>";
+    let query = Query::all("main > a.hit", Save::all()).unwrap().build();
     let queries = [query];
 
     let store = parse(html, &queries).unwrap();
@@ -124,7 +124,7 @@ fn trace_records_transition_rejections() {
         matches!(
             event,
             debug::TraceEvent::TransitionRejected {
-                element: "span",
+                element: "a",
                 reason: debug::TransitionRejectReason::PredicateFailed,
                 ..
             }

@@ -49,6 +49,7 @@ where
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
         let capture_text_content = selectors.requires_text_content();
         let persist_attributes = selectors.requires_attribute_storage();
+        let parse_attributes = selectors.requires_attribute_parsing();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
@@ -70,7 +71,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: AutoTagIndexer::new(indexing_mode),
+            indexer: AutoTagIndexer::new(indexing_mode, parse_attributes),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::default(),
@@ -80,6 +81,7 @@ where
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
         let capture_text_content = selectors.requires_text_content();
         let reserve_attributes = selectors.requires_attribute_storage();
+        let parse_attributes = selectors.requires_attribute_parsing();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
@@ -101,7 +103,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: AutoTagIndexer::new(indexing_mode),
+            indexer: AutoTagIndexer::new(indexing_mode, parse_attributes),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::with_capacity_requirements(
@@ -1187,6 +1189,16 @@ mod tests {
         let p = store.get("p").unwrap().next().unwrap();
         assert_eq!(p.inner_html, Some("Hello"));
         assert_eq!(p.text_content(&store), Some("Hello"));
+    }
+
+    #[test]
+    fn implied_close_updates_query_frontier_before_open_tag_preflight() {
+        let html = "<p><a>one</a><p><a>two</a>";
+        let queries = &[Query::all("p a", Save::name_only()).unwrap().build()];
+
+        let store = parse(html, queries).unwrap();
+
+        assert_eq!(store.get("p a").unwrap().count(), 2);
     }
 
     #[test]

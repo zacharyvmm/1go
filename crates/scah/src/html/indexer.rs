@@ -10,9 +10,11 @@ const ROLLING_WINDOW_BLOCKS: usize = 256;
 const FULL_INDEX_CHUNK_BYTES: usize = 64 * 1024;
 const FULL_INDEX_CHUNK_EVENTS: usize = 2_048;
 const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
-const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 64;
-const FULL_INDEX_SAMPLE_WINDOWS: usize = 4;
-const FULL_INDEX_SAMPLE_WINDOW_BYTES: usize = 1024;
+const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
+const FULL_INDEX_SAMPLE_BYTES: usize = 4 * 1024;
+const FULL_INDEX_REFINED_SAMPLE_BYTES: usize = 8 * 1024;
+const FULL_INDEX_REFINEMENT_MARGIN_TAGS: usize = 2;
+const FULL_INDEX_MAX_MARKUP_PERCENT: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IndexingMode {
@@ -279,7 +281,7 @@ impl<'source> FusedMaskStream<'source> {
 
     #[inline]
     fn find_greater_than(&mut self, from: usize) -> Option<usize> {
-        self.find_mask_matching(from, |masks| masks.structural, |byte| byte == b'>')
+        self.find_mask_matching(from, |masks| masks.tag_end, |byte| byte == b'>')
     }
 
     fn find_unquoted_tag_end(&mut self, from: usize) -> usize {
@@ -288,7 +290,7 @@ impl<'source> FusedMaskStream<'source> {
 
         while let Some(candidate) = self.find_mask_matching(
             position,
-            |masks| masks.structural,
+            |masks| masks.tag_end,
             |byte| matches!(byte, b'\'' | b'"' | b'>'),
         ) {
             let byte = self.source[candidate];
@@ -686,13 +688,13 @@ impl PackedTagIndexer {
 }
 
 impl PackedTagIndexer {
-    fn find_structural_matching(
+    fn find_tag_end_matching(
         &mut self,
         source: &[u8],
         from: usize,
         predicate: impl FnMut(u8) -> bool,
     ) -> Option<usize> {
-        self.find_mask_matching(source, from, |masks| masks.structural, predicate)
+        self.find_mask_matching(source, from, |masks| masks.tag_end, predicate)
     }
 }
 
@@ -702,7 +704,7 @@ impl StructuralSearch for PackedTagIndexer {
         if needle == b'<' {
             self.classifier.find_less_than(source, from)
         } else {
-            self.find_structural_matching(source, from, |byte| byte == needle)
+            self.find_tag_end_matching(source, from, |byte| byte == needle)
         }
     }
 
@@ -710,8 +712,8 @@ impl StructuralSearch for PackedTagIndexer {
         let mut position = from;
         let mut quote = None;
 
-        while let Some(candidate) = self
-            .find_structural_matching(source, position, |byte| matches!(byte, b'\'' | b'"' | b'>'))
+        while let Some(candidate) =
+            self.find_tag_end_matching(source, position, |byte| matches!(byte, b'\'' | b'"' | b'>'))
         {
             let byte = source[candidate];
             match quote {
@@ -950,24 +952,72 @@ impl TagIndexer for PackedTagIndexer {
     }
 }
 
+fn sampled_markup_bytes(source: &[u8], sampled_bytes: usize) -> usize {
+    let sample = &source[..source.len().min(sampled_bytes)];
+    let mut markup_bytes = 0;
+    let mut tag_start = 0;
+    let mut inside_tag = false;
+    let mut quote = None;
+    let mut backslash_run = 0;
+
+    for (position, &byte) in sample.iter().enumerate() {
+        if !inside_tag {
+            if byte == b'<' {
+                tag_start = position;
+                inside_tag = true;
+                quote = None;
+                backslash_run = 0;
+            }
+            continue;
+        }
+
+        if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                backslash_run += 1;
+                continue;
+            }
+            if byte == delimiter && backslash_run % 2 == 0 {
+                quote = None;
+            }
+            backslash_run = 0;
+            continue;
+        }
+
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'>' => {
+                markup_bytes += position + 1 - tag_start;
+                inside_tag = false;
+            }
+            _ => {}
+        }
+    }
+
+    if inside_tag {
+        markup_bytes += sample.len() - tag_start;
+    }
+    markup_bytes
+}
+
 #[derive(Debug)]
 pub(crate) struct AutoTagIndexer {
     scalar: ScalarTagIndexer,
     rolling: Option<PackedTagIndexer>,
     full: Option<PackedTagIndexer>,
     allow_full_index: bool,
+    attributes_may_be_parsed: bool,
     prepared_source: usize,
     prepared_len: usize,
 }
 
 impl Default for AutoTagIndexer {
     fn default() -> Self {
-        Self::new(IndexingMode::Rolling)
+        Self::new(IndexingMode::Rolling, false)
     }
 }
 
 impl AutoTagIndexer {
-    pub(crate) fn new(mode: IndexingMode) -> Self {
+    pub(crate) fn new(mode: IndexingMode, attributes_may_be_parsed: bool) -> Self {
         let classifier = BlockClassifier::default();
         let accelerated = classifier.is_accelerated();
         Self {
@@ -975,40 +1025,59 @@ impl AutoTagIndexer {
             rolling: accelerated.then(|| PackedTagIndexer::new(IndexingMode::Rolling)),
             full: None,
             allow_full_index: mode == IndexingMode::FullDocument,
+            attributes_may_be_parsed,
             prepared_source: 0,
             prepared_len: 0,
         }
     }
 
-    fn should_build_full_index(source: &[u8], classifier: BlockClassifier) -> bool {
+    fn should_build_full_index(
+        source: &[u8],
+        classifier: BlockClassifier,
+        attributes_may_be_parsed: bool,
+    ) -> bool {
         if source.len() < FULL_INDEX_MIN_BYTES || source.len() > u32::MAX as usize {
             return false;
         }
 
-        let stride = source.len() / FULL_INDEX_SAMPLE_WINDOWS;
-        let dense_windows = (0..FULL_INDEX_SAMPLE_WINDOWS)
-            .filter(|&window| {
-                let start = stride * window;
-                let available = source
-                    .len()
-                    .saturating_sub(start)
-                    .min(FULL_INDEX_SAMPLE_WINDOW_BYTES);
-                let bytes = available / SIMD_BLOCK_BYTES * SIMD_BLOCK_BYTES;
-                let end = start + bytes;
-                let less_than_count: usize = (start..end)
-                    .step_by(SIMD_BLOCK_BYTES)
-                    .map(|block_start| {
-                        classifier
-                            .classify(source, block_start)
-                            .less_than
-                            .count_ones() as usize
-                    })
-                    .sum();
-                less_than_count > 0
-                    && bytes < less_than_count.saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG)
+        let mut complete_blocks = source.len().min(FULL_INDEX_SAMPLE_BYTES) / SIMD_BLOCK_BYTES;
+        let mut less_than_count: usize = (0..complete_blocks)
+            .map(|block| {
+                classifier
+                    .classify(source, block * SIMD_BLOCK_BYTES)
+                    .less_than
+                    .count_ones() as usize
             })
-            .count();
-        dense_windows * 2 < FULL_INDEX_SAMPLE_WINDOWS
+            .sum();
+        if less_than_count == 0 {
+            return true;
+        }
+
+        let coarse_bytes = complete_blocks * SIMD_BLOCK_BYTES;
+        let coarse_threshold = less_than_count.saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG);
+        let refinement_margin = FULL_INDEX_MIN_BYTES_PER_TAG * FULL_INDEX_REFINEMENT_MARGIN_TAGS;
+        if coarse_bytes.abs_diff(coarse_threshold) <= refinement_margin {
+            let refined_blocks =
+                source.len().min(FULL_INDEX_REFINED_SAMPLE_BYTES) / SIMD_BLOCK_BYTES;
+            less_than_count += (complete_blocks..refined_blocks)
+                .map(|block| {
+                    classifier
+                        .classify(source, block * SIMD_BLOCK_BYTES)
+                        .less_than
+                        .count_ones() as usize
+                })
+                .sum::<usize>();
+            complete_blocks = refined_blocks;
+        }
+
+        let sampled_bytes = complete_blocks * SIMD_BLOCK_BYTES;
+        if sampled_bytes < less_than_count.saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG) {
+            return false;
+        }
+
+        !attributes_may_be_parsed
+            || sampled_markup_bytes(source, sampled_bytes) * 100
+                <= sampled_bytes * FULL_INDEX_MAX_MARKUP_PERCENT
     }
 
     #[cfg(test)]
@@ -1035,7 +1104,13 @@ impl AutoTagIndexer {
         let Some(rolling) = self.rolling.as_ref() else {
             return;
         };
-        if self.allow_full_index && Self::should_build_full_index(source, rolling.classifier) {
+        if self.allow_full_index
+            && Self::should_build_full_index(
+                source,
+                rolling.classifier,
+                self.attributes_may_be_parsed,
+            )
+        {
             let mut full = PackedTagIndexer::new(IndexingMode::FullDocument);
             full.prepare(source);
             self.full = Some(full);
@@ -1291,15 +1366,55 @@ mod tests {
     }
 
     #[test]
-    fn full_document_raw_text_search_does_not_materialize_masks() {
+    fn full_document_raw_text_search_skips_to_close_in_existing_batch() {
         let source = format!("<script>{}</script>", "x".repeat(FULL_INDEX_MIN_BYTES));
+        let bytes = source.as_bytes();
         let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
-        packed.prepare(source.as_bytes());
+        packed.prepare(bytes);
+
+        let Some(TagEvent::Open(script)) = packed.next(bytes, 0) else {
+            panic!("expected script opening tag");
+        };
+        let batch_len = packed.full_events.len();
+        let scan_position = packed.full_scan_position;
+        let expected_close = source.find("</script");
 
         assert_eq!(
-            packed.find_raw_text_close(source.as_bytes(), 8, "</script"),
-            source.find("</script")
+            packed.find_raw_text_close(bytes, script.finish(bytes), "</script"),
+            expected_close
         );
+        assert_eq!(packed.full_events.len(), batch_len);
+        assert_eq!(packed.full_scan_position, scan_position);
+        assert_eq!(
+            packed.full_events[packed.full_cursor].start(),
+            expected_close.unwrap()
+        );
+        assert!(packed.cache.masks.is_empty());
+    }
+
+    #[test]
+    fn full_document_raw_text_search_restarts_events_at_the_real_close() {
+        let source = format!(
+            "<script>{}const s = \"<div data='unterminated\";</script><span>real</span>",
+            "x".repeat(FULL_INDEX_MIN_BYTES)
+        );
+        let bytes = source.as_bytes();
+        let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
+        packed.prepare(bytes);
+
+        let Some(TagEvent::Open(script)) = packed.next(bytes, 0) else {
+            panic!("expected script opening tag");
+        };
+        assert_eq!(script.name(bytes), "script");
+
+        let close = packed
+            .find_raw_text_close(bytes, script.finish(bytes), "</script")
+            .expect("real script close should remain discoverable");
+        let after_close = source[close..].find('>').unwrap() + close + 1;
+        let Some(TagEvent::Open(span)) = packed.next(bytes, after_close) else {
+            panic!("expected opening tag after raw text");
+        };
+        assert_eq!(span.name(bytes), "span");
         assert!(packed.cache.masks.is_empty());
     }
 
@@ -1484,7 +1599,7 @@ mod tests {
     #[test]
     fn adaptive_policy_keeps_dense_documents_scalar() {
         let source = "<div><span>x</span></div>".repeat(1_000);
-        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, false);
 
         indexer.prepare(source.as_bytes());
 
@@ -1494,7 +1609,7 @@ mod tests {
     #[test]
     fn adaptive_policy_full_indexes_sparse_exhaustive_documents() {
         let source = format!("<main>{}</main>", "x".repeat(FULL_INDEX_MIN_BYTES));
-        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, false);
 
         indexer.prepare(source.as_bytes());
 
@@ -1506,13 +1621,44 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_policy_samples_beyond_a_dense_header() {
+    fn adaptive_policy_refines_density_at_the_crossover() {
+        fn source(padding: usize) -> String {
+            let filler = "x".repeat(padding);
+            format!("<span>{filler}</span>").repeat(5_000)
+        }
+
+        let dense = source(120);
+        let sparse = source(122);
+        let mut dense_indexer = AutoTagIndexer::new(IndexingMode::FullDocument, false);
+        let mut sparse_indexer = AutoTagIndexer::new(IndexingMode::FullDocument, false);
+
+        dense_indexer.prepare(dense.as_bytes());
+        sparse_indexer.prepare(sparse.as_bytes());
+
+        assert!(!dense_indexer.uses_full_index());
+        assert!(sparse_indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_keeps_long_attribute_spans_scalar_when_attributes_matter() {
+        let value = "x".repeat(256);
         let source = format!(
-            "{}<main>{}</main>",
-            "<div></div>".repeat(500),
-            "ordinary text ".repeat(20_000)
-        );
-        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+            "<a class=\"hit\" href=\"/item\" data-padding=\"{value}\" data-x=\"yes\">x</a>"
+        )
+        .repeat(5_000);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(!indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_full_indexes_text_gaps_when_attributes_matter() {
+        let text = "x".repeat(256);
+        let source =
+            format!("<a class=\"hit\" href=\"/item\" data-x=\"yes\">{text}</a>").repeat(5_000);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
 
@@ -1523,7 +1669,7 @@ mod tests {
     fn early_exit_raw_text_search_avoids_a_rolling_mask_buffer() {
         let source = format!("{} </script>", "x".repeat(FULL_INDEX_MIN_BYTES));
         let expected = source.find("</script>").unwrap();
-        let mut indexer = AutoTagIndexer::new(IndexingMode::Rolling);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::Rolling, false);
 
         indexer.prepare(source.as_bytes());
         assert!(!indexer.uses_full_index());
