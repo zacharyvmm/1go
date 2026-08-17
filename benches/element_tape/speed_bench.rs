@@ -1112,9 +1112,30 @@ fn generate_long_text_gap_html(elements: usize, text_bytes: usize) -> String {
     html
 }
 
+fn with_long_script_prefix(body: &str) -> String {
+    let script = "x".repeat(8 * 1024);
+    let mut html = String::with_capacity(script.len() + body.len() + 17);
+    html.push_str("<script>");
+    html.push_str(&script);
+    html.push_str("</script>");
+    html.push_str(body);
+    html
+}
+
+fn with_dense_head(body: &str) -> String {
+    let head = "<div></div>".repeat(750);
+    let mut html = String::with_capacity(head.len() + body.len());
+    html.push_str(&head);
+    html.push_str(body);
+    html
+}
+
 fn bench_attribute_span_policy(c: &mut Criterion) {
     let long_attributes = generate_long_attribute_html(5_000, 256);
     let long_text_gaps = generate_long_text_gap_html(5_000, 256);
+    let script_then_long_attributes = with_long_script_prefix(&long_attributes);
+    let script_then_long_text_gaps = with_long_script_prefix(&long_text_gaps);
+    let dense_head_then_long_text_gaps = with_dense_head(&long_text_gaps);
     let queries = [
         (
             "tag_only",
@@ -1143,6 +1164,12 @@ fn bench_attribute_span_policy(c: &mut Criterion) {
     for (shape, html) in [
         ("long_attributes", &long_attributes),
         ("long_text_gaps", &long_text_gaps),
+        ("script_then_long_attributes", &script_then_long_attributes),
+        ("script_then_long_text_gaps", &script_then_long_text_gaps),
+        (
+            "dense_head_then_long_text_gaps",
+            &dense_head_then_long_text_gaps,
+        ),
     ] {
         group.throughput(Throughput::Bytes(html.len() as u64));
         for (query_name, selector, query) in &queries {

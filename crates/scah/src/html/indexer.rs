@@ -11,9 +11,11 @@ const FULL_INDEX_CHUNK_BYTES: usize = 64 * 1024;
 const FULL_INDEX_CHUNK_EVENTS: usize = 2_048;
 const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
-const FULL_INDEX_SAMPLE_BYTES: usize = 4 * 1024;
-const FULL_INDEX_REFINED_SAMPLE_BYTES: usize = 8 * 1024;
-const FULL_INDEX_REFINEMENT_MARGIN_TAGS: usize = 2;
+const FULL_INDEX_SAMPLE_WINDOWS: usize = 4;
+const FULL_INDEX_DENSITY_WINDOW_BYTES: usize = 512;
+const FULL_INDEX_MARKUP_WINDOW_BYTES: usize = 1024;
+const FULL_INDEX_REFINED_WINDOW_BYTES: usize = 8 * 1024;
+const FULL_INDEX_REFINEMENT_MARGIN_TAGS: usize = 1;
 const FULL_INDEX_MAX_MARKUP_PERCENT: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -943,8 +945,7 @@ impl TagIndexer for PackedTagIndexer {
     }
 }
 
-fn sampled_markup_bytes(source: &[u8], sampled_bytes: usize) -> usize {
-    let sample = &source[..source.len().min(sampled_bytes)];
+fn sampled_markup_bytes(sample: &[u8]) -> usize {
     let mut markup_bytes = 0;
     let mut tag_start = 0;
     let mut inside_tag = false;
@@ -990,6 +991,101 @@ fn sampled_markup_bytes(source: &[u8], sampled_bytes: usize) -> usize {
     markup_bytes
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct FullIndexWindowSample {
+    bytes: usize,
+    less_than_count: usize,
+    markup_bytes: usize,
+}
+
+impl FullIndexWindowSample {
+    fn is_near_density_crossover(self) -> bool {
+        self.less_than_count > 0
+            && self.bytes.abs_diff(
+                self.less_than_count
+                    .saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG),
+            ) <= FULL_INDEX_MIN_BYTES_PER_TAG * FULL_INDEX_REFINEMENT_MARGIN_TAGS
+    }
+
+    fn is_dense(self) -> bool {
+        self.bytes
+            < self
+                .less_than_count
+                .saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG)
+    }
+
+    fn is_markup_heavy(self) -> bool {
+        self.markup_bytes * 100 > self.bytes * FULL_INDEX_MAX_MARKUP_PERCENT
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FullIndexSample {
+    windows: [FullIndexWindowSample; FULL_INDEX_SAMPLE_WINDOWS],
+}
+
+impl FullIndexSample {
+    fn is_near_density_crossover(self) -> bool {
+        self.windows
+            .iter()
+            .any(|window| window.is_near_density_crossover())
+    }
+
+    fn should_build_full_index(self, attributes_may_be_parsed: bool) -> bool {
+        let dense_windows = self
+            .windows
+            .iter()
+            .filter(|window| window.is_dense())
+            .count();
+        if dense_windows * 2 >= FULL_INDEX_SAMPLE_WINDOWS {
+            return false;
+        }
+
+        !attributes_may_be_parsed
+            || self
+                .windows
+                .iter()
+                .filter(|window| window.is_markup_heavy())
+                .count()
+                * 2
+                < FULL_INDEX_SAMPLE_WINDOWS
+    }
+}
+
+fn sample_full_index_windows(
+    source: &[u8],
+    classifier: BlockClassifier,
+    window_bytes: usize,
+    measure_markup: bool,
+) -> FullIndexSample {
+    let mut sample = FullIndexSample::default();
+    let window_stride = source.len() / FULL_INDEX_SAMPLE_WINDOWS;
+
+    for window in 0..FULL_INDEX_SAMPLE_WINDOWS {
+        let start = window_stride * window;
+        let available = source.len().saturating_sub(start).min(window_bytes);
+        let bytes = available / SIMD_BLOCK_BYTES * SIMD_BLOCK_BYTES;
+        let end = start + bytes;
+
+        let current = &mut sample.windows[window];
+        current.bytes = bytes;
+        current.less_than_count = (start..end)
+            .step_by(SIMD_BLOCK_BYTES)
+            .map(|block_start| {
+                classifier
+                    .classify(source, block_start)
+                    .less_than
+                    .count_ones() as usize
+            })
+            .sum::<usize>();
+        if measure_markup {
+            current.markup_bytes = sampled_markup_bytes(&source[start..end]);
+        }
+    }
+
+    sample
+}
+
 #[derive(Debug)]
 pub(crate) struct AutoTagIndexer {
     scalar: ScalarTagIndexer,
@@ -1031,44 +1127,27 @@ impl AutoTagIndexer {
             return false;
         }
 
-        let mut complete_blocks = source.len().min(FULL_INDEX_SAMPLE_BYTES) / SIMD_BLOCK_BYTES;
-        let mut less_than_count: usize = (0..complete_blocks)
-            .map(|block| {
-                classifier
-                    .classify(source, block * SIMD_BLOCK_BYTES)
-                    .less_than
-                    .count_ones() as usize
-            })
-            .sum();
-        if less_than_count == 0 {
-            return true;
+        let sample_window_bytes = if attributes_may_be_parsed {
+            FULL_INDEX_MARKUP_WINDOW_BYTES
+        } else {
+            FULL_INDEX_DENSITY_WINDOW_BYTES
+        };
+        let mut sample = sample_full_index_windows(
+            source,
+            classifier,
+            sample_window_bytes,
+            attributes_may_be_parsed,
+        );
+        if sample.is_near_density_crossover() {
+            sample = sample_full_index_windows(
+                source,
+                classifier,
+                FULL_INDEX_REFINED_WINDOW_BYTES,
+                attributes_may_be_parsed,
+            );
         }
 
-        let coarse_bytes = complete_blocks * SIMD_BLOCK_BYTES;
-        let coarse_threshold = less_than_count.saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG);
-        let refinement_margin = FULL_INDEX_MIN_BYTES_PER_TAG * FULL_INDEX_REFINEMENT_MARGIN_TAGS;
-        if coarse_bytes.abs_diff(coarse_threshold) <= refinement_margin {
-            let refined_blocks =
-                source.len().min(FULL_INDEX_REFINED_SAMPLE_BYTES) / SIMD_BLOCK_BYTES;
-            less_than_count += (complete_blocks..refined_blocks)
-                .map(|block| {
-                    classifier
-                        .classify(source, block * SIMD_BLOCK_BYTES)
-                        .less_than
-                        .count_ones() as usize
-                })
-                .sum::<usize>();
-            complete_blocks = refined_blocks;
-        }
-
-        let sampled_bytes = complete_blocks * SIMD_BLOCK_BYTES;
-        if sampled_bytes < less_than_count.saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG) {
-            return false;
-        }
-
-        !attributes_may_be_parsed
-            || sampled_markup_bytes(source, sampled_bytes) * 100
-                <= sampled_bytes * FULL_INDEX_MAX_MARKUP_PERCENT
+        sample.should_build_full_index(attributes_may_be_parsed)
     }
 
     #[cfg(test)]
@@ -1549,6 +1628,47 @@ mod tests {
         let text = "x".repeat(256);
         let source =
             format!("<a class=\"hit\" href=\"/item\" data-x=\"yes\">{text}</a>").repeat(5_000);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_samples_attribute_heavy_body_after_sparse_script() {
+        let value = "x".repeat(256);
+        let body = format!(
+            "<a class=\"hit\" href=\"/item\" data-padding=\"{value}\" data-x=\"yes\">x</a>"
+        )
+        .repeat(5_000);
+        let source = format!("<script>{}</script>{body}", "x".repeat(8 * 1024));
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(!indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_samples_text_gap_body_after_sparse_script() {
+        let text = "x".repeat(256);
+        let body =
+            format!("<a class=\"hit\" href=\"/item\" data-x=\"yes\">{text}</a>").repeat(5_000);
+        let source = format!("<script>{}</script>{body}", "x".repeat(8 * 1024));
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_does_not_let_dense_head_override_sparse_body() {
+        let text = "x".repeat(256);
+        let body =
+            format!("<a class=\"hit\" href=\"/item\" data-x=\"yes\">{text}</a>").repeat(5_000);
+        let source = format!("{}{body}", "<div></div>".repeat(750));
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
