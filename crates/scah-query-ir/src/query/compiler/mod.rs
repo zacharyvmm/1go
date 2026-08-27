@@ -1,6 +1,5 @@
 mod builder;
 mod error;
-pub mod lazy;
 mod query;
 mod transition;
 
