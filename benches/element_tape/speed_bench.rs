@@ -1475,6 +1475,7 @@ fn with_dense_head(body: &str) -> String {
 fn bench_attribute_span_policy(c: &mut Criterion) {
     let long_attributes = generate_long_attribute_html(5_000, 256);
     let long_text_gaps = generate_long_text_gap_html(5_000, 256);
+    let multi_kib_text_gaps = generate_long_text_gap_html(32, 4 * 1024);
     let script_then_long_attributes = with_long_script_prefix(&long_attributes);
     let script_then_long_text_gaps = with_long_script_prefix(&long_text_gaps);
     let dense_head_then_long_text_gaps = with_dense_head(&long_text_gaps);
@@ -1503,14 +1504,24 @@ fn bench_attribute_span_policy(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
 
-    for (shape, html) in [
-        ("long_attributes", &long_attributes),
-        ("long_text_gaps", &long_text_gaps),
-        ("script_then_long_attributes", &script_then_long_attributes),
-        ("script_then_long_text_gaps", &script_then_long_text_gaps),
+    for (shape, html, expected_matches) in [
+        ("long_attributes", &long_attributes, 5_000),
+        ("long_text_gaps", &long_text_gaps, 5_000),
+        ("multi_kib_text_gaps", &multi_kib_text_gaps, 32),
+        (
+            "script_then_long_attributes",
+            &script_then_long_attributes,
+            5_000,
+        ),
+        (
+            "script_then_long_text_gaps",
+            &script_then_long_text_gaps,
+            5_000,
+        ),
         (
             "dense_head_then_long_text_gaps",
             &dense_head_then_long_text_gaps,
+            5_000,
         ),
     ] {
         group.throughput(Throughput::Bytes(html.len() as u64));
@@ -1518,7 +1529,7 @@ fn bench_attribute_span_policy(c: &mut Criterion) {
             let queries = std::slice::from_ref(query);
             assert_eq!(
                 parse(html, queries).unwrap().get(selector).unwrap().count(),
-                5_000
+                expected_matches
             );
             group.bench_function(BenchmarkId::new(shape, query_name), |b| {
                 b.iter(|| {

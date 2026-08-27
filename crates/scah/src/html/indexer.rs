@@ -981,7 +981,15 @@ fn find_sampled_tag_end(source: &[u8], mut position: usize, limit: usize) -> Opt
     None
 }
 
-fn sampled_markup_bytes(source: &[u8], start: usize, end: usize) -> (usize, bool) {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SampleLexicalState {
+    #[default]
+    Normal,
+    OversizedTag,
+    Unknown,
+}
+
+fn sampled_markup_bytes(source: &[u8], start: usize, end: usize) -> (usize, SampleLexicalState) {
     let mut markup_bytes = 0;
     let mut position = if start == 0 {
         0
@@ -991,9 +999,7 @@ fn sampled_markup_bytes(source: &[u8], start: usize, end: usize) -> (usize, bool
             .iter()
             .rposition(|&byte| byte == b'<')
         else {
-            // The window may begin inside an exceptionally long attribute value.
-            // Treat an unbounded lexical state as markup-heavy instead of guessing.
-            return (0, true);
+            return (0, SampleLexicalState::Unknown);
         };
         anchor_start + offset
     };
@@ -1007,13 +1013,39 @@ fn sampled_markup_bytes(source: &[u8], start: usize, end: usize) -> (usize, bool
             .len()
             .min(tag_start + FULL_INDEX_MAX_SAMPLED_TAG_BYTES + 1);
         let Some(tag_end) = find_sampled_tag_end(source, tag_start + 1, scan_limit) else {
-            return (markup_bytes + end.saturating_sub(tag_start), true);
+            return (
+                markup_bytes + end.saturating_sub(tag_start),
+                SampleLexicalState::OversizedTag,
+            );
         };
         markup_bytes += end.min(tag_end).saturating_sub(start.max(tag_start));
         position = tag_end.max(tag_start + 1);
     }
 
-    (markup_bytes, false)
+    (markup_bytes, SampleLexicalState::Normal)
+}
+
+fn resolve_unknown_sample_start(source: &[u8], start: usize) -> (SampleLexicalState, usize) {
+    let Some(offset) = source[start..]
+        .iter()
+        .position(|&byte| matches!(byte, b'<' | b'>'))
+    else {
+        return (SampleLexicalState::Unknown, source.len());
+    };
+    let boundary = start + offset;
+    let state = match source[boundary] {
+        b'>' => SampleLexicalState::OversizedTag,
+        b'<' if matches!(
+            source.get(boundary + 1),
+            Some(b'/') | Some(b'!') | Some(b'?')
+        ) =>
+        {
+            SampleLexicalState::Normal
+        }
+        b'<' => SampleLexicalState::OversizedTag,
+        _ => unreachable!(),
+    };
+    (state, boundary)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1021,7 +1053,7 @@ struct FullIndexWindowSample {
     bytes: usize,
     less_than_count: usize,
     markup_bytes: usize,
-    oversized_tag: bool,
+    lexical_state: SampleLexicalState,
 }
 
 impl FullIndexWindowSample {
@@ -1033,7 +1065,9 @@ impl FullIndexWindowSample {
     }
 
     fn is_markup_heavy(self) -> bool {
-        self.oversized_tag || self.markup_bytes * 100 > self.bytes * FULL_INDEX_MAX_MARKUP_PERCENT
+        self.lexical_state == SampleLexicalState::OversizedTag
+            || (self.lexical_state == SampleLexicalState::Normal
+                && self.markup_bytes * 100 > self.bytes * FULL_INDEX_MAX_MARKUP_PERCENT)
     }
 }
 
@@ -1072,6 +1106,7 @@ fn sample_full_index_windows(
 ) -> FullIndexSample {
     let mut sample = FullIndexSample::default();
     let window_stride = source.len() / FULL_INDEX_SAMPLE_WINDOWS;
+    let mut next_boundary_cache = None;
 
     for window in 0..FULL_INDEX_SAMPLE_WINDOWS {
         let start = window_stride * window;
@@ -1095,8 +1130,15 @@ fn sample_full_index_windows(
             })
             .sum::<usize>();
         if measure_markup {
-            (current.markup_bytes, current.oversized_tag) =
+            (current.markup_bytes, current.lexical_state) =
                 sampled_markup_bytes(source, start, end);
+            if current.lexical_state == SampleLexicalState::Unknown {
+                let (state, boundary) = next_boundary_cache
+                    .filter(|(_, boundary)| *boundary >= start)
+                    .unwrap_or_else(|| resolve_unknown_sample_start(source, start));
+                current.lexical_state = state;
+                next_boundary_cache = Some((state, boundary));
+            }
         }
     }
 
@@ -1751,6 +1793,18 @@ mod tests {
         let text = "x".repeat(256);
         let source =
             format!("<a class=\"hit\" href=\"/item\" data-x=\"yes\">{text}</a>").repeat(5_000);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_full_indexes_multi_kib_text_gaps_when_attributes_matter() {
+        let text = "x".repeat(4 * 1024);
+        let source =
+            format!("<a class=\"hit\" href=\"/item\" data-x=\"yes\">{text}</a>").repeat(32);
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
