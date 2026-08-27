@@ -995,8 +995,6 @@ where
                 && matches!(section_kind, SelectionKind::All)
                 && position.next_child(self.query).is_none();
 
-            let spawned_positions;
-
             match &self.cursors[i].mode {
                 super::cursor::CursorMode::Moving { .. } => {
                     // `save_element` advances the parent for children; restore it
@@ -1063,8 +1061,9 @@ where
                         self.claim_first_scope(position.selection, output_parent, i, depth);
                     }
 
-                    // Child/descendant continuations are skipped for void sources;
-                    // sibling callbacks are still registered via dispatch.
+                    // A terminal All match on a non-void element spawns nothing
+                    // further. Void sources fall through so their sibling
+                    // callbacks are still registered via dispatch.
                     if terminal_all && !self_closing {
                         continue;
                     }
@@ -1082,30 +1081,16 @@ where
                         );
                     }
 
-                    if !terminal_all {
-                        spawned_positions = self.cursors[i].next_positions(self.query);
-                        self.dispatch_sibling_continuations(
-                            runner,
-                            depth,
-                            self_closing,
-                            saved_parent,
-                            &spawned_positions,
-                            sibling_callbacks,
-                            store,
-                        );
-                    } else if self_closing {
-                        // terminal_all on a void element: still allow sibling callbacks.
-                        spawned_positions = self.cursors[i].next_positions(self.query);
-                        self.dispatch_sibling_continuations(
-                            runner,
-                            depth,
-                            true,
-                            saved_parent,
-                            &spawned_positions,
-                            sibling_callbacks,
-                            store,
-                        );
-                    }
+                    let spawned_positions = self.cursors[i].next_positions(self.query);
+                    self.dispatch_sibling_continuations(
+                        runner,
+                        depth,
+                        self_closing,
+                        saved_parent,
+                        &spawned_positions,
+                        sibling_callbacks,
+                        store,
+                    );
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
                     // Anchors never advance to terminal First positions.
@@ -1150,7 +1135,7 @@ where
                             save_hits.push(hit);
                         }
                         // Void sources may still register sibling callbacks.
-                        spawned_positions = self.cursors[i].next_positions(self.query);
+                        let spawned_positions = self.cursors[i].next_positions(self.query);
                         self.dispatch_sibling_continuations(
                             runner,
                             depth,
@@ -1163,7 +1148,7 @@ where
                         continue;
                     }
 
-                    spawned_positions = self.cursors[i].next_positions(self.query);
+                    let spawned_positions = self.cursors[i].next_positions(self.query);
 
                     let saved_parent = if is_save_point {
                         let save_parent = self.cursors[i].parent;

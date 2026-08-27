@@ -781,6 +781,46 @@ mod tests {
     }
 
     #[test]
+    fn specialized_sibling_modes_match_parse_results_across_retirement() {
+        let html = "<main><h1></h1><p id='one'></p><p id='two'></p></main>";
+
+        let all_queries = &[Query::all("h1 ~ p", Save::none()).unwrap().build()];
+        assert!(
+            !QueryMultiplexer::new(all_queries)
+                .features()
+                .has_retiring_runners
+        );
+        let expected_all = parse(html, all_queries).unwrap();
+        let mut all_parser = XHtmlParser::new(QueryMultiplexer::new(all_queries));
+        let mut all_reader = Reader::new(html);
+        while all_parser.next(&mut all_reader) {}
+        assert!(all_parser.selectors.active_set_is_dense());
+        let actual_all = all_parser.matches();
+        assert_eq!(actual_all.get("h1 ~ p").unwrap().count(), 2);
+        assert_eq!(
+            actual_all.get("h1 ~ p").unwrap().count(),
+            expected_all.get("h1 ~ p").unwrap().count()
+        );
+
+        let first_queries = &[Query::first("h1 ~ p", Save::none()).unwrap().build()];
+        assert!(
+            QueryMultiplexer::new(first_queries)
+                .features()
+                .has_retiring_runners
+        );
+        let expected_first = parse(html, first_queries).unwrap();
+        let mut first_parser = XHtmlParser::new(QueryMultiplexer::new(first_queries));
+        let mut first_reader = Reader::new(html);
+        while first_parser.next(&mut first_reader) {}
+        let actual_first = first_parser.matches();
+        assert_eq!(actual_first.get("h1 ~ p").unwrap().count(), 1);
+        assert_eq!(
+            actual_first.get("h1 ~ p").unwrap().count(),
+            expected_first.get("h1 ~ p").unwrap().count()
+        );
+    }
+
+    #[test]
     fn test_basic_html() {
         let mut reader = Reader::new(BASIC_HTML);
 

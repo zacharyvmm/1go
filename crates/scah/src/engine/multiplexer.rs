@@ -385,6 +385,17 @@ where
         reader: &Reader<'html>,
         store: &mut Store<'html, 'query>,
     ) -> bool {
+        if !self.features.has_retiring_runners {
+            debug_assert!(self.active.is_none());
+            for (index, session) in self.runners.iter_mut().enumerate() {
+                let _ = session.back(RunnerId(index), xhtml_element, position, store);
+            }
+            let _ = reader;
+            #[cfg(feature = "bench-internals")]
+            self.track_cursor_stats();
+            return false;
+        }
+
         if let Some(active_ids) = self.active.as_mut() {
             Self::back_sparse(
                 &mut self.runners,
