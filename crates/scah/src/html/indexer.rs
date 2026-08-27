@@ -194,12 +194,11 @@ impl TagIndexer for ScalarTagIndexer {
                     name: position..position,
                 }))
             }
-            None => Some(TagEvent::Open(OpenTagStart {
-                start,
-                name: source.len()..source.len(),
-                attributes_start: source.len(),
-                end_hint: Some(source.len()),
-            })),
+            // A bare or repeated `<` at EOF is incomplete markup, not an
+            // opening element. Returning an empty name would violate the
+            // parser's element-builder contract when a wildcard query asks
+            // for attributes.
+            None => None,
             Some(_) => {
                 let name_start = position;
                 while source
@@ -279,5 +278,12 @@ mod tests {
         };
         assert_eq!(open.name("<hr/>".as_bytes()), "hr");
         assert_eq!(open.finish("<hr/>".as_bytes()), 5);
+    }
+
+    #[test]
+    fn incomplete_open_delimiters_at_eof_are_not_events() {
+        for html in ["<", "hello <", "<<<", "hello < <<"] {
+            assert_eq!(ScalarTagIndexer.next(html.as_bytes(), 0), None, "{html:?}");
+        }
     }
 }

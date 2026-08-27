@@ -115,6 +115,28 @@ dense matching queries, which include repeated result storage, and dense
 name-compatible queries that produce no results, which isolate traversal and
 attribute-checking costs.
 
+## Two-phase production integration
+
+PR #34 integrates the scalar architecture behind an incremental tag-indexer
+interface. Opening tags use a two-phase handoff: discover the name, ask the
+active query cursors whether attributes can matter, and then either tokenize
+attributes or scan directly to the tag end. An earlier version first found the
+end and then tokenized attributes. That version regressed the universal
+attribute case by roughly 26% because it scanned every candidate tag twice.
+
+On the same 10,000-row document, the two-phase scalar parser measured:
+
+| Selector | Before refactor | Two-phase scalar parser | Change |
+|---|---:|---:|---:|
+| `a` | 2.518 ms | 2.219 ms | -11.9% |
+| `a.promoted[href]` | 2.348 ms | 2.055 ms | -12.5% |
+| `[data-index]` | 2.633 ms | 2.590 ms | -1.6% |
+
+This branch is an intermediate layer in the stack. It keeps query preflight
+separate from execution so the tag/attribute handoff remains reviewable. PR #36
+fuses those query-frontier traversals. The `production_query_scaling` benchmark
+is the performance gate for that final fused path.
+
 Run with:
 
 ```sh

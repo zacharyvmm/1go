@@ -1287,6 +1287,21 @@ mod tests {
     }
 
     #[test]
+    fn attribute_query_ignores_incomplete_open_delimiters_at_eof() {
+        let queries = &[Query::all("[data-x]", Save::all()).unwrap().build()];
+
+        for html in ["<", "hello <", "<<<", "<div data-x>text<"] {
+            let store = parse(html, queries).unwrap();
+            let expected = usize::from(html.starts_with("<div "));
+            assert_eq!(
+                store.get("[data-x]").map_or(0, Iterator::count),
+                expected,
+                "{html:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_text_before_first_tag_does_not_break_text_content() {
         let html = "intro<div>Hello</div>";
         let mut reader = Reader::new(html);
