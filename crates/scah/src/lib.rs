@@ -137,9 +137,26 @@ pub mod bench_internals {
     #[cfg(feature = "bench-internals")]
     use crate::engine::multiplexer::QueryMultiplexer;
     #[cfg(feature = "bench-internals")]
+    use crate::html::BlockClassifier;
+    #[cfg(feature = "bench-internals")]
     use crate::store::Store;
     #[cfg(feature = "bench-internals")]
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
+
+    /// Reusable production `<` scanner for delimiter-distance benchmarks.
+    #[cfg(feature = "bench-internals")]
+    #[derive(Debug, Default)]
+    pub struct LessThanScanner {
+        classifier: BlockClassifier,
+    }
+
+    #[cfg(feature = "bench-internals")]
+    impl LessThanScanner {
+        #[inline]
+        pub fn find(&self, source: &[u8], from: usize) -> Option<usize> {
+            self.classifier.find_less_than(source, from)
+        }
+    }
 
     /// Parse HTML and return peak cursor counts with the result store.
     #[cfg(feature = "bench-internals")]

@@ -182,7 +182,7 @@ mod tests {
             ),
         });
 
-        assert!(interest.requires_all());
+        assert!(interest.all);
         assert!(interest.keys.is_empty());
         assert!(!interest.keys.spilled());
     }
