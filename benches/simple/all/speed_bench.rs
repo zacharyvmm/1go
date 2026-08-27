@@ -8,6 +8,12 @@ use std::hint::black_box;
 use tl::ParserOptions;
 
 const QUERY: &str = black_box("a");
+const COMPARISON_SAVE: Save = Save {
+    inner_html: true,
+    raw_text: false,
+    text: true,
+    attributes: true,
+};
 
 fn generate_html(count: usize) -> String {
     let mut html = String::with_capacity(count * 100);
@@ -28,7 +34,7 @@ fn consume_scah_results(store: &scah::Store<'_, '_>) {
         for element in elements {
             black_box(&element.attributes(store));
             black_box(&element.inner_html);
-            black_box(&element.text_content(store));
+            black_box(&element.text(store));
         }
     }
 }
@@ -81,7 +87,7 @@ fn bench_comparison(c: &mut Criterion) {
             },
         );
 
-        let save_text_queries = &[Query::all(QUERY, Save::only_text_content())
+        let save_text_queries = &[Query::all(QUERY, Save::only_text())
             .expect("simple bench selector should parse")
             .build()];
         group.bench_with_input(
@@ -111,7 +117,7 @@ fn bench_comparison(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("scah", size), &content, |b, html| {
             b.iter(|| {
-                let queries = &[Query::all(QUERY, Save::all())
+                let queries = &[Query::all(QUERY, COMPARISON_SAVE)
                     .expect("simple bench selector should parse")
                     .build()];
                 let store = parse(html, queries).unwrap();
@@ -119,7 +125,7 @@ fn bench_comparison(c: &mut Criterion) {
                 for element in store.get(QUERY).unwrap() {
                     black_box(&element.attributes(&store));
                     black_box(&element.inner_html);
-                    black_box(&element.text_content(&store));
+                    black_box(&element.text(&store));
                 }
             })
         });

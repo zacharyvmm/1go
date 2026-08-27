@@ -8,7 +8,7 @@ use lol_html::{HtmlRewriter, Settings, element, text};
 use lxml::HtmlDocument as LxmlDocument;
 #[allow(unused_imports)]
 use scah::Save;
-use scah::{parse, query};
+use scah::{Query, parse};
 use scraper::{Html, Selector};
 use std::error::Error;
 use std::fmt;
@@ -36,6 +36,40 @@ const PRODUCT_XPATH: &str = "//div[@class='product']";
 const PRODUCT_TITLE_XPATH: &str = "//div[@class='product']/h1";
 const PRODUCT_RATING_XPATH: &str = "//div[@class='product']/span[@class='rating']";
 const PRODUCT_DESCRIPTION_XPATH: &str = "//div[@class='product']/p[@class='description']";
+const COMPARISON_SAVE: Save = Save {
+    inner_html: true,
+    raw_text: false,
+    text: true,
+    attributes: true,
+};
+
+fn comparison_all_query() -> Query<'static> {
+    Query::all(PRODUCT_SELECTOR, COMPARISON_SAVE)
+        .unwrap()
+        .then(|product| {
+            Ok([
+                product.first(PRODUCT_TITLE_SELECTOR, COMPARISON_SAVE)?,
+                product.first(PRODUCT_RATING_SELECTOR, COMPARISON_SAVE)?,
+                product.first(PRODUCT_DESCRIPTION_SELECTOR, COMPARISON_SAVE)?,
+            ])
+        })
+        .unwrap()
+        .build()
+}
+
+fn comparison_first_query() -> Query<'static> {
+    Query::first(PRODUCT_SELECTOR, COMPARISON_SAVE)
+        .unwrap()
+        .then(|product| {
+            Ok([
+                product.first(PRODUCT_TITLE_SELECTOR, COMPARISON_SAVE)?,
+                product.first(PRODUCT_RATING_SELECTOR, COMPARISON_SAVE)?,
+                product.first(PRODUCT_DESCRIPTION_SELECTOR, COMPARISON_SAVE)?,
+            ])
+        })
+        .unwrap()
+        .build()
+}
 
 fn bench_nested_all(c: &mut Criterion) {
     let mut group = c.benchmark_group("nested_all_selection_comparison");
@@ -46,19 +80,13 @@ fn bench_nested_all(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("scah", size), &content, |b, html| {
             b.iter(|| {
-                let queries = &[query! {
-                    all("div.product", Save::all()) => {
-                        first("> h1", Save::all()),
-                        first("> span.rating", Save::all()),
-                        first("> p.description", Save::all()),
-                    }
-                }];
-                let store = parse(html, queries).unwrap();
+                let queries = [comparison_all_query()];
+                let store = parse(html, &queries).unwrap();
 
                 for product in store.get(PRODUCT_SELECTOR).unwrap() {
                     black_box(product.attribute(&store, "class"));
                     black_box(product.inner_html);
-                    black_box(product.text_content(&store));
+                    black_box(product.text(&store));
 
                     let title = product
                         .get(&store, PRODUCT_TITLE_SELECTOR)
@@ -66,7 +94,7 @@ fn bench_nested_all(c: &mut Criterion) {
                         .next()
                         .unwrap();
                     black_box(title.inner_html);
-                    black_box(title.text_content(&store));
+                    black_box(title.text(&store));
 
                     let rating = product
                         .get(&store, PRODUCT_RATING_SELECTOR)
@@ -74,7 +102,7 @@ fn bench_nested_all(c: &mut Criterion) {
                         .next()
                         .unwrap();
                     black_box(rating.inner_html);
-                    black_box(rating.text_content(&store));
+                    black_box(rating.text(&store));
 
                     let description = product
                         .get(&store, PRODUCT_DESCRIPTION_SELECTOR)
@@ -82,7 +110,7 @@ fn bench_nested_all(c: &mut Criterion) {
                         .next()
                         .unwrap();
                     black_box(description.inner_html);
-                    black_box(description.text_content(&store));
+                    black_box(description.text(&store));
                 }
             })
         });
@@ -261,19 +289,13 @@ fn bench_nested_first(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("scah", size), &content, |b, html| {
             b.iter(|| {
-                let queries = &[query! {
-                    first("div.product", Save::all()) => {
-                        first("> h1", Save::all()),
-                        first("> span.rating", Save::all()),
-                        first("> p.description", Save::all()),
-                    }
-                }];
-                let store = parse(html, queries).unwrap();
+                let queries = [comparison_first_query()];
+                let store = parse(html, &queries).unwrap();
 
                 let product = store.get(PRODUCT_SELECTOR).unwrap().next().unwrap();
                 black_box(product.attribute(&store, "class"));
                 black_box(product.inner_html);
-                black_box(product.text_content(&store));
+                black_box(product.text(&store));
 
                 let title = product
                     .get(&store, PRODUCT_TITLE_SELECTOR)
@@ -281,7 +303,7 @@ fn bench_nested_first(c: &mut Criterion) {
                     .next()
                     .unwrap();
                 black_box(title.inner_html);
-                black_box(title.text_content(&store));
+                black_box(title.text(&store));
 
                 let rating = product
                     .get(&store, PRODUCT_RATING_SELECTOR)
@@ -289,7 +311,7 @@ fn bench_nested_first(c: &mut Criterion) {
                     .next()
                     .unwrap();
                 black_box(rating.inner_html);
-                black_box(rating.text_content(&store));
+                black_box(rating.text(&store));
 
                 let description = product
                     .get(&store, PRODUCT_DESCRIPTION_SELECTOR)
@@ -297,7 +319,7 @@ fn bench_nested_first(c: &mut Criterion) {
                     .next()
                     .unwrap();
                 black_box(description.inner_html);
-                black_box(description.text_content(&store));
+                black_box(description.text(&store));
             })
         });
 
