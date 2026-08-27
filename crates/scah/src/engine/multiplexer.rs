@@ -5,12 +5,11 @@ use crate::Position;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{QuerySpec, Reader};
+use crate::{QuerySpec, Reader, TextRequirements};
 use smallvec::SmallVec;
 
 pub(crate) struct DocumentPosition {
     pub reader_position: usize,
-    pub text_content_position: usize,
     pub element_depth: crate::engine::DepthSize,
     /// Precomputed by the parser once per open tag so the executor
     /// never calls `XHtmlElement::is_self_closing()` in its hot loop.
@@ -22,7 +21,19 @@ pub(crate) struct SaveHit {
     pub element_id: ElementId,
     pub save_attributes: bool,
     pub save_inner_html: bool,
-    pub save_text_content: bool,
+    pub save_raw_text: bool,
+    pub save_text: bool,
+}
+
+impl SaveHit {
+    /// True when closing the element must finalize deferred content ranges.
+    ///
+    /// `Save::none()` matches still insert into the result store, but they do
+    /// not need a [`crate::html::open_elements::SavedElement`] record.
+    #[inline]
+    pub(crate) fn needs_close_finalization(&self) -> bool {
+        self.save_inner_html || self.save_raw_text || self.save_text
+    }
 }
 
 /// Query work selected while the parser still has only the opening tag name.
@@ -186,10 +197,14 @@ where
         self.track_cursor_stats();
     }
 
-    pub(crate) fn requires_text_content(&self) -> bool {
-        self.runners
-            .iter()
-            .any(|runner| runner.query().requires_text_content())
+    pub(crate) fn text_requirements(&self) -> TextRequirements {
+        let mut req = TextRequirements::default();
+        for runner in &self.runners {
+            let runner_req = runner.query().text_requirements();
+            req.raw_text |= runner_req.raw_text;
+            req.text |= runner_req.text;
+        }
+        req
     }
 
     pub(crate) fn requires_attribute_storage(&self) -> bool {
@@ -763,5 +778,41 @@ mod tests {
 
         let saved_attributes = [Query::all("a", Save::all()).unwrap().build()];
         assert!(QueryMultiplexer::new(&saved_attributes).requires_attribute_parsing());
+    }
+}
+
+#[cfg(test)]
+mod save_hit_tests {
+    use super::SaveHit;
+    use crate::store::ElementId;
+
+    #[test]
+    fn save_none_does_not_need_close_finalization() {
+        let hit = SaveHit {
+            element_id: ElementId::from(0usize),
+            save_attributes: true,
+            save_inner_html: false,
+            save_raw_text: false,
+            save_text: false,
+        };
+        assert!(!hit.needs_close_finalization());
+    }
+
+    #[test]
+    fn any_content_flag_needs_close_finalization() {
+        for (inner, raw, text) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let hit = SaveHit {
+                element_id: ElementId::from(0usize),
+                save_attributes: true,
+                save_inner_html: inner,
+                save_raw_text: raw,
+                save_text: text,
+            };
+            assert!(hit.needs_close_finalization());
+        }
     }
 }

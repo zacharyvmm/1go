@@ -57,7 +57,7 @@ fn flat_descendant_single_element_multiple_ancestors() {
         1,
         "single <a> with multiple <div> ancestors must appear once"
     );
-    assert_eq!(anchors[0].text_content(&store), Some("X"));
+    assert_eq!(anchors[0].text(&store), Some("X"));
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn flat_descendant_deep_nesting_single_leaf() {
     let store = parse_all(html, &["div span"]);
     let spans = elements(&store, "div span");
     assert_eq!(spans.len(), 1, "deeply nested single span must appear once");
-    assert_eq!(spans[0].text_content(&store), Some("deep"));
+    assert_eq!(spans[0].text(&store), Some("deep"));
 }
 
 #[test]
@@ -75,7 +75,7 @@ fn child_combinator_nested_returns_each_direct_child() {
     let store = parse_all(html, &["div > a"]);
     let anchors = elements(&store, "div > a");
     assert_eq!(anchors.len(), 2);
-    let text: Vec<_> = anchors.iter().map(|a| a.text_content(&store)).collect();
+    let text: Vec<_> = anchors.iter().map(|a| a.text(&store)).collect();
     assert!(text.contains(&Some("1")));
     assert!(text.contains(&Some("2")));
 }
@@ -86,7 +86,7 @@ fn flat_descendant_multiple_sections_distinct() {
     let store = parse_all(html, &["section div a"]);
     let anchors = elements(&store, "section div a");
     assert_eq!(anchors.len(), 2);
-    let text: Vec<_> = anchors.iter().map(|a| a.text_content(&store)).collect();
+    let text: Vec<_> = anchors.iter().map(|a| a.text(&store)).collect();
     assert!(text.contains(&Some("A1")));
     assert!(text.contains(&Some("A2")));
 }
@@ -97,7 +97,7 @@ fn then_descendant_dedup_within_parent_scope() {
         r#"<section><div><a id="one">1</a></div><div><div><a id="two">2</a></div></div></section>"#;
     let queries = &[Query::first("section", Save::none())
         .unwrap()
-        .then(|s| Ok([s.all("div a", Save::only_text_content())?]))
+        .then(|s| Ok([s.all("div a", Save::only_text())?]))
         .unwrap()
         .build()];
     let store = parse(html, queries).unwrap();
@@ -106,7 +106,7 @@ fn then_descendant_dedup_within_parent_scope() {
     assert_eq!(sections.len(), 1);
     let anchors: Vec<_> = sections[0].get(&store, "div a").unwrap().collect();
     assert_eq!(anchors.len(), 2, "each <a> once even with nested ancestors");
-    let text: Vec<_> = anchors.iter().map(|a| a.text_content(&store)).collect();
+    let text: Vec<_> = anchors.iter().map(|a| a.text(&store)).collect();
     assert!(text.contains(&Some("1")));
     assert!(text.contains(&Some("2")));
 }
@@ -116,7 +116,7 @@ fn then_same_element_appears_under_each_parent() {
     let html = r#"<div id="outer"><div id="inner"><a>X</a></div></div>"#;
     let queries = &[Query::all("div", Save::none())
         .unwrap()
-        .then(|d| Ok([d.all("a", Save::only_text_content())?]))
+        .then(|d| Ok([d.all("a", Save::only_text())?]))
         .unwrap()
         .build()];
     let store = parse(html, queries).unwrap();
@@ -127,8 +127,8 @@ fn then_same_element_appears_under_each_parent() {
     let inner: Vec<_> = divs[1].get(&store, "a").unwrap().collect();
     assert_eq!(outer.len(), 1, "outer div sees <a> as descendant");
     assert_eq!(inner.len(), 1, "inner div sees <a> as descendant");
-    assert_eq!(outer[0].text_content(&store), Some("X"));
-    assert_eq!(inner[0].text_content(&store), Some("X"));
+    assert_eq!(outer[0].text(&store), Some("X"));
+    assert_eq!(inner[0].text(&store), Some("X"));
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn then_first_completes_per_parent_scope() {
     let html = r#"<div><a>1</a><a>2</a></div><div><a>3</a><a>4</a></div>"#;
     let queries = &[Query::all("div", Save::none())
         .unwrap()
-        .then(|d| Ok([d.first("> a", Save::only_text_content())?]))
+        .then(|d| Ok([d.first("> a", Save::only_text())?]))
         .unwrap()
         .build()];
     let store = parse(html, queries).unwrap();
@@ -152,37 +152,37 @@ fn then_first_completes_per_parent_scope() {
 #[test]
 fn id_presence_attribute_selector() {
     let html = r#"<div id="a">A</div><div>B</div>"#;
-    let store = parse_with_saves(html, &[("div[id]", Save::only_text_content())]);
+    let store = parse_with_saves(html, &[("div[id]", Save::only_text())]);
     let divs = elements(&store, "div[id]");
     assert_eq!(divs.len(), 1);
-    assert_eq!(divs[0].text_content(&store), Some("A"));
+    assert_eq!(divs[0].text(&store), Some("A"));
 }
 
 #[test]
 fn class_presence_attribute_selector() {
     let html = r#"<div class="x">A</div><div>B</div>"#;
-    let store = parse_with_saves(html, &[("div[class]", Save::only_text_content())]);
+    let store = parse_with_saves(html, &[("div[class]", Save::only_text())]);
     let divs = elements(&store, "div[class]");
     assert_eq!(divs.len(), 1);
-    assert_eq!(divs[0].text_content(&store), Some("A"));
+    assert_eq!(divs[0].text(&store), Some("A"));
 }
 
 #[test]
 fn id_exact_attribute_selector() {
     let html = r#"<div id="x">A</div><div id="y">B</div>"#;
-    let store = parse_with_saves(html, &[(r#"div[id="x"]"#, Save::only_text_content())]);
+    let store = parse_with_saves(html, &[(r#"div[id="x"]"#, Save::only_text())]);
     let divs = elements(&store, r#"div[id="x"]"#);
     assert_eq!(divs.len(), 1);
-    assert_eq!(divs[0].text_content(&store), Some("A"));
+    assert_eq!(divs[0].text(&store), Some("A"));
 }
 
 #[test]
 fn class_tilde_attribute_selector() {
     let html = r#"<div class="foo bar">A</div><div class="baz">B</div>"#;
-    let store = parse_with_saves(html, &[(r#"div[class~="foo"]"#, Save::only_text_content())]);
+    let store = parse_with_saves(html, &[(r#"div[class~="foo"]"#, Save::only_text())]);
     let divs = elements(&store, r#"div[class~="foo"]"#);
     assert_eq!(divs.len(), 1);
-    assert_eq!(divs[0].text_content(&store), Some("A"));
+    assert_eq!(divs[0].text(&store), Some("A"));
 }
 
 #[test]
@@ -191,8 +191,8 @@ fn attribute_name_case_insensitive_routing() {
     let store = parse_with_saves(
         html,
         &[
-            ("div[ID]", Save::only_text_content()),
-            ("div[DATA-X]", Save::only_text_content()),
+            ("div[ID]", Save::only_text()),
+            ("div[DATA-X]", Save::only_text()),
         ],
     );
     assert_eq!(elements(&store, "div[ID]").len(), 1);

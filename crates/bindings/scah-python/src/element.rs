@@ -70,7 +70,7 @@ impl PyElement {
         self.store
             .elements
             .get(self.id.index())
-            .and_then(|e| e.text_content(&self.store))
+            .and_then(|e| e.text(&self.store))
     }
 
     pub fn get(&self, query: String) -> PyResult<Vec<PyElement>> {

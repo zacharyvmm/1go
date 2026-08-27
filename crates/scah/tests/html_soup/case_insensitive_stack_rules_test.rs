@@ -13,7 +13,7 @@ use scah::Save;
 #[test]
 fn mixed_case_li_implicitly_closes_previous_li() {
     let html = "<UL><LI>A<LI>B</UL>";
-    let store = parse_with_saves(html, &[("ul li", Save::only_text_content())]);
+    let store = parse_with_saves(html, &[("ul li", Save::only_text())]);
     assert_eq!(texts(&store, "ul li"), vec![Some("A"), Some("B")]);
 }
 
@@ -23,10 +23,7 @@ fn mixed_case_block_tag_closes_open_p() {
     let html = "<P>intro<DIV>block</DIV>";
     let store = parse_with_saves(
         html,
-        &[
-            ("p", Save::only_text_content()),
-            ("div", Save::only_text_content()),
-        ],
+        &[("p", Save::only_text()), ("div", Save::only_text())],
     );
     assert_eq!(texts(&store, "p"), vec![Some("intro")]);
     assert_eq!(texts(&store, "div"), vec![Some("block")]);
@@ -36,7 +33,7 @@ fn mixed_case_block_tag_closes_open_p() {
 #[test]
 fn mixed_case_table_cells_implicitly_close_previous_cell() {
     let html = "<TABLE><TR><TD>A<TD>B</TR></TABLE>";
-    let store = parse_with_saves(html, &[("td", Save::only_text_content())]);
+    let store = parse_with_saves(html, &[("td", Save::only_text())]);
     assert_eq!(texts(&store, "td"), vec![Some("A"), Some("B")]);
 }
 
@@ -44,7 +41,7 @@ fn mixed_case_table_cells_implicitly_close_previous_cell() {
 #[test]
 fn mixed_case_options_implicitly_close_previous_option() {
     let html = "<SELECT><OPTION>A<OPTION>B</SELECT>";
-    let store = parse_with_saves(html, &[("option", Save::only_text_content())]);
+    let store = parse_with_saves(html, &[("option", Save::only_text())]);
     assert_eq!(texts(&store, "option"), vec![Some("A"), Some("B")]);
 }
 
@@ -52,6 +49,6 @@ fn mixed_case_options_implicitly_close_previous_option() {
 #[test]
 fn mixed_case_button_implicitly_closes_previous_button() {
     let html = "<DIV><BUTTON>A<BUTTON>B</DIV>";
-    let store = parse_with_saves(html, &[("button", Save::only_text_content())]);
+    let store = parse_with_saves(html, &[("button", Save::only_text())]);
     assert_eq!(texts(&store, "button"), vec![Some("A"), Some("B")]);
 }

@@ -22,7 +22,7 @@ impl PySave {
     #[staticmethod]
     pub fn only_text_content() -> Self {
         Self {
-            save: Save::only_text_content(),
+            save: Save::only_text(),
         }
     }
 
@@ -49,7 +49,8 @@ impl PySave {
         Self {
             save: Save {
                 inner_html,
-                text_content,
+                raw_text: false,
+                text: text_content,
                 attributes,
             },
         }

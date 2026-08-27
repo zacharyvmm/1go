@@ -1,4 +1,11 @@
-/// Cached, overlapping properties of an HTML tag.
+//! Cached tag properties for the HTML parser and normalized-text extraction.
+//!
+//! Parser behavior and normalized-text behavior are classified separately so
+//! no-text parses pay only for parser semantics. When normalized text is
+//! requested, [`ClassifiedTag::classify`] returns both sets from a single
+//! name lookup.
+
+/// Cached, overlapping properties of an HTML tag required by the parser.
 ///
 /// This is a bit set rather than a single tag enum because one tag can have
 /// several independent parser behaviors. For example, `table` closes an open
@@ -9,6 +16,20 @@
 /// than repeatedly matching or comparing the tag name.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TagFlags(u32);
+
+/// Normalized-text semantics for a tag name.
+///
+/// Only consulted when the parse captures normalized `text`. Kept as a
+/// separate bitset so the parser-only classifier can stay lean.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextTagFlags(u16);
+
+/// Combined parser + text classification from a single name lookup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClassifiedTag {
+    pub parser: TagFlags,
+    pub text: TextTagFlags,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScopeKind {
@@ -40,6 +61,16 @@ impl TagFlags {
     const RAW_TEXTAREA: u32 = 1 << 17;
     const RAW_TITLE: u32 = 1 << 18;
 
+    #[inline]
+    pub(crate) const fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[inline]
+    pub(crate) const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
     pub(crate) const P_MASK: Self = Self(Self::P);
     pub(crate) const BUTTON_MASK: Self = Self(Self::BUTTON);
     pub(crate) const LI_MASK: Self = Self(Self::LI);
@@ -49,6 +80,7 @@ impl TagFlags {
     pub(crate) const TR_MASK: Self = Self(Self::TR);
     pub(crate) const CELL_MASK: Self = Self(Self::CELL);
 
+    /// Parser-only classification. Prefer this on no-text paths.
     #[inline]
     pub fn classify(name: &str) -> Self {
         let flags = Self::classify_lowercase(name);
@@ -76,6 +108,7 @@ impl TagFlags {
 
     #[inline]
     fn classify_lowercase(name: &str) -> Self {
+        // Intentionally mirrors main @ 30750d8: parser semantics only.
         let flags = match name {
             "area" | "base" | "br" | "col" | "embed" | "img" | "input" | "link" | "meta"
             | "param" | "source" | "track" | "wbr" => Self::VOID,
@@ -180,9 +213,189 @@ impl TagFlags {
     }
 }
 
+#[allow(dead_code)]
+impl TextTagFlags {
+    const BLOCK: u16 = 1 << 0;
+    const BREAK: u16 = 1 << 1;
+    const ROW: u16 = 1 << 2;
+    const CELL: u16 = 1 << 3;
+    const SUPPRESSED: u16 = 1 << 4;
+    const PREFORMATTED: u16 = 1 << 5;
+
+    /// Text-only classification. Call only when normalized text is requested.
+    #[inline]
+    pub fn classify(name: &str) -> Self {
+        let flags = Self::classify_lowercase(name);
+        if flags.0 != 0 || !name.as_bytes().iter().any(u8::is_ascii_uppercase) {
+            return flags;
+        }
+        if name.len() > 10 {
+            return Self::default();
+        }
+        let mut lowercase = [0_u8; 10];
+        for (output, input) in lowercase.iter_mut().zip(name.bytes()) {
+            *output = input.to_ascii_lowercase();
+        }
+        let lowercase = unsafe { std::str::from_utf8_unchecked(&lowercase[..name.len()]) };
+        Self::classify_lowercase(lowercase)
+    }
+
+    #[inline]
+    fn classify_lowercase(name: &str) -> Self {
+        let flags = match name {
+            "br" | "hr" => Self::BREAK,
+            "address" | "article" | "aside" | "blockquote" | "div" | "dl" | "fieldset"
+            | "footer" | "form" | "header" | "main" | "nav" | "section" | "h1" | "h2" | "h3"
+            | "h4" | "h5" | "h6" | "p" | "ol" | "ul" | "table" | "li" | "dt" | "dd" | "thead"
+            | "tbody" | "tfoot" | "colgroup" | "caption" | "body" | "details" | "dialog"
+            | "figcaption" | "figure" | "hgroup" | "legend" | "menu" | "search" | "summary" => {
+                Self::BLOCK
+            }
+            "tr" => Self::ROW | Self::BLOCK,
+            "td" | "th" => Self::CELL,
+            "template" | "script" | "style" => Self::SUPPRESSED,
+            "textarea" => Self::PREFORMATTED,
+            "pre" => Self::BLOCK | Self::PREFORMATTED,
+            _ => 0,
+        };
+        Self(flags)
+    }
+
+    #[inline]
+    pub(crate) const fn is_block(self) -> bool {
+        self.0 & Self::BLOCK != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_break(self) -> bool {
+        self.0 & Self::BREAK != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_row(self) -> bool {
+        self.0 & Self::ROW != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_cell(self) -> bool {
+        self.0 & Self::CELL != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_suppressed(self) -> bool {
+        self.0 & Self::SUPPRESSED != 0
+    }
+
+    #[inline]
+    pub(crate) const fn is_preformatted(self) -> bool {
+        self.0 & Self::PREFORMATTED != 0
+    }
+
+    /// Separator queued after this element's content in normalized text.
+    #[inline]
+    #[allow(dead_code)] // mirrored on TextElementFlags for the open-stack close path
+    pub(crate) fn post_text_separator(self) -> Option<super::text_state::PendingSeparator> {
+        use super::text_state::PendingSeparator;
+        if self.is_break() || self.is_block() || self.is_row() {
+            Some(PendingSeparator::LineBreak)
+        } else if self.is_cell() {
+            Some(PendingSeparator::Tab)
+        } else {
+            None
+        }
+    }
+}
+
+impl ClassifiedTag {
+    /// Single lookup returning both parser and text flags.
+    ///
+    /// Use this on normalized-text paths so the tag name is matched once.
+    #[inline]
+    pub fn classify(name: &str) -> Self {
+        let classified = Self::classify_lowercase(name);
+        if classified.parser.0 != 0
+            || classified.text.0 != 0
+            || !name.as_bytes().iter().any(u8::is_ascii_uppercase)
+        {
+            return classified;
+        }
+        if name.len() > 10 {
+            return Self::default();
+        }
+        let mut lowercase = [0_u8; 10];
+        for (output, input) in lowercase.iter_mut().zip(name.bytes()) {
+            *output = input.to_ascii_lowercase();
+        }
+        let lowercase = unsafe { std::str::from_utf8_unchecked(&lowercase[..name.len()]) };
+        Self::classify_lowercase(lowercase)
+    }
+
+    #[inline]
+    fn classify_lowercase(name: &str) -> Self {
+        let (parser, text) = match name {
+            "area" | "base" | "col" | "embed" | "img" | "input" | "link" | "meta" | "param"
+            | "source" | "track" | "wbr" => (TagFlags::VOID, 0),
+            "br" => (TagFlags::VOID, TextTagFlags::BREAK),
+            "hr" => (TagFlags::VOID | TagFlags::CLOSES_P, TextTagFlags::BREAK),
+            "address" | "article" | "aside" | "blockquote" | "div" | "dl" | "fieldset"
+            | "footer" | "form" | "header" | "main" | "nav" | "section" => {
+                (TagFlags::CLOSES_P, TextTagFlags::BLOCK)
+            }
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => (TagFlags::CLOSES_P, TextTagFlags::BLOCK),
+            "p" => (TagFlags::CLOSES_P | TagFlags::P, TextTagFlags::BLOCK),
+            "ol" | "ul" => (
+                TagFlags::CLOSES_P | TagFlags::LIST_BARRIER,
+                TextTagFlags::BLOCK,
+            ),
+            "table" => (
+                TagFlags::CLOSES_P | TagFlags::DEFAULT_BARRIER | TagFlags::TABLE_BARRIER,
+                TextTagFlags::BLOCK,
+            ),
+            "button" => (TagFlags::BUTTON, 0),
+            "li" => (TagFlags::LI, TextTagFlags::BLOCK),
+            "dt" | "dd" => (TagFlags::DT_DD, TextTagFlags::BLOCK),
+            "option" => (TagFlags::OPTION, 0),
+            "optgroup" => (TagFlags::OPTGROUP, 0),
+            "tr" => (
+                TagFlags::TR | TagFlags::TABLE_SCOPE,
+                TextTagFlags::ROW | TextTagFlags::BLOCK,
+            ),
+            "td" | "th" => (
+                TagFlags::CELL | TagFlags::DEFAULT_BARRIER,
+                TextTagFlags::CELL,
+            ),
+            "thead" | "tbody" | "tfoot" | "colgroup" => {
+                (TagFlags::TABLE_SCOPE, TextTagFlags::BLOCK)
+            }
+            "caption" => (TagFlags::TABLE_SCOPE, TextTagFlags::BLOCK),
+            "applet" | "marquee" | "object" => (TagFlags::DEFAULT_BARRIER, 0),
+            "html" => (TagFlags::HTML_TEMPLATE | TagFlags::TABLE_BARRIER, 0),
+            "template" => (
+                TagFlags::HTML_TEMPLATE | TagFlags::TABLE_BARRIER,
+                TextTagFlags::SUPPRESSED,
+            ),
+            "script" => (TagFlags::RAW_SCRIPT, TextTagFlags::SUPPRESSED),
+            "style" => (TagFlags::RAW_STYLE, TextTagFlags::SUPPRESSED),
+            "textarea" => (TagFlags::RAW_TEXTAREA, TextTagFlags::PREFORMATTED),
+            "title" => (TagFlags::RAW_TITLE, 0),
+            "pre" => (
+                TagFlags::CLOSES_P,
+                TextTagFlags::BLOCK | TextTagFlags::PREFORMATTED,
+            ),
+            "body" | "details" | "dialog" | "figcaption" | "figure" | "hgroup" | "legend"
+            | "menu" | "search" | "summary" => (0, TextTagFlags::BLOCK),
+            _ => (0, 0),
+        };
+        Self {
+            parser: TagFlags(parser),
+            text: TextTagFlags(text),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TagFlags;
+    use super::{ClassifiedTag, TagFlags, TextTagFlags};
 
     #[test]
     fn mixed_case_names_have_the_same_classification() {
@@ -199,6 +412,14 @@ mod tests {
                 TagFlags::classify(lowercase),
                 TagFlags::classify(mixed_case)
             );
+            assert_eq!(
+                TextTagFlags::classify(lowercase),
+                TextTagFlags::classify(mixed_case)
+            );
+            assert_eq!(
+                ClassifiedTag::classify(lowercase),
+                ClassifiedTag::classify(mixed_case)
+            );
         }
     }
 
@@ -206,6 +427,70 @@ mod tests {
     fn unknown_names_have_no_flags() {
         assert_eq!(TagFlags::classify("custom-element"), TagFlags::default());
         assert_eq!(TagFlags::classify("CUSTOM-ELEMENT"), TagFlags::default());
+        assert_eq!(
+            TextTagFlags::classify("custom-element"),
+            TextTagFlags::default()
+        );
+        assert_eq!(
+            ClassifiedTag::classify("custom-element"),
+            ClassifiedTag::default()
+        );
+    }
+
+    #[test]
+    fn combined_matches_split_classifiers() {
+        for name in [
+            "div",
+            "p",
+            "br",
+            "hr",
+            "pre",
+            "td",
+            "tr",
+            "script",
+            "style",
+            "template",
+            "textarea",
+            "body",
+            "span",
+            "custom-element",
+            "TABLE",
+        ] {
+            let combined = ClassifiedTag::classify(name);
+            assert_eq!(
+                combined.parser,
+                TagFlags::classify(name),
+                "parser for {name}"
+            );
+            assert_eq!(
+                combined.text,
+                TextTagFlags::classify(name),
+                "text for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_flags_cover_normalized_semantics() {
+        assert!(TextTagFlags::classify("div").is_block());
+        assert!(TextTagFlags::classify("br").is_break());
+        assert!(TextTagFlags::classify("tr").is_row());
+        assert!(TextTagFlags::classify("td").is_cell());
+        assert!(TextTagFlags::classify("script").is_suppressed());
+        assert!(TextTagFlags::classify("pre").is_preformatted());
+        assert!(TextTagFlags::classify("pre").is_block());
+        assert!(TextTagFlags::classify("textarea").is_preformatted());
+        assert!(!TextTagFlags::classify("span").is_block());
+    }
+
+    #[test]
+    fn parser_flags_match_historical_main_semantics() {
+        assert!(TagFlags::classify("br").is_void());
+        assert!(TagFlags::classify("hr").is_void());
+        assert!(TagFlags::classify("hr").closes_open_p());
+        assert!(TagFlags::classify("pre").closes_open_p());
+        assert!(!TagFlags::classify("body").closes_open_p());
+        assert!(!TagFlags::classify("body").is_void());
     }
 
     #[test]

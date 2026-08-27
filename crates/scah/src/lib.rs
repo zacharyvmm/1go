@@ -81,7 +81,7 @@
 //! 4. **[`QueryMultiplexer`]**: Drives one or more query executors against
 //!    the token stream simultaneously.
 //! 5. **[`Store`]**: An arena-based result set that collects matched
-//!    [`Element`]s, their attributes, and (optionally) inner HTML / text content.
+//!    [`Element`]s, their attributes, and (optionally) inner HTML / raw or normalized text.
 //!
 //! ## Supported CSS Selector Syntax
 //!
@@ -118,7 +118,7 @@ pub use scah_query_ir::{
     Attribute, AttributeSelection, AttributeSelectionKind, AttributeSelections, ClassSelections,
     Combinator, ElementPredicate, IElement, Position, Query, QueryBuilder, QueryFactory,
     QuerySection, QuerySectionId, QuerySpec, Save, SelectionKind, SelectorParseError, StaticQuery,
-    Transition, TransitionId,
+    TextRequirements, Transition, TransitionId,
 };
 pub use scah_reader::Reader;
 pub use store::{CapacityOptions, Element, ElementId, Store};
@@ -147,6 +147,8 @@ pub mod bench_internals {
     use crate::html::BlockClassifier;
     #[cfg(feature = "simd-bench-internals")]
     use crate::html::IndexingMode;
+    #[cfg(feature = "bench-internals")]
+    pub use crate::html::TextPathStats;
     #[cfg(any(feature = "bench-internals", feature = "simd-bench-internals"))]
     use crate::store::Store;
     #[cfg(any(feature = "bench-internals", feature = "simd-bench-internals"))]
@@ -401,11 +403,16 @@ mod tests {
             "non-early-exit parse must preallocate element arena"
         );
 
-        // Text content should NOT be reserved when Save::none().
+        // Text buffers should NOT be reserved when Save::none().
         assert_eq!(
-            store.text_content.content.capacity(),
+            store.text.raw_text.capacity(),
             0,
-            "capacity path with Save::none must skip text buffer preallocation"
+            "capacity path with Save::none must skip raw-text buffer preallocation"
+        );
+        assert_eq!(
+            store.text.text.capacity(),
+            0,
+            "capacity path with Save::none must skip normalized-text buffer preallocation"
         );
     }
 
@@ -424,19 +431,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_with_save_text_content_reserves_text_buffer() {
+    fn parse_with_save_text_reserves_text_buffer() {
         let html = "<div>text content here</div>".repeat(5_000);
 
-        let query = Query::all("div", Save::only_text_content())
-            .unwrap()
-            .build();
+        let query = Query::all("div", Save::only_text()).unwrap().build();
         let queries = &[query];
         let store = parse(&html, queries).unwrap();
 
-        // Text content should be preallocated when saving text content.
+        // Normalized text should be preallocated when saving text.
         assert!(
-            store.text_content.content.capacity() > 0,
-            "text buffer must be preallocated when queries need text content"
+            store.text.text.capacity() > 0,
+            "normalized-text buffer must be preallocated when queries need text"
         );
     }
 
@@ -445,15 +450,13 @@ mod tests {
         let html = "<div id=\"hit\">important text</div>".to_string()
             + &"<span>filler</span>".repeat(1_000);
 
-        let query = Query::first("#hit", Save::only_text_content())
-            .unwrap()
-            .build();
+        let query = Query::first("#hit", Save::only_text()).unwrap().build();
         let queries = &[query];
         let store = parse(&html, queries).unwrap();
 
         let hits: Vec<_> = store.get("#hit").unwrap().collect();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].text_content(&store), Some("important text"));
+        assert_eq!(hits[0].text(&store), Some("important text"));
 
         // Early-exit with XHtmlParser::new uses Store::default() with no
         // preallocation, but matches are still recorded correctly.

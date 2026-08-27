@@ -150,9 +150,9 @@ fn test_html_page() {
         r#"<a href="wrong-main">Not selected (main has no red-background class)</a>"#
     );
 
-    assert!(last.text_content(&store).is_some());
+    assert!(last.text(&store).is_some());
     assert_eq!(
-        last.text_content(&store).unwrap(),
+        last.text(&store).unwrap(),
         r#"Not selected (main has no red-background class)"#
     );
 
@@ -172,8 +172,8 @@ fn test_html_page() {
     );
 
     assert_eq!(
-        first.text_content(&store).unwrap(),
-        r#"Link 1 Link 2 Link 3 Not selected (nested in div) No link here"#
+        first.text(&store).unwrap(),
+        "Link 1 Link 2 Link 3\nNot selected (nested in div)\nNo link here"
     );
 }
 
@@ -212,7 +212,7 @@ fn test_html_page_first_anchor_tag_selection() {
         }]
     );
     assert_eq!(a.attribute(&store, "href"), Some("link1"));
-    assert_eq!(a.text_content(&store).unwrap(), "Link 1");
+    assert_eq!(a.text(&store).unwrap(), "Link 1");
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn test_macro_static_query() {
     let static_query = query! {
         all("main > section", Save::all()) => {
             all("> a[href]", Save::all()),
-            first("span", Save::only_text_content()),
+            first("span", Save::only_text()),
         }
     };
     let runtime_query = Query::all("main > section", Save::all())
@@ -284,7 +284,7 @@ fn test_macro_static_query() {
         .then(|ctx| {
             Ok([
                 ctx.all("> a[href]", Save::all())?,
-                ctx.first("span", Save::only_text_content())?,
+                ctx.first("span", Save::only_text())?,
             ])
         })
         .unwrap()
@@ -314,7 +314,7 @@ fn test_macro_query_matches_runtime_query_structure() {
     let static_query = query! {
         all("main > section", Save::all()) => {
             all("> a[href]", Save::all()),
-            first("span", Save::only_text_content()),
+            first("span", Save::only_text()),
         }
     };
     let runtime_query = Query::all("main > section", Save::all())
@@ -322,7 +322,7 @@ fn test_macro_query_matches_runtime_query_structure() {
         .then(|ctx| {
             Ok([
                 ctx.all("> a[href]", Save::all())?,
-                ctx.first("span", Save::only_text_content())?,
+                ctx.first("span", Save::only_text())?,
             ])
         })
         .unwrap()
@@ -358,7 +358,7 @@ fn test_macro_query_matches_runtime_store_contents() {
     let static_query = query! {
         all("main > section", Save::all()) => {
             all("> a[href]", Save::all()),
-            first("span", Save::only_text_content()),
+            first("span", Save::only_text()),
         }
     };
     let runtime_query = Query::all("main > section", Save::all())
@@ -366,7 +366,7 @@ fn test_macro_query_matches_runtime_store_contents() {
         .then(|ctx| {
             Ok([
                 ctx.all("> a[href]", Save::all())?,
-                ctx.first("span", Save::only_text_content())?,
+                ctx.first("span", Save::only_text())?,
             ])
         })
         .unwrap()
@@ -392,7 +392,7 @@ fn test_macro_query_matches_runtime_store_contents() {
                     element.name.to_string(),
                     element.attribute(store, "href").map(str::to_string),
                     element.inner_html.map(str::trim).map(str::to_string),
-                    element.text_content(store).map(str::to_string),
+                    element.text(store).map(str::to_string),
                 )
             })
             .collect()

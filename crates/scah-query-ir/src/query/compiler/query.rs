@@ -49,6 +49,18 @@ impl<'query, Q: QuerySpec<'query>> Iterator for PositionIterator<'query, Q> {
     }
 }
 
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextRequirements {
+    pub raw_text: bool,
+    pub text: bool,
+}
+
+impl TextRequirements {
+    pub fn any(self) -> bool {
+        self.raw_text || self.text
+    }
+}
+
 pub trait QuerySpec<'query> {
     fn states(&self) -> &[Transition<'query>];
     fn queries(&self) -> &[QuerySection<'query>];
@@ -64,10 +76,13 @@ pub trait QuerySpec<'query> {
         })
     }
 
-    fn requires_text_content(&self) -> bool {
-        self.queries()
-            .iter()
-            .any(|section| section.save.text_content)
+    fn text_requirements(&self) -> TextRequirements {
+        let mut req = TextRequirements::default();
+        for section in self.queries() {
+            req.raw_text |= section.save.raw_text;
+            req.text |= section.save.text;
+        }
+        req
     }
 
     fn requires_attribute_storage(&self) -> bool {
