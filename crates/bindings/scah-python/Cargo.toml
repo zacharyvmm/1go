@@ -11,6 +11,6 @@ crate-type = ["cdylib", "rlib"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-scah-core = { package = "scah", path = "../../scah" }
+scah-ffi = { path = "../../scah-ffi" }
 pyo3 = { version = "0.27.2", features = ["abi3-py310"] }
 pyo3-stub-gen = "0.22.1"

@@ -1,64 +1,44 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3_stub_gen::{define_stub_info_gatherer, derive::gen_stub_pyfunction};
 
-use std::sync::Arc;
-
 mod element;
+mod ffi_util;
 mod query;
 mod save;
 
+use crate::element::{PyElement, PyStore};
+use crate::ffi_util::{map_status, string_view};
 use crate::query::{PyQuery, PyQueryBuilder, PyQueryFactory, PyQueryStatic};
 use crate::save::PySave;
-use element::{PyElement, PyStore};
+use scah_ffi::{ScahError, ScahQuery, ScahStore, scah_parse};
 
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn parse(html: String, queries: Vec<PyRef<PyQuery>>) -> PyResult<PyStore> {
-    // SAFETY:
-    // The returned PyStore stores `_html: Arc<String>` alongside the parsed
-    // Store. All string slices inside Store borrow from this String
-    // allocation. Extending the &str lifetime to 'static is sound because
-    // PyStore owns the Arc<String> for at least as long as the Store is
-    // accessible.
-    let html = Arc::new(html);
-    let html_str: &'static str = unsafe { std::mem::transmute(html.as_str()) };
-
-    let mut query_tapes: Vec<Arc<Vec<u8>>> = Vec::with_capacity(queries.len());
-    let mut queries_rs: Vec<scah_core::Query<'static>> = Vec::with_capacity(queries.len());
-    for q in &queries {
-        query_tapes.push(q.tape.clone());
-        queries_rs.push(q.query.clone());
+    if queries.is_empty() {
+        return Err(PyValueError::new_err("parse requires at least one query"));
     }
 
-    // SAFETY:
-    // The `'a: 'query` bound on scah_core::parse requires the query-slice
-    // reference to outlive `'query` (= `'static` here). `queries_rs` is a
-    // local Vec, but the actual query data (`QuerySection::source` strings)
-    // lives in `_query_tapes` (Arc-owned). The slice itself is only read
-    // during parsing; no reference into the Vec's allocation is stored in
-    // the returned Store. The raw-parts coercion satisfies the lifetime
-    // bound without leaking memory.
-    let queries_slice =
-        unsafe { std::slice::from_raw_parts(queries_rs.as_ptr(), queries_rs.len()) };
-    let store = match scah_core::parse(html_str, queries_slice) {
-        Ok(store) => store,
-        Err(scah_core::ParseError::EmptyQueries) => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "parse requires at least one query",
-            ));
-        }
-        Err(scah_core::ParseError::MaximumDepthExceeded) => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "HTML nesting depth exceeds the maximum supported depth",
-            ));
-        }
-    };
+    let ptrs: Vec<*const ScahQuery> = queries
+        .iter()
+        .map(|q| q.handle.as_ptr() as *const ScahQuery)
+        .collect();
 
-    Ok(PyStore {
-        store: Arc::new(store),
-        _html: html,
-        _query_tapes: query_tapes,
-    })
+    let mut out_store: *mut ScahStore = std::ptr::null_mut();
+    let mut out_error: *mut ScahError = std::ptr::null_mut();
+    // SAFETY: query handles remain live; html bytes borrow the local String.
+    let status = unsafe {
+        scah_parse(
+            string_view(&html),
+            ptrs.as_ptr(),
+            ptrs.len(),
+            &mut out_store,
+            &mut out_error,
+        )
+    };
+    map_status(status, out_error)?;
+    PyStore::from_handle(out_store)
 }
 
 #[pymodule]

@@ -1825,7 +1825,7 @@ version = "0.0.21"
 dependencies = [
  "pyo3",
  "pyo3-stub-gen",
- "scah",
+ "scah-ffi",
 ]
 
 [[package]]
