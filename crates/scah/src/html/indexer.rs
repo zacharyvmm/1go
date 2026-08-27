@@ -570,28 +570,9 @@ impl PackedTagIndexer {
         from: usize,
         close_tag: &[u8],
     ) -> Option<usize> {
-        loop {
-            if let Some((index, start)) = self.full_events[self.full_cursor..]
-                .iter()
-                .enumerate()
-                .map(|(offset, event)| (self.full_cursor + offset, event.start()))
-                .skip_while(|(_, start)| *start < from)
-                .find(|(_, start)| raw_text_candidate_matches(source, *start, close_tag))
-            {
-                self.full_cursor = index;
-                return Some(start);
-            }
-            self.full_cursor = self.full_events.len();
-            if self.full_complete {
-                break;
-            }
-            self.refill_full_events(source);
-        }
-
-        // Normal HTML quote rules can swallow the real close when raw text
-        // resembles a malformed opening tag. Rescan this exceptional case
-        // using only exact `<` candidates, then discard the untrustworthy
-        // indexed tail and resume at the real close.
+        // The semantic event stream applies ordinary tag quote rules, which
+        // cannot establish the first literal raw-text terminator. Find that
+        // boundary from exact `<` candidates before consulting the tape.
         let mut stream = FusedMaskStream::new(source, self.classifier);
         let mut position = from;
         let close = loop {
@@ -601,6 +582,30 @@ impl PackedTagIndexer {
             }
             position = candidate + 1;
         };
+
+        // Retain the indexed tail only when it contains the exact earliest
+        // boundary. A tag-like sequence in raw text may otherwise swallow the
+        // close and events immediately after it.
+        loop {
+            while self
+                .full_events
+                .get(self.full_cursor)
+                .is_some_and(|event| event.start() < close)
+            {
+                self.full_cursor += 1;
+            }
+            if let Some(event) = self.full_events.get(self.full_cursor) {
+                if event.start() == close {
+                    return Some(close);
+                }
+                break;
+            }
+            if self.full_complete {
+                break;
+            }
+            self.refill_full_events(source);
+        }
+
         self.full_events.clear();
         self.full_cursor = 0;
         self.full_scan_position = close;
@@ -1300,6 +1305,32 @@ mod tests {
             panic!("expected opening tag after raw text");
         };
         assert_eq!(span.name(bytes), "span");
+    }
+
+    #[test]
+    fn full_document_raw_text_search_uses_the_earliest_literal_close() {
+        let source = format!(
+            "<script>{}<div data=\"</script><span>first</span>\"></script><span>second</span>",
+            "x".repeat(FULL_INDEX_MIN_BYTES)
+        );
+        let bytes = source.as_bytes();
+        let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
+        packed.prepare(bytes);
+
+        let Some(TagEvent::Open(script)) = packed.next(bytes, 0) else {
+            panic!("expected script opening tag");
+        };
+        let close = packed
+            .find_raw_text_close(bytes, script.finish(bytes), "</script")
+            .expect("first literal script close should be found");
+
+        assert_eq!(close, source.find("</script>").unwrap());
+        let after_close = source[close..].find('>').unwrap() + close + 1;
+        let Some(TagEvent::Open(span)) = packed.next(bytes, after_close) else {
+            panic!("expected first span after the raw close");
+        };
+        assert_eq!(span.name(bytes), "span");
+        assert_eq!(&source[span.start..span.finish(bytes)], "<span>");
     }
 
     #[test]

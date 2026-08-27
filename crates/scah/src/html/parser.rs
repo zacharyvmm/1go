@@ -840,6 +840,21 @@ mod tests {
         assert_eq!(store.get("span").unwrap().count(), 1);
     }
 
+    #[test]
+    fn full_index_uses_earliest_literal_raw_close() {
+        for (open, close) in [("script", "script"), ("style", "style")] {
+            let html = format!(
+                "<{open}>{}<div data=\"</{close}><span>first</span>\"></{close}><span>second</span>",
+                "x".repeat(20_000)
+            );
+            let queries = &[Query::all("span", Save::name_only()).unwrap().build()];
+
+            let store = parse(&html, queries).unwrap();
+
+            assert_eq!(store.get("span").unwrap().count(), 2, "raw tag {open}");
+        }
+    }
+
     const BASIC_HTML_WITH_SELF_CLOSING_TAG: &str = r#"
         <html>
             <h1>Hello World</h1>
