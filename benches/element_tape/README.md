@@ -8,8 +8,10 @@ The generated document is attribute-dense and contains four open tags per row.
 Each tape record contains four `u32` source offsets plus flags (20 bytes with
 the current Rust layout). The experiment compares:
 
-- `linear_eager`: one pass, attributes parsed for every open tag;
-- `linear_lazy`: one pass, tag-name rejection before attribute parsing;
+- `streaming_eager`: one byte pass, attributes parsed while advancing to `>`;
+- `streaming_lazy`: one byte pass, with attributes parsed only after a name match;
+- `span_eager`: find `>` first, then revisit every open tag's attributes;
+- `span_lazy`: find `>` first, then revisit attributes after a name match;
 - `tape_eager_fresh`: two passes and a newly allocated tape;
 - `tape_eager_reused`: two passes with retained tape capacity;
 - `tape_lazy_reused`: two passes with retained capacity and deferred attributes;
@@ -25,36 +27,42 @@ handling, query-cursor execution, recovery, and result storage.
 Measured on an Apple M5 with macOS 26.6, using the workspace bench profile
 (optimised, fat LTO), 30 Criterion samples, and a 10,000-row document:
 
-| Selector | Linear eager | Linear lazy | Tape eager fresh | Tape eager reused | Tape lazy reused | Production |
-|---|---:|---:|---:|---:|---:|---:|
-| `a` | 2.111 ms | 1.224 ms | 2.178 ms | 2.131 ms | 1.248 ms | 2.518 ms |
-| `a.promoted[href]` | 2.190 ms | 1.526 ms | 2.270 ms | 2.246 ms | 1.569 ms | 2.348 ms |
-| `[data-index]` | 2.170 ms | 2.162 ms | 2.220 ms | 2.201 ms | 2.181 ms | 2.633 ms |
+| Selector | Streaming eager | Streaming lazy | Span eager | Span lazy | Tape eager fresh | Tape eager reused | Tape lazy reused | Production |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `a` | 1.093 ms | 1.184 ms | 2.146 ms | 1.291 ms | 2.214 ms | 2.206 ms | 1.347 ms | 2.620 ms |
+| `a.promoted[href]` | 1.186 ms | 1.180 ms | 2.255 ms | 1.592 ms | 2.325 ms | 2.308 ms | 1.641 ms | 2.362 ms |
+| `[data-index]` | 1.152 ms | 1.142 ms | 2.235 ms | 2.243 ms | 2.289 ms | 2.283 ms | 2.285 ms | 2.717 ms |
 
-Relative to `linear_eager`:
+The table reports Criterion point estimates. The corresponding 95% confidence
+intervals are available in Criterion's generated report. Differences below one
+percent are treated as ties here unless repeated runs keep their intervals
+separate.
 
-| Selector | Tape eager fresh | Tape eager reused | Tape lazy reused | Linear lazy |
-|---|---:|---:|---:|---:|
-| `a` | +3.2% | +0.9% | -40.9% | -42.0% |
-| `a.promoted[href]` | +3.6% | +2.5% | -28.4% | -30.3% |
-| `[data-index]` | +2.3% | +1.5% | +0.5% | -0.3% |
+Relative to the single-pass streaming control with the same eager or lazy policy:
 
-The lazy tape remained 2.0%, 2.9%, and 0.9% slower than the equivalent lazy
-linear frontend for the three selectors. Reusing allocation saved at most 2.2%
-in the large cases and did not make eager tape parsing beat linear parsing.
+| Selector | Tape eager fresh vs. streaming eager | Tape eager reused vs. streaming eager | Tape lazy reused vs. streaming lazy |
+|---|---:|---:|---:|
+| `a` | +102.6% | +101.8% | +13.8% |
+| `a.promoted[href]` | +96.0% | +94.6% | +39.1% |
+| `[data-index]` | +98.7% | +98.2% | +100.1% |
+
+The earlier `linear_*` controls were actually span-based two-scan
+implementations. Renaming them and adding the streaming controls changes the
+result materially: the scalar tape loses to a true single-pass frontend in all
+three workloads. Retained allocation does not close the gap.
 
 The phase-isolated measurements change how that result should be interpreted:
 
 | 10,000-row phase | Time | Effective input throughput |
 |---|---:|---:|
-| Scalar element indexing | 1.192 ms | 1.73 GiB/s |
-| Consume tape for `a` | 0.047 ms | 44.26 GiB/s |
-| Consume tape for `a.promoted[href]` | 0.344 ms | 6.00 GiB/s |
-| Consume tape for `[data-index]` | 0.973 ms | 2.12 GiB/s |
+| Scalar element indexing | 1.261 ms | 1.64 GiB/s |
+| Consume tape for `a` | 0.047 ms | 44.34 GiB/s |
+| Consume tape for `a.promoted[href]` | 0.348 ms | 5.94 GiB/s |
+| Consume tape for `[data-index]` | 0.969 ms | 2.13 GiB/s |
 
-For selective queries, the scalar indexing pass—not tape consumption—is the
-dominant cost. The small difference between scalar linear and scalar tape paths
-therefore does not predict the result of a genuinely vectorised indexer.
+For selective queries, the scalar indexing pass is still the dominant tape
+cost. That observation motivates a vectorised indexer, but it no longer makes
+the scalar tape competitive with the streaming baseline.
 
 ## Auto-SIMD follow-up
 
@@ -66,63 +74,40 @@ Two portable approaches were added without architecture-specific intrinsics:
    bytes.
 
 The repeated-search version reproduced the short-span failure mode: indexing
-rose from 1.192 ms to 1.869 ms. Each individual search was SIMD accelerated,
+rose from 1.261 ms to 1.867 ms. Each individual search was SIMD accelerated,
 but HTML supplied another quote or tag boundary too quickly to amortise search
 setup.
 
-The dense classifier itself reached 25.6 GiB/s. Inspection of the release
+The dense classifier itself reached 25.9 GiB/s. Inspection of the release
 assembly confirmed 128-bit NEON loads, `cmeq` byte comparisons, vector `orr`,
-and 64-byte vector stores. Complete indexing reached 1.82 GiB/s because the
+and 64-byte vector stores. Complete indexing reached 1.78 GiB/s because the
 subsequent semantic state machine, not classification, became dominant.
 
-At 10,000 rows:
+At 10,000 rows, measured in the same run as the table above:
 
-| Selector | Scalar lazy tape | Dense auto-SIMD lazy tape | Change | Scalar linear lazy |
-|---|---:|---:|---:|---:|
-| `a` | 1.248 ms | 1.173 ms | -6.1% | 1.224 ms |
-| `a.promoted[href]` | 1.569 ms | 1.477 ms | -5.9% | 1.526 ms |
-| `[data-index]` | 2.181 ms | 2.134 ms | -2.1% | 2.162 ms |
+| Selector | Scalar lazy tape | Dense auto-SIMD lazy tape | Streaming lazy |
+|---|---:|---:|---:|
+| `a` | 1.347 ms | 1.193 ms | 1.184 ms |
+| `a.promoted[href]` | 1.641 ms | 1.497 ms | 1.180 ms |
+| `[data-index]` | 2.285 ms | 2.144 ms | 1.142 ms |
 
-This is a useful automatic-SIMD test and it does beat both scalar controls, but
-the one-byte-per-input-byte scratch buffer is deliberately diagnostic. A
-simdjson-style implementation would retain packed structural masks per block so
-the semantic state machine can skip entire non-structural regions without a
-second byte-by-byte pass.
+This automatic-SIMD test beats the scalar tape, but not the true streaming
+control. The one-byte-per-input-byte scratch buffer is deliberately diagnostic.
+A packed-mask implementation could avoid its second byte-by-byte pass, but it
+would still need to recover the remaining tape-write and consume costs.
 
 ## Conclusion
 
 The experiment strongly supports deferred attribute tokenisation. It also shows
-that a scalar element tape cannot beat an equivalent scalar linear frontend,
-because writing and rereading the records adds overhead.
+that a scalar element tape cannot beat an equivalent single-pass streaming
+frontend because writing and rereading the records adds overhead.
 
-It does **not** rule out a SIMD element indexer. On the 10,000-row tag-only case,
-96% of lazy-tape time is the scalar indexing pass; consuming the completed tape
-takes only 47 microseconds. A several-gigabyte-per-second indexer could therefore
-change the end-to-end result substantially. The opportunity shrinks for broad
-attribute selectors because their second pass still approaches one millisecond.
-
-## Production integration follow-up
-
-The scalar architecture was then integrated into Scah behind an incremental
-tag-indexer interface. Opening tags use a two-phase handoff: discover the name,
-ask the active query cursors whether attributes can matter, and then either
-tokenize the attributes or scan straight to the tag end. This is important:
-an earlier integration that first found the end and then tokenized attributes
-regressed the universal-attribute case by roughly 26% because it scanned every
-candidate tag twice.
-
-On the same 10,000-row document, the final scalar production parser measured:
-
-| Selector | Before refactor | Two-phase scalar parser | Change |
-|---|---:|---:|---:|
-| `a` | 2.518 ms | 2.219 ms | -11.9% |
-| `a.promoted[href]` | 2.348 ms | 2.055 ms | -12.5% |
-| `[data-index]` | 2.633 ms | 2.590 ms | -1.6% |
-
-The next useful experiment is a packed-mask NEON indexing backend behind that
-interface. It should preserve incremental delivery and provide cached end hints
-for spans already discovered while classifying a block. Real HTML corpora remain
-necessary before selecting that backend for production.
+It does not rule out a SIMD element indexer. On the 10,000-row tag-only case,
+consuming the completed tape takes only 47 microseconds. Any production design
+still has to beat the full streaming path, not the old span-based control. The
+new `production_query_scaling` group also measures 1, 4, 16, and 64 active
+queries against attribute-dense and attribute-sparse documents so parser-side
+query traversal costs are visible before integration decisions are made.
 
 Run with:
 

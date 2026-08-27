@@ -36,6 +36,8 @@ jobs:
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
       - name: Check cursor-dominance benchmark
         run: cargo bench -p scah-benches --bench speed_bench_cursor_dominance -- --test
+      - name: Check element-tape benchmark
+        run: cargo bench -p scah-benches --bench speed_bench_element_tape -- --test
       - name: Run cursor stats report
         run: cargo run -p scah-cursor-benches --release --bin cursor_stats_report
 
