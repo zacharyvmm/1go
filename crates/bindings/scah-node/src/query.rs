@@ -11,65 +11,18 @@ pub struct JsSave {
     pub inner_html: Option<bool>,
     pub text_content: Option<bool>,
     pub attributes: Option<bool>,
+    pub raw_text: Option<bool>,
+    pub text: Option<bool>,
 }
 
-#[napi]
 impl JsSave {
-    #[napi]
-    pub fn only_inner_html() -> Self {
-        Self {
-            inner_html: Some(true),
-            text_content: Some(false),
-            attributes: Some(true),
-        }
-    }
-
-    #[napi]
-    pub fn only_text_content() -> Self {
-        Self {
-            inner_html: Some(false),
-            text_content: Some(true),
-            attributes: Some(true),
-        }
-    }
-
-    #[napi]
-    pub fn all() -> Self {
-        Self {
-            inner_html: Some(true),
-            text_content: Some(true),
-            attributes: Some(true),
-        }
-    }
-
-    #[napi]
-    pub fn none() -> Self {
+    fn none() -> Self {
         Self {
             inner_html: Some(false),
             text_content: Some(false),
             attributes: Some(true),
-        }
-    }
-
-    #[napi]
-    pub fn name_only() -> Self {
-        Self {
-            inner_html: Some(false),
-            text_content: Some(false),
-            attributes: Some(false),
-        }
-    }
-
-    #[napi]
-    pub fn new(
-        inner_html: Option<bool>,
-        text_content: Option<bool>,
-        attributes: Option<bool>,
-    ) -> Self {
-        Self {
-            inner_html,
-            text_content,
-            attributes,
+            raw_text: Some(false),
+            text: Some(false),
         }
     }
 
@@ -77,8 +30,8 @@ impl JsSave {
         Save {
             inner_html: self.inner_html.unwrap_or(false),
             attributes: self.attributes.unwrap_or(true),
-            raw_text: false,
-            text: self.text_content.unwrap_or(false),
+            raw_text: self.raw_text.unwrap_or(false),
+            text: self.text.or(self.text_content).unwrap_or(false),
         }
     }
 }

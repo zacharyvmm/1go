@@ -26,7 +26,8 @@ type BenchmarkCase = {
 
 type ElementSnapshot = {
   innerHtml?: string | null
-  textContent?: string | null
+  rawText?: string | null
+  text?: string | null
 }
 
 type NestedProductSnapshot = ElementSnapshot & {
@@ -59,12 +60,12 @@ const PRODUCT_HTML = generateProductCatalogHtml(10_000)
 const CASES: Record<string, BenchmarkCase> = {
   scah: {
     all: (html, query) => {
-      const compiledQuery = Query.all(query, { innerHtml: true, textContent: true }).build()
+      const compiledQuery = Query.all(query, { innerHtml: true, rawText: true, text: true }).build()
       const store = parse(html, [compiledQuery])
       return store.get(query) ?? []
     },
     first: (html, query) => {
-      const compiledQuery = Query.first(query, { innerHtml: true, textContent: true }).build()
+      const compiledQuery = Query.first(query, { innerHtml: true, rawText: true, text: true }).build()
       const store = parse(html, [compiledQuery])
       return store.get(query)?.[0] ?? null
     },
@@ -76,7 +77,7 @@ const CASES: Record<string, BenchmarkCase> = {
         .toArray()
         .map((element) => ({
           innerHtml: $(element).html(),
-          textContent: $(element).text(),
+          text: $(element).text(),
         }))
     },
     first: (html, query) => {
@@ -87,7 +88,7 @@ const CASES: Record<string, BenchmarkCase> = {
       }
       return {
         innerHtml: element.html(),
-        textContent: element.text(),
+        text: element.text(),
       }
     },
   },
@@ -128,7 +129,7 @@ const CASES: Record<string, BenchmarkCase> = {
       const elements = Array.from(window.document.getElementsByTagName(query))
       const snapshot = elements.map((element) => ({
         innerHtml: element.innerHTML,
-        textContent: element.textContent,
+        text: element.textContent,
       }))
       window.close()
       return snapshot
@@ -140,7 +141,7 @@ const CASES: Record<string, BenchmarkCase> = {
       const snapshot = element
         ? {
             innerHtml: element.innerHTML,
-            textContent: element.textContent,
+            text: element.textContent,
           }
         : null
       window.close()
@@ -315,6 +316,12 @@ function readElement(element: unknown) {
     if ('innerHtml' in element) {
       void element.innerHtml
     }
+    if ('rawText' in element) {
+      void element.rawText
+    }
+    if ('text' in element) {
+      void element.text
+    }
     if ('textContent' in element) {
       void element.textContent
     }
@@ -329,16 +336,22 @@ function snapshotElement(element: unknown): ElementSnapshot | null {
     return null
   }
 
-  if ('innerHtml' in element || 'textContent' in element) {
+  if ('innerHtml' in element || 'rawText' in element || 'text' in element || 'textContent' in element) {
     return {
       innerHtml:
         'innerHtml' in element && typeof element.innerHtml !== 'undefined'
           ? (element.innerHtml as string | null)
           : null,
-      textContent:
-        'textContent' in element && typeof element.textContent !== 'undefined'
-          ? (element.textContent as string | null)
+      rawText:
+        'rawText' in element && typeof element.rawText !== 'undefined'
+          ? (element.rawText as string | null)
           : null,
+      text:
+        'text' in element && typeof element.text !== 'undefined'
+          ? (element.text as string | null)
+          : 'textContent' in element && typeof element.textContent !== 'undefined'
+            ? (element.textContent as string | null)
+            : null,
     }
   }
 
@@ -348,7 +361,7 @@ function snapshotElement(element: unknown): ElementSnapshot | null {
         'innerHTML' in element && typeof element.innerHTML !== 'undefined'
           ? (element.innerHTML as string | null)
           : null,
-      textContent:
+      text:
         'textContent' in element && typeof element.textContent !== 'undefined'
           ? (element.textContent as string | null)
           : null,
@@ -377,7 +390,8 @@ function snapshotNestedProducts<T>(
     const productSnapshot = snapshotElement(product)
     snapshots.push({
       innerHtml: productSnapshot?.innerHtml ?? null,
-      textContent: productSnapshot?.textContent ?? null,
+      rawText: productSnapshot?.rawText ?? null,
+      text: productSnapshot?.text ?? null,
       title: snapshotElement(selectChild(product, 'h1')),
       rating: snapshotElement(selectChild(product, '.rating')),
       description: snapshotElement(selectChild(product, '.description')),
@@ -432,18 +446,19 @@ function registerWhatwgBenchmarks() {
 function registerNestedBenchmarks() {
   group('Synthetic Nested Query', () => {
     bench('scah', () => {
-      const compiledQuery = Query.all('.product', { innerHtml: true, textContent: true })
+      const compiledQuery = Query.all('.product', { innerHtml: true, rawText: true, text: true })
         .then((product) => [
-          product.first('> h1', { innerHtml: true, textContent: true }),
-          product.first('> .rating', { innerHtml: true, textContent: true }),
-          product.first('> .description', { innerHtml: true, textContent: true }),
+          product.first('> h1', { innerHtml: true, rawText: true, text: true }),
+          product.first('> .rating', { innerHtml: true, rawText: true, text: true }),
+          product.first('> .description', { innerHtml: true, rawText: true, text: true }),
         ])
         .build()
       const store = parse(PRODUCT_HTML, [compiledQuery])
       const products = store.get('.product') ?? []
       const snapshots = products.map((product) => ({
         innerHtml: product.innerHtml,
-        textContent: product.textContent,
+        rawText: product.rawText,
+        text: product.text,
         title: snapshotElement(product.get('> h1')[0]),
         rating: snapshotElement(product.get('> .rating')[0]),
         description: snapshotElement(product.get('> .description')[0]),
@@ -459,18 +474,18 @@ function registerNestedBenchmarks() {
           const node = $(product)
           return {
             innerHtml: node.html(),
-            textContent: node.text(),
+            text: node.text(),
             title: {
               innerHtml: node.children('h1').first().html(),
-              textContent: node.children('h1').first().text(),
+              text: node.children('h1').first().text(),
             },
             rating: {
               innerHtml: node.children('.rating').first().html(),
-              textContent: node.children('.rating').first().text(),
+              text: node.children('.rating').first().text(),
             },
             description: {
               innerHtml: node.children('.description').first().html(),
-              textContent: node.children('.description').first().text(),
+              text: node.children('.description').first().text(),
             },
           }
         })

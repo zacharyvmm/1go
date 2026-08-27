@@ -11,7 +11,8 @@ pub struct JsonElement<'a> {
     pub class: Option<String>,
     pub attributes: Object<'a>,
     pub inner_html: Option<String>,
-    pub text_content: Option<String>,
+    pub raw_text: Option<String>,
+    pub text: Option<String>,
 }
 
 #[napi(js_name = "Element")]
@@ -36,7 +37,8 @@ impl JsElement {
             class: element.class.map(|s| s.to_string()),
             attributes: self.attributes(env)?,
             inner_html: element.inner_html.map(|s| s.to_string()),
-            text_content: element.text(&self.store).map(|s| s.to_string()),
+            raw_text: element.raw_text(&self.store).map(|s| s.to_string()),
+            text: element.text(&self.store).map(|s| s.to_string()),
         };
 
         Ok(json)
@@ -94,7 +96,15 @@ impl JsElement {
     }
 
     #[napi(getter)]
-    pub fn text_content(&self) -> Option<&str> {
+    pub fn raw_text(&self) -> Option<&str> {
+        self.store
+            .elements
+            .get(self.id.index())
+            .and_then(|e| e.raw_text(&self.store))
+    }
+
+    #[napi(getter)]
+    pub fn text(&self) -> Option<&str> {
         self.store
             .elements
             .get(self.id.index())
