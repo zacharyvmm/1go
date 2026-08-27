@@ -1648,6 +1648,7 @@ dependencies = [
  "gungraun",
  "lexbor_css",
  "lol_html",
+ "memchr",
  "rlibxml",
  "scah",
  "scraper",
