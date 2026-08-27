@@ -1,6 +1,6 @@
+use crate::__private::PredicateMetadata;
 #[cfg(test)]
 use crate::ElementPredicate;
-use crate::PredicateMetadata;
 use smallvec::SmallVec;
 
 const INLINE_ATTRIBUTE_KEYS: usize = 4;

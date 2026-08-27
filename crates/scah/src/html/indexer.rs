@@ -11,7 +11,8 @@ const FULL_INDEX_CHUNK_BYTES: usize = 64 * 1024;
 const FULL_INDEX_CHUNK_EVENTS: usize = 2_048;
 const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 64;
-const FULL_INDEX_SAMPLE_BYTES: usize = 4 * 1024;
+const FULL_INDEX_SAMPLE_WINDOWS: usize = 4;
+const FULL_INDEX_SAMPLE_WINDOW_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IndexingMode {
@@ -582,10 +583,29 @@ impl PackedTagIndexer {
             }
             self.full_cursor = self.full_events.len();
             if self.full_complete {
-                return None;
+                break;
             }
             self.refill_full_events(source);
         }
+
+        // Normal HTML quote rules can swallow the real close when raw text
+        // resembles a malformed opening tag. Rescan this exceptional case
+        // using only exact `<` candidates, then discard the untrustworthy
+        // indexed tail and resume at the real close.
+        let mut stream = FusedMaskStream::new(source, self.classifier);
+        let mut position = from;
+        let close = loop {
+            let candidate = stream.find_less_than(position)?;
+            if raw_text_candidate_matches(source, candidate, close_tag) {
+                break candidate;
+            }
+            position = candidate + 1;
+        };
+        self.full_events.clear();
+        self.full_cursor = 0;
+        self.full_scan_position = close;
+        self.full_complete = false;
+        Some(close)
     }
 
     fn masks(&mut self, source: &[u8], base: usize) -> ClassMasks {
@@ -947,19 +967,30 @@ impl AutoTagIndexer {
             return false;
         }
 
-        let sample_len = source.len().min(FULL_INDEX_SAMPLE_BYTES);
-        let complete_blocks = sample_len / SIMD_BLOCK_BYTES;
-        let less_than_count: usize = (0..complete_blocks)
-            .map(|block| {
-                classifier
-                    .classify(source, block * SIMD_BLOCK_BYTES)
-                    .less_than
-                    .count_ones() as usize
+        let stride = source.len() / FULL_INDEX_SAMPLE_WINDOWS;
+        let dense_windows = (0..FULL_INDEX_SAMPLE_WINDOWS)
+            .filter(|&window| {
+                let start = stride * window;
+                let available = source
+                    .len()
+                    .saturating_sub(start)
+                    .min(FULL_INDEX_SAMPLE_WINDOW_BYTES);
+                let bytes = available / SIMD_BLOCK_BYTES * SIMD_BLOCK_BYTES;
+                let end = start + bytes;
+                let less_than_count: usize = (start..end)
+                    .step_by(SIMD_BLOCK_BYTES)
+                    .map(|block_start| {
+                        classifier
+                            .classify(source, block_start)
+                            .less_than
+                            .count_ones() as usize
+                    })
+                    .sum();
+                less_than_count > 0
+                    && bytes < less_than_count.saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG)
             })
-            .sum();
-        let sampled_bytes = complete_blocks * SIMD_BLOCK_BYTES;
-        less_than_count == 0
-            || sampled_bytes / less_than_count.max(1) >= FULL_INDEX_MIN_BYTES_PER_TAG
+            .count();
+        dense_windows * 2 < FULL_INDEX_SAMPLE_WINDOWS
     }
 
     #[cfg(test)]
@@ -1002,6 +1033,8 @@ impl TagIndexer for AutoTagIndexer {
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
         if let Some(indexer) = &mut self.full {
             indexer.next(source, from)
+        } else if let Some(indexer) = &mut self.rolling {
+            indexer.next(source, from)
         } else {
             self.scalar.next(source, from)
         }
@@ -1009,6 +1042,8 @@ impl TagIndexer for AutoTagIndexer {
 
     fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
         if let Some(indexer) = &mut self.full {
+            indexer.finish_open(source, open)
+        } else if let Some(indexer) = &mut self.rolling {
             indexer.finish_open(source, open)
         } else {
             self.scalar.finish_open(source, open)
@@ -1245,6 +1280,29 @@ mod tests {
     }
 
     #[test]
+    fn full_document_raw_text_search_recovers_a_close_swallowed_by_quotes() {
+        let source = format!(
+            "<script>{}const s = \"<div data='unterminated\";</script><span>real</span>",
+            "x".repeat(FULL_INDEX_MIN_BYTES)
+        );
+        let bytes = source.as_bytes();
+        let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
+        packed.prepare(bytes);
+
+        let Some(TagEvent::Open(script)) = packed.next(bytes, 0) else {
+            panic!("expected script opening tag");
+        };
+        let close = packed
+            .find_raw_text_close(bytes, script.finish(bytes), "</script")
+            .expect("real script close should remain discoverable");
+        let after_close = source[close..].find('>').unwrap() + close + 1;
+        let Some(TagEvent::Open(span)) = packed.next(bytes, after_close) else {
+            panic!("expected opening tag after raw text");
+        };
+        assert_eq!(span.name(bytes), "span");
+    }
+
+    #[test]
     fn fused_full_document_events_match_the_scalar_indexer() {
         for source in [
             "plain text without markup",
@@ -1379,6 +1437,20 @@ mod tests {
             panic!("expected indexed opening tag");
         };
         assert_eq!(open.end_hint, Some(6));
+    }
+
+    #[test]
+    fn adaptive_policy_samples_beyond_a_dense_header() {
+        let source = format!(
+            "{}<main>{}</main>",
+            "<div></div>".repeat(500),
+            "ordinary text ".repeat(20_000)
+        );
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
     }
 
     #[test]

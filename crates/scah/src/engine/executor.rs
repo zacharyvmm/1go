@@ -2,7 +2,7 @@ use super::attribute_interest::AttributeInterest;
 use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
 #[cfg(test)]
-use crate::ascii_case_insensitive_hash;
+use crate::__private::ascii_case_insensitive_hash;
 use crate::debug::ScopedCursorReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::{CursorSuppressionReason, CursorTraceKind, TraceEvent, TransitionRejectReason};

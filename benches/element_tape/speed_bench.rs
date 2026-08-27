@@ -1236,6 +1236,16 @@ fn bench_sparse_index_policy(c: &mut Criterion) {
         })
     });
 
+    let first_queries = &[Query::first("span", Save::name_only())
+        .expect("sparse first selector should compile")
+        .build()];
+    group.bench_function("production_parse_first", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&html), black_box(first_queries)).unwrap();
+            black_box(store.get("span").unwrap().count())
+        })
+    });
+
     let mut raw_html = String::with_capacity(4 * 1024 * 1024);
     raw_html.push_str("<script>");
     raw_html.push_str(&"const value = 'ordinary script text';\n".repeat(110_000));

@@ -827,6 +827,19 @@ mod tests {
         assert_eq!(matches[0].inner_html, None);
     }
 
+    #[test]
+    fn full_index_finds_raw_close_after_tag_like_quote_inside_script() {
+        let html = format!(
+            "<script>{}const s = \"<div data='unterminated\";</script><span>real</span>",
+            "x".repeat(20_000)
+        );
+        let queries = &[Query::all("span", Save::name_only()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+
+        assert_eq!(store.get("span").unwrap().count(), 1);
+    }
+
     const BASIC_HTML_WITH_SELF_CLOSING_TAG: &str = r#"
         <html>
             <h1>Hello World</h1>

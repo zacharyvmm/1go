@@ -1,9 +1,10 @@
 use super::attribute_interest::AttributeInterest;
 use super::executor::QueryExecutor;
+use crate::__private::ascii_case_insensitive_hash;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{QuerySpec, Reader, ascii_case_insensitive_hash};
+use crate::{QuerySpec, Reader};
 use smallvec::SmallVec;
 
 pub(crate) struct DocumentPosition {

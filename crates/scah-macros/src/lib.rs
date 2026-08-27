@@ -422,18 +422,7 @@ fn metadata_const_tokens(
         &format!("__SCAH_ATTRIBUTE_NAMES_{index}"),
         Span::call_site(),
     );
-    let mut attribute_names = Vec::new();
-    for attribute in transition.predicate.attributes.as_slice() {
-        if attribute.name.eq_ignore_ascii_case("id")
-            || attribute.name.eq_ignore_ascii_case("class")
-            || attribute_names
-                .iter()
-                .any(|name: &&str| name.eq_ignore_ascii_case(attribute.name))
-        {
-            continue;
-        }
-        attribute_names.push(attribute.name);
-    }
+    let attribute_names = transition.metadata.attribute_names();
     quote! {
         const #ident: &[&'static str] = &[#(#attribute_names),*];
     }
@@ -481,11 +470,11 @@ fn transition_tokens(index: usize, transition: &Transition<'_>) -> proc_macro2::
         ::scah::Transition::new_const(
             #guard,
             #predicate,
-            ::scah::PredicateMetadata::new_const(
+            ::scah::__private::PredicateMetadata::new_const(
                 #name,
                 #needs_id,
                 #needs_class,
-                ::scah::AttributeNames::from_static(#names_ident),
+                ::scah::__private::AttributeNames::from_static(#names_ident),
             ),
         )
     }
