@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_search_uses_scalar_for_short_spans_and_packed_masks_for_long_spans() {
+    fn ordinary_tag_search_does_not_materialize_rolling_masks() {
         let mut packed = PackedTagIndexer::default();
         let short = "short text<a>";
         assert!(matches!(
@@ -658,8 +658,8 @@ mod tests {
             Some(TagEvent::Open(_))
         ));
         assert!(
-            packed.cache_valid,
-            "long search should classify packed blocks"
+            !packed.cache_valid,
+            "ordinary tag search should use the direct less-than classifier"
         );
     }
 }
