@@ -180,6 +180,19 @@ where
                 session.next(runner_index, xhtml_element, position, store, save_hits);
             }
         }
+        #[cfg(any(debug_assertions, test))]
+        if preflight.runner_epoch == self.runner_epoch {
+            for (runner_index, runner) in self.runners.iter().enumerate() {
+                if !preflight.runner_indices.contains(&runner_index) {
+                    runner.trace_name_rejections(
+                        runner_index,
+                        xhtml_element,
+                        position.element_depth,
+                        store,
+                    );
+                }
+            }
+        }
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
         let retains_parsed_attributes = save_hits.iter().any(|hit| {

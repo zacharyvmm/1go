@@ -211,6 +211,42 @@ where
         viable
     }
 
+    #[cfg(any(debug_assertions, test))]
+    pub(crate) fn trace_name_rejections(
+        &self,
+        runner_index: usize,
+        element: &XHtmlElement<'html>,
+        depth: super::DepthSize,
+        store: &mut Store<'html, 'query>,
+    ) {
+        let name_hash = ascii_case_insensitive_hash(element.name);
+        for (cursor_index, cursor) in self.cursors.iter().enumerate() {
+            if !cursor.is_active() {
+                continue;
+            }
+
+            let position = cursor.position;
+            let metadata = &self.predicate_metadata[position.state.index()];
+            if metadata.matches_name(element.name, name_hash) {
+                continue;
+            }
+
+            crate::scah_trace!(
+                store,
+                TraceEvent::TransitionRejected {
+                    runner_index,
+                    cursor: self.trace_kind(cursor_index),
+                    selector: self.query.get_selection(position.selection).source,
+                    element: element.name,
+                    depth,
+                    selection: position.selection,
+                    state: position.state,
+                    reason: TransitionRejectReason::PredicateFailed,
+                }
+            );
+        }
+    }
+
     pub fn save_element(
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner_index: usize,
         tree: &Q,
