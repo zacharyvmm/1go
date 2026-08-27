@@ -1454,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn early_exit_policy_refills_the_rolling_buffer_only_for_long_searches() {
+    fn early_exit_raw_text_search_avoids_a_rolling_mask_buffer() {
         let source = format!("{} </script>", "x".repeat(FULL_INDEX_MIN_BYTES));
         let expected = source.find("</script>").unwrap();
         let mut indexer = AutoTagIndexer::new(IndexingMode::Rolling);
@@ -1466,6 +1466,6 @@ mod tests {
             indexer.find_raw_text_close(source.as_bytes(), 0, "</script"),
             Some(expected)
         );
-        assert!(indexer.rolling_mask_capacity() >= ROLLING_WINDOW_BLOCKS);
+        assert_eq!(indexer.rolling_mask_capacity(), 0);
     }
 }
