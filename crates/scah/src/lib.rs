@@ -14,7 +14,7 @@
 //! | **Familiar API** | CSS selectors including `>` (child) and ` ` (descendant) combinators |
 //! | **Composable queries** | Chain selections with [`QueryBuilder::then`] for hierarchical data extraction |
 //! | **Zero-copy** | Element names, attributes, and inner HTML are `&str` slices into the source |
-//! | **Multi-language** | Rust core with Python and TypeScript/JavaScript bindings |
+//! | **Multi-language** | Rust API, C ABI (`scah-ffi`), and shallow Python/Node wrappers |
 //!
 //! ## Quick Start
 //!
@@ -71,6 +71,19 @@
 //! ```
 //!
 //! ## Architecture
+//!
+//! Binding layers:
+//!
+//! ```text
+//! Rust API
+//!   Native borrowed QueryBuilder and zero-copy Store
+//!
+//! C ABI (scah-ffi)
+//!   Owned opaque handles and explicit lifetime management
+//!
+//! Language bindings
+//!   Shallow wrappers over the C ABI
+//! ```
 //!
 //! Internally, scah is composed of the following layers:
 //!
