@@ -192,7 +192,7 @@ pub mod bench_internals {
         };
 
         let mut reader = Reader::new(html);
-        while parser.next(&mut reader) {}
+        parser.run(&mut reader);
 
         if let Some(err) = parser.take_parse_error() {
             return Err(err);
@@ -317,7 +317,7 @@ where
 
     let mut reader = Reader::new(html);
     parser.trace_parse_started(html.len(), queries.len());
-    while parser.next(&mut reader) {}
+    parser.run(&mut reader);
 
     if let Some(err) = parser.take_parse_error() {
         return Err(err);

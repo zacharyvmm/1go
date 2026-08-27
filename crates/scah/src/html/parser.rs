@@ -115,6 +115,22 @@ where
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
+        if self.selectors.features().has_sibling_queries {
+            self.next_mode::<true>(reader)
+        } else {
+            self.next_mode::<false>(reader)
+        }
+    }
+
+    pub(crate) fn run(&mut self, reader: &mut Reader<'html>) {
+        if self.selectors.features().has_sibling_queries {
+            while self.next_mode::<true>(reader) {}
+        } else {
+            while self.next_mode::<false>(reader) {}
+        }
+    }
+
+    fn next_mode<const SIBLINGS: bool>(&mut self, reader: &mut Reader<'html>) -> bool {
         if self.parse_error.is_some() {
             return false;
         }
@@ -309,14 +325,24 @@ where
                     }
                 );
 
-                self.selectors.next_prepared_into(
-                    &self.element,
-                    &self.position,
-                    &mut self.store,
-                    &mut self.temp_state.save_hits,
-                    &self.temp_state.preflight,
-                    &mut self.temp_state.pending_sibling_callbacks,
-                );
+                if SIBLINGS {
+                    self.selectors.next_with_siblings_into(
+                        &self.element,
+                        &self.position,
+                        &mut self.store,
+                        &mut self.temp_state.save_hits,
+                        &self.temp_state.preflight,
+                        &mut self.temp_state.pending_sibling_callbacks,
+                    );
+                } else {
+                    self.selectors.next_plain_into(
+                        &self.element,
+                        &self.position,
+                        &mut self.store,
+                        &mut self.temp_state.save_hits,
+                        &self.temp_state.preflight,
+                    );
+                }
                 if self.persist_attributes {
                     let attributes_saved = match self.temp_state.save_hits.as_slice() {
                         [] => false,
@@ -331,11 +357,14 @@ where
                 }
                 if is_self_closing {
                     let source_depth = self.position.element_depth;
-                    self.selectors.activate_sibling_callbacks(
-                        &mut self.temp_state.pending_sibling_callbacks,
-                        source_depth,
-                        &mut self.store,
-                    );
+                    if SIBLINGS {
+                        self.selectors.activate_sibling_callbacks(
+                            &self.temp_state.pending_sibling_callbacks,
+                            source_depth,
+                            &mut self.store,
+                        );
+                        self.temp_state.pending_sibling_callbacks.clear();
+                    }
                     early_exit = self.selectors.back(
                         self.element.name,
                         &self.position,
@@ -358,10 +387,12 @@ where
                             self.open_elements.attach_saved(saved_index);
                         }
                     }
-                    self.open_elements.attach_sibling_callbacks(
-                        &mut self.temp_state.pending_sibling_callbacks,
-                        &mut self.temp_state.sibling_callback_arena,
-                    );
+                    if SIBLINGS {
+                        self.open_elements.attach_sibling_callbacks(
+                            &mut self.temp_state.pending_sibling_callbacks,
+                            &mut self.temp_state.sibling_callback_arena,
+                        );
+                    }
                 }
 
                 self.element.clear();
