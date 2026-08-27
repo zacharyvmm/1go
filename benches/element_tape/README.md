@@ -9,7 +9,8 @@ Each tape record contains four `u32` source offsets plus flags (20 bytes with
 the current Rust layout). The experiment compares:
 
 - `streaming_eager`: one byte pass, attributes parsed while advancing to `>`;
-- `streaming_lazy`: one byte pass, with attributes parsed only after a name match;
+- `streaming_lazy`: one byte pass, with attributes parsed only when a name match
+  needs them and otherwise skipped by a forward-only scanner;
 - `span_eager`: find `>` first, then revisit every open tag's attributes;
 - `span_lazy`: find `>` first, then revisit attributes after a name match;
 - `tape_eager_fresh`: two passes and a newly allocated tape;
@@ -29,9 +30,9 @@ Measured on an Apple M5 with macOS 26.6, using the workspace bench profile
 
 | Selector | Streaming eager | Streaming lazy | Span eager | Span lazy | Tape eager fresh | Tape eager reused | Tape lazy reused | Production |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `a` | 1.093 ms | 1.184 ms | 2.146 ms | 1.291 ms | 2.214 ms | 2.206 ms | 1.347 ms | 2.620 ms |
-| `a.promoted[href]` | 1.186 ms | 1.180 ms | 2.255 ms | 1.592 ms | 2.325 ms | 2.308 ms | 1.641 ms | 2.362 ms |
-| `[data-index]` | 1.152 ms | 1.142 ms | 2.235 ms | 2.243 ms | 2.289 ms | 2.283 ms | 2.285 ms | 2.717 ms |
+| `a` | 1.060 ms | 0.864 ms | 2.146 ms | 1.291 ms | 2.199 ms | 2.181 ms | 1.313 ms | 2.620 ms |
+| `a.promoted[href]` | 1.171 ms | 0.946 ms | 2.255 ms | 1.592 ms | 2.292 ms | 2.264 ms | 1.620 ms | 2.362 ms |
+| `[data-index]` | 1.162 ms | 1.125 ms | 2.235 ms | 2.243 ms | 2.283 ms | 2.266 ms | 2.255 ms | 2.717 ms |
 
 The table reports Criterion point estimates. The corresponding 95% confidence
 intervals are available in Criterion's generated report. Differences below one
@@ -42,9 +43,9 @@ Relative to the single-pass streaming control with the same eager or lazy policy
 
 | Selector | Tape eager fresh vs. streaming eager | Tape eager reused vs. streaming eager | Tape lazy reused vs. streaming lazy |
 |---|---:|---:|---:|
-| `a` | +102.6% | +101.8% | +13.8% |
-| `a.promoted[href]` | +96.0% | +94.6% | +39.1% |
-| `[data-index]` | +98.7% | +98.2% | +100.1% |
+| `a` | +107.4% | +105.7% | +52.0% |
+| `a.promoted[href]` | +95.7% | +93.3% | +71.3% |
+| `[data-index]` | +96.5% | +95.0% | +100.4% |
 
 The earlier `linear_*` controls were actually span-based two-scan
 implementations. Renaming them and adding the streaming controls changes the
@@ -87,9 +88,9 @@ At 10,000 rows, measured in the same run as the table above:
 
 | Selector | Scalar lazy tape | Dense auto-SIMD lazy tape | Streaming lazy |
 |---|---:|---:|---:|
-| `a` | 1.347 ms | 1.193 ms | 1.184 ms |
-| `a.promoted[href]` | 1.641 ms | 1.497 ms | 1.180 ms |
-| `[data-index]` | 2.285 ms | 2.144 ms | 1.142 ms |
+| `a` | 1.313 ms | 1.163 ms | 0.864 ms |
+| `a.promoted[href]` | 1.620 ms | 1.467 ms | 0.946 ms |
+| `[data-index]` | 2.255 ms | 2.098 ms | 1.125 ms |
 
 This automatic-SIMD test beats the scalar tape, but not the true streaming
 control. The one-byte-per-input-byte scratch buffer is deliberately diagnostic.
@@ -98,16 +99,21 @@ would still need to recover the remaining tape-write and consume costs.
 
 ## Conclusion
 
-The experiment strongly supports deferred attribute tokenisation. It also shows
-that a scalar element tape cannot beat an equivalent single-pass streaming
-frontend because writing and rereading the records adds overhead.
+The corrected streaming controls support deferred attribute tokenisation. Lazy
+streaming is 18.5% faster for the tag-only selector and 19.2% faster for the
+selective selector. The universal attribute selector is only 3.2% faster
+because every open tag still needs its attributes parsed. The experiment also
+shows that a scalar element tape cannot beat an equivalent single-pass
+streaming frontend because writing and rereading the records adds overhead.
 
 It does not rule out a SIMD element indexer. On the 10,000-row tag-only case,
 consuming the completed tape takes only 47 microseconds. Any production design
 still has to beat the full streaming path, not the old span-based control. The
 new `production_query_scaling` group also measures 1, 4, 16, and 64 active
-queries against attribute-dense and attribute-sparse documents so parser-side
-query traversal costs are visible before integration decisions are made.
+queries against attribute-dense and attribute-sparse documents. It records both
+dense matching queries, which include repeated result storage, and dense
+name-compatible queries that produce no results, which isolate traversal and
+attribute-checking costs.
 
 Run with:
 

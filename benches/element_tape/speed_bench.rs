@@ -682,6 +682,29 @@ fn parse_streaming_attributes(
     result
 }
 
+/// Advance over an attribute list without tokenising it or revisiting bytes.
+/// This intentionally uses the same forward-only quote handling as
+/// `parse_streaming_attributes` so lazy and eager streaming controls differ in
+/// attribute work, not in how expensively they find the end of a tag.
+fn skip_streaming_attributes(bytes: &[u8], cursor: &mut usize) {
+    let mut quote = None;
+
+    while *cursor < bytes.len() {
+        let byte = bytes[*cursor];
+        match quote {
+            Some(delimiter) if byte == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b'>' => {
+                *cursor += 1;
+                break;
+            }
+            None => {}
+        }
+        *cursor += 1;
+    }
+}
+
 fn streaming(html: &str, selector: SelectorCase, eager: bool) -> MatchSummary {
     let bytes = html.as_bytes();
     let mut summary = MatchSummary::default();
@@ -738,7 +761,8 @@ fn streaming(html: &str, selector: SelectorCase, eager: bool) -> MatchSummary {
             cursor = position;
         } else {
             summary.matches += usize::from(matches_name);
-            cursor = find_tag_end(bytes, position);
+            skip_streaming_attributes(bytes, &mut position);
+            cursor = position;
         }
     }
 
@@ -1131,20 +1155,30 @@ fn bench_production_query_scaling(c: &mut Criterion) {
 
     for (shape, html) in [("attribute_dense", dense), ("attribute_sparse", sparse)] {
         group.throughput(Throughput::Bytes(html.len() as u64));
-        for query_count in [1, 4, 16, 64] {
-            let queries = (0..query_count)
-                .map(|_| {
-                    Query::all("a.promoted[href]", Save::none())
-                        .expect("benchmark selector should compile")
-                        .build()
-                })
-                .collect::<Vec<_>>();
-            group.bench_with_input(BenchmarkId::new(shape, query_count), &html, |b, html| {
-                b.iter(|| {
-                    let store = parse(black_box(html), black_box(&queries)).unwrap();
-                    black_box(store.elements.len())
-                })
-            });
+        for (workload, selector) in [
+            ("matching_output", "a.promoted[href]"),
+            ("zero_output", "a.__never_matches__[href]"),
+        ] {
+            for query_count in [1, 4, 16, 64] {
+                let queries = (0..query_count)
+                    .map(|_| {
+                        Query::all(selector, Save::none())
+                            .expect("benchmark selector should compile")
+                            .build()
+                    })
+                    .collect::<Vec<_>>();
+                let parameter = format!("{shape}/{workload}");
+                group.bench_with_input(
+                    BenchmarkId::new(parameter, query_count),
+                    &html,
+                    |b, html| {
+                        b.iter(|| {
+                            let store = parse(black_box(html), black_box(&queries)).unwrap();
+                            black_box(store.elements.len())
+                        })
+                    },
+                );
+            }
         }
     }
     group.finish();
