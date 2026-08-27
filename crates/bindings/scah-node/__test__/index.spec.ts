@@ -181,17 +181,144 @@ test('Save defaults omitted object to false', () => {
   expect(span?.textContent).toBeNull()
 })
 
-test("store remains valid after query object goes out of scope", () => {
-  // Query tapes (selector strings) are owned by the query objects.
-  // This test verifies that dropping the query does not invalidate
-  // the store, because JSStore internally retains _query_tapes.
+test('store remains valid after query object goes out of scope', () => {
+  // Compiled query data is retained by the FFI store handle, so dropping the
+  // JS Query after parse must not invalidate lookups.
   const store = (() => {
-    const q = Query.all("a[href]", { innerHtml: true, textContent: true }).build()
+    const q = Query.all('a[href]', { innerHtml: true, textContent: true }).build()
     return parse("<a href='x'>x</a>", [q])
   })()
 
-  const hits = store.get("a[href]")
+  const hits = store.get('a[href]')
   expect(hits).toHaveLength(1)
-  expect(hits![0].name).toBe("a")
-  expect(hits![0].attributes).toEqual({ href: "x" })
+  expect(hits![0].name).toBe('a')
+  expect(hits![0].attributes).toEqual({ href: 'x' })
+})
+
+test('multi-child then appends all branches', () => {
+  const html = `<main><a href="1">one</a><span>s</span><p>p</p></main>`
+  const query = Query.all('main', { textContent: true })
+    .then((q) => [
+      q.all('a', { textContent: true }),
+      q.all('span', { textContent: true }),
+      q.all('p', { textContent: true }),
+    ])
+    .build()
+  const store = parse(html, [query])
+  const main = store.get('main')!.at(0)!
+  expect(main.get('a')[0].textContent).toBe('one')
+  expect(main.get('span')[0].textContent).toBe('s')
+  expect(main.get('p')[0].textContent).toBe('p')
+})
+
+test('build can be reused without consuming the builder', () => {
+  const builder = Query.all('a', { textContent: true })
+  const q1 = builder.build()
+  const q2 = builder.build()
+  const store1 = parse('<a>1</a>', [q1])
+  const store2 = parse('<a>2</a>', [q2])
+  expect(store1.get('a')![0].textContent).toBe('1')
+  expect(store2.get('a')![0].textContent).toBe('2')
+})
+
+test('element remains valid after store is dropped', () => {
+  const element = (() => {
+    const q = Query.all('a', { textContent: true }).build()
+    const store = parse('<a>hi</a>', [q])
+    return store.get('a')![0]
+  })()
+  expect(element.name).toBe('a')
+  expect(element.textContent).toBe('hi')
+})
+
+test('nested element remains valid after parent list is dropped', () => {
+  const child = (() => {
+    const q = Query.all('div', { textContent: true }).all('a', { textContent: true }).build()
+    const store = parse('<div><a href="nested">n</a></div>', [q])
+    const parents = store.get('div')!
+    return parents[0]!.get('a')[0]!
+  })()
+  expect(child.name).toBe('a')
+  expect(child.getAttribute('href')).toBe('nested')
+})
+
+test('JsonElement typing is exported', () => {
+  // Compile-time shape check via structural typing against the public interface.
+  const q = Query.all('a', { textContent: true }).build()
+  const store = parse('<a id="x" class="c">hi</a>', [q])
+  const json = store.get('a')![0]!.toJson()
+  const typed: import('../index').JsonElement = json
+  expect(typed.name).toBe('a')
+  expect(typed.id).toBe('x')
+  expect(typed.class).toBe('c')
+  expect(typed.textContent).toBe('hi')
+  expect(typed.attributes).toEqual({})
+})
+
+test('selective lookup cardinality', () => {
+  const html =
+    '<s1>x</s1>' +
+    Array.from({ length: 10 }, () => '<s10>x</s10>').join('') +
+    Array.from({ length: 100 }, () => '<a>x</a>').join('')
+  const store = parse(html, [
+    Query.all('s1', { textContent: true }).build(),
+    Query.all('s10', { textContent: true }).build(),
+    Query.all('a', { textContent: true }).build(),
+  ])
+  expect(store.get('s1')).toHaveLength(1)
+  expect(store.get('s10')).toHaveLength(10)
+  expect(store.get('a')).toHaveLength(100)
+})
+
+test('parse with empty queries throws', () => {
+  expect(() => parse('<a></a>', [])).toThrow(/parse requires at least one query/)
+})
+
+test('invalid selector fails at build', () => {
+  expect(() => Query.all('').build()).toThrow()
+})
+
+test('attributes preserve missing versus empty values', () => {
+  const q = Query.all('input', { innerHtml: true, textContent: true }).build()
+  const store = parse('<input disabled value="">', [q])
+  const element = store.get('input')![0]
+  // napi maps Option::None to null and Some("") to "".
+  expect(element.attributes.disabled).toBeNull()
+  expect(element.attributes.value).toBe('')
+})
+
+test('attributes materialize zero to many', () => {
+  const q = Query.all('el', { innerHtml: true, textContent: true }).build()
+
+  expect(parse('<el></el>', [q]).get('el')![0].attributes).toEqual({})
+  expect(parse('<el a="1"></el>', [q]).get('el')![0].attributes).toEqual({ a: '1' })
+
+  const eightAttrs = Array.from({ length: 8 }, (_, i) => `k${i}="v${i}"`).join(' ')
+  expect(parse(`<el ${eightAttrs}></el>`, [q]).get('el')![0].attributes).toEqual(
+    Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`k${i}`, `v${i}`])),
+  )
+
+  const nineAttrs = Array.from({ length: 9 }, (_, i) => `k${i}="v${i}"`).join(' ')
+  expect(parse(`<el ${nineAttrs}></el>`, [q]).get('el')![0].attributes).toEqual(
+    Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, `v${i}`])),
+  )
+
+  const manyAttrs = Array.from({ length: 24 }, (_, i) => `k${i}="v${i}"`).join(' ')
+  expect(parse(`<el ${manyAttrs}></el>`, [q]).get('el')![0].attributes).toEqual(
+    Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`k${i}`, `v${i}`])),
+  )
+})
+
+test('large result collection correctness', () => {
+  const count = 10_000
+  let html = ''
+  for (let i = 0; i < count; i++) {
+    html += `<a href="/${i}">x</a>`
+  }
+  const q = Query.all('a', { textContent: true }).build()
+  const store = parse(html, [q])
+  const hits = store.get('a')
+  expect(hits).toHaveLength(count)
+  expect(hits![0].getAttribute('href')).toBe('/0')
+  expect(hits![count - 1].getAttribute('href')).toBe(`/${count - 1}`)
 })

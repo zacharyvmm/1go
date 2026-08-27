@@ -2,11 +2,11 @@
 /* eslint-disable */
 export declare class Element {
   toJson(): JsonElement
-  get name(): string | null
+  get name(): string
   get className(): string | null
   get id(): string | null
   getAttribute(key: string): string | null
-  get attributes(): object
+  get attributes(): Record<string, string | null>
   get innerHtml(): string | null
   get textContent(): string | null
   get(query: string): Array<Element>
@@ -38,7 +38,7 @@ export declare class QueryFactory {
 export type JsQueryFactory = QueryFactory
 
 export declare class Store {
-  get(query: string): Array<JsElement> | null
+  get(query: string): Array<Element> | null
   get length(): number
 }
 export type JSStore = Store
@@ -47,7 +47,7 @@ export interface JsonElement {
   name: string
   id?: string
   class?: string
-  attributes: object
+  attributes: Record<string, string | null>
   innerHtml?: string
   textContent?: string
 }

@@ -1,4 +1,3 @@
-
 [package]
 authors = ["Zachary McSween Manickchand <contact@zacharymm.com>"]
 edition = "2024"
@@ -11,9 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 napi        = "3.0.0"
 napi-derive = "3.0.0"
-
-  [dependencies.scah]
-  path = "../../scah"
+scah-ffi    = { path = "../../scah-ffi" }
 
 [build-dependencies]
 napi-build = "2"
