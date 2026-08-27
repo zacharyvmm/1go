@@ -74,6 +74,10 @@ impl<'query> AttributeInterest<'query> {
                 .iter()
                 .any(|existing| existing.eq_ignore_ascii_case(key))
             {
+                if self.keys.len() == INLINE_ATTRIBUTE_KEYS {
+                    self.require_all();
+                    return;
+                }
                 self.keys.push(key);
             }
         }
@@ -188,7 +192,7 @@ mod tests {
     #[test]
     fn excess_selected_keys_fall_back_without_spilling() {
         let mut interest = AttributeInterest::default();
-        interest.add_predicate(&ElementPredicate {
+        let predicate = ElementPredicate {
             name: Some("a"),
             id: None,
             classes: ClassSelections::default(),
@@ -202,7 +206,9 @@ mod tests {
                     })
                     .collect::<Vec<_>>(),
             ),
-        });
+        };
+        let metadata = PredicateMetadata::compile(&predicate);
+        interest.add_metadata(&metadata);
 
         assert!(interest.all);
         assert!(interest.keys.is_empty());
