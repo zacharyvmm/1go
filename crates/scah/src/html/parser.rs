@@ -137,6 +137,8 @@ where
         }
 
         let source = reader.source();
+        let mut early_exit = false;
+        let mut open_tag_flags = None;
         let tag = loop {
             let Some(span) = self.indexer.next(source, reader.get_position()) else {
                 reader.advance_to(source.len());
@@ -166,6 +168,26 @@ where
                     let name = open.name(source);
                     self.element.set_name(name);
 
+                    let tag_flags = TagFlags::classify(name);
+                    if tag_flags.can_trigger_implied_close() {
+                        self.open_elements
+                            .prepare_for_open_into(tag_flags, &mut self.temp_state.implied_closes);
+                        if !self.temp_state.implied_closes.is_empty() {
+                            if self.capture_text_content
+                                && self.store.text_content.text_start.is_some()
+                                && let Some(position) =
+                                    self.store.text_content.push(reader, open.start)
+                            {
+                                self.position.text_content_position = position;
+                            }
+                            early_exit = self.drain_implied_closes(
+                                reader,
+                                Some(ImpliedCloseReason::OpenTagRule),
+                                None,
+                            ) || early_exit;
+                        }
+                    }
+
                     self.selectors
                         .prepare_element(name, &mut self.temp_state.preflight);
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
@@ -184,6 +206,7 @@ where
                         self.indexer.finish_open(source, &open)
                     };
                     reader.advance_to(end);
+                    open_tag_flags = Some(tag_flags);
                     break XHtmlTag::Open;
                 }
                 TagEvent::Complete(span) => {
@@ -213,20 +236,15 @@ where
 
         // TODO: register the start
         //reader.next_while(|c| c.is_whitespace());
-        let mut early_exit = false;
-
         match tag {
             XHtmlTag::Open => {
-                let tag = TagFlags::classify(self.element.name);
+                let tag = open_tag_flags.expect("opening tags are classified before preflight");
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
                 }
 
                 self.position.reader_position = tag_start_position;
-                self.open_elements
-                    .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
-                self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
                 self.position.reader_position = reader.get_position();
 
                 let is_self_closing = tag.is_void();
@@ -1148,6 +1166,15 @@ mod tests {
         assert_eq!(items[0].inner_html, Some("One"));
         assert_eq!(items[1].text_content(&store), Some("Two"));
         assert_eq!(items[1].inner_html, Some("Two"));
+    }
+
+    #[test]
+    fn implied_close_preflight_matches_reactivated_attribute_cursor() {
+        let html = "<ul><li data-x='one'>One<li data-x='two'>Two</ul>";
+        let queries = &[Query::all("li[data-x]", Save::name_only()).unwrap().build()];
+
+        let store = parse(html, queries).unwrap();
+        assert_eq!(store.get("li[data-x]").unwrap().count(), 2);
     }
 
     #[test]

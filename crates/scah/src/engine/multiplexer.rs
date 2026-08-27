@@ -172,15 +172,6 @@ where
                     save_hits,
                 );
             }
-            #[cfg(any(debug_assertions, test))]
-            for (runner_index, session) in self.runners.iter_mut().enumerate() {
-                if !preflight.runner_indices.contains(&runner_index) {
-                    // Debug traces intentionally retain predicate-rejection
-                    // events for name-incompatible runners. This loop is
-                    // compiled out of optimized release builds.
-                    session.next(runner_index, xhtml_element, position, store, save_hits);
-                }
-            }
         } else {
             // An implied close can complete and remove a `First` runner after
             // tag-name preflight but before this open tag is executed. That is

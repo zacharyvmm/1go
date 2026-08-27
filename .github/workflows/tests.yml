@@ -32,6 +32,8 @@ jobs:
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
       - name: Test cursor instrumentation
         run: cargo test -p scah --features bench-internals
+      - name: Test optimized implied-close preflight
+        run: cargo test -p scah --release implied_close_preflight_matches_reactivated_attribute_cursor
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
       - name: Check cursor-dominance benchmark

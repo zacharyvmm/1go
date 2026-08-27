@@ -121,6 +121,20 @@ impl TagFlags {
     }
 
     #[inline]
+    pub(crate) const fn can_trigger_implied_close(self) -> bool {
+        self.0
+            & (Self::CLOSES_P
+                | Self::BUTTON
+                | Self::LI
+                | Self::DT_DD
+                | Self::OPTION
+                | Self::OPTGROUP
+                | Self::TR
+                | Self::CELL)
+            != 0
+    }
+
+    #[inline]
     pub(crate) const fn close_scope(self) -> ScopeKind {
         if self.0 & (Self::LI | Self::DT_DD) != 0 {
             ScopeKind::ListItem

@@ -211,7 +211,11 @@ impl PackedTagIndexer {
 
 impl StructuralSearch for PackedTagIndexer {
     fn find_byte(&mut self, source: &[u8], from: usize, needle: u8) -> Option<usize> {
-        self.find_structural_matching(source, from, |byte| byte == needle)
+        if needle == b'<' {
+            self.classifier.find_less_than(source, from)
+        } else {
+            self.find_structural_matching(source, from, |byte| byte == needle)
+        }
     }
 
     fn find_tag_end(&mut self, source: &[u8], from: usize) -> usize {

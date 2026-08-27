@@ -82,6 +82,28 @@ impl BlockClassifier {
             }
         }
     }
+
+    /// Find the next `<` with one backend dispatch for the complete scan.
+    #[inline]
+    pub fn find_less_than(&self, source: &[u8], from: usize) -> Option<usize> {
+        match self.backend {
+            Backend::Scalar => source[from..]
+                .iter()
+                .position(|&byte| byte == b'<')
+                .map(|offset| from + offset),
+            #[cfg(target_arch = "aarch64")]
+            Backend::Neon => {
+                // SAFETY: AArch64 guarantees NEON and the routine bounds every load.
+                unsafe { find_less_than_neon(source, from) }
+            }
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            Backend::Ssse3 => {
+                // SAFETY: construction selected SSSE3 after runtime detection and
+                // the routine bounds every load.
+                unsafe { find_less_than_ssse3(source, from) }
+            }
+        }
+    }
 }
 
 fn classify_scalar(block: &[u8]) -> ClassMasks {
@@ -162,6 +184,51 @@ unsafe fn classify_ssse3(pointer: *const u8) -> ClassMasks {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn find_less_than_neon(source: &[u8], mut position: usize) -> Option<usize> {
+    use std::arch::aarch64::*;
+
+    let needle = vdupq_n_u8(b'<');
+    while position + 16 <= source.len() {
+        // SAFETY: the loop condition guarantees a complete readable block.
+        let bytes = unsafe { vld1q_u8(source.as_ptr().add(position)) };
+        let mask = neon_nonzero_mask(vceqq_u8(bytes, needle));
+        if mask != 0 {
+            return Some(position + mask.trailing_zeros() as usize);
+        }
+        position += 16;
+    }
+    source[position..]
+        .iter()
+        .position(|&byte| byte == b'<')
+        .map(|offset| position + offset)
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "ssse3")]
+unsafe fn find_less_than_ssse3(source: &[u8], mut position: usize) -> Option<usize> {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let needle = _mm_set1_epi8(b'<' as i8);
+    while position + 16 <= source.len() {
+        // SAFETY: the loop condition guarantees a complete readable block.
+        let bytes = unsafe { _mm_loadu_si128(source.as_ptr().add(position).cast()) };
+        let mask = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, needle)) as u16;
+        if mask != 0 {
+            return Some(position + mask.trailing_zeros() as usize);
+        }
+        position += 16;
+    }
+    source[position..]
+        .iter()
+        .position(|&byte| byte == b'<')
+        .map(|offset| position + offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +260,22 @@ mod tests {
             BlockClassifier::default().classify(bytes, 0),
             classify_scalar(bytes)
         );
+    }
+
+    #[test]
+    fn selected_backend_finds_less_than_from_every_offset() {
+        let bytes = b"ordinary > '= text before <tag> and another <tag>";
+        let classifier = BlockClassifier::default();
+        for from in 0..=bytes.len() {
+            let expected = bytes[from..]
+                .iter()
+                .position(|&byte| byte == b'<')
+                .map(|offset| from + offset);
+            assert_eq!(
+                classifier.find_less_than(bytes, from),
+                expected,
+                "from={from}"
+            );
+        }
     }
 }
