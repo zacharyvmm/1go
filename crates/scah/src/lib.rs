@@ -426,7 +426,7 @@ mod tests {
     fn name_only_queries_discard_attributes_when_another_query_saves() {
         let html = "<a href='/kept'>link</a>";
         let queries = &[
-            Query::all("a[data-missing]", Save::name_only())
+            Query::all("a[href='/missing']", Save::name_only())
                 .unwrap()
                 .build(),
             Query::all("a", Save::name_only()).unwrap().build(),

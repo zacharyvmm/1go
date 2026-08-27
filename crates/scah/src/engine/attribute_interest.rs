@@ -1,6 +1,8 @@
 use crate::ElementPredicate;
 use smallvec::SmallVec;
 
+const INLINE_ATTRIBUTE_KEYS: usize = 4;
+
 /// Attribute fields required by the currently active query frontier.
 ///
 /// `all` is used for viable save points because Scah's current result contract
@@ -39,6 +41,10 @@ impl<'query> AttributeInterest<'query> {
                 .iter()
                 .any(|key| key.eq_ignore_ascii_case(attribute.name))
             {
+                if self.keys.len() == INLINE_ATTRIBUTE_KEYS {
+                    self.require_all();
+                    return;
+                }
                 self.keys.push(attribute.name);
             }
         }
@@ -126,5 +132,29 @@ mod tests {
         assert!(interest.includes_class());
         assert!(interest.includes_attribute("anything"));
         assert!(interest.keys.is_empty());
+    }
+
+    #[test]
+    fn excess_selected_keys_fall_back_without_spilling() {
+        let mut interest = AttributeInterest::default();
+        interest.add_predicate(&ElementPredicate {
+            name: Some("a"),
+            id: None,
+            classes: ClassSelections::default(),
+            attributes: AttributeSelections::from(
+                ["href", "target", "rel", "download", "data-id"]
+                    .into_iter()
+                    .map(|name| AttributeSelection {
+                        name,
+                        value: None,
+                        kind: AttributeSelectionKind::Presence,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        });
+
+        assert!(interest.requires_all());
+        assert!(interest.keys.is_empty());
+        assert!(!interest.keys.spilled());
     }
 }
