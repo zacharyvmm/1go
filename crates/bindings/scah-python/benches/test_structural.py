@@ -77,9 +77,9 @@ def parse_scah(html: str):
 
     for product in products:
         out.append((
-            product.get("> h1")[0].text_content,
-            product.get("> .rating")[0].text_content,
-            product.get("> .description")[0].text_content,
+            product.get("> h1")[0].text,
+            product.get("> .rating")[0].text,
+            product.get("> .description")[0].text,
         ))
 
     return out
