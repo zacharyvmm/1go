@@ -1,7 +1,7 @@
 use super::attribute_interest::AttributeInterest;
 use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
-#[cfg(test)]
+#[cfg(any(debug_assertions, test))]
 use crate::__private::ascii_case_insensitive_hash;
 use crate::debug::ScopedCursorReason;
 #[cfg(any(debug_assertions, test))]
@@ -189,8 +189,8 @@ where
             }
 
             let position = cursor.position;
-            let metadata = &self.predicate_metadata[position.state.index()];
-            if metadata.matches_name(element.name, name_hash) {
+            let transition = self.query.get_transition(position.state);
+            if transition.metadata.matches_name(element.name, name_hash) {
                 continue;
             }
 
