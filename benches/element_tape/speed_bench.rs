@@ -1398,6 +1398,40 @@ fn bench_density_crossover(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_density_crossover_by_document_size(c: &mut Criterion) {
+    let queries = &[Query::all("span", Save::name_only())
+        .expect("density selector should compile")
+        .build()];
+    let mut group = c.benchmark_group("full_index_size_crossover");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+
+    for kibibytes in [16_usize, 24, 32, 64] {
+        for padding in [120, 124] {
+            let element_bytes = padding + 13;
+            let elements = (kibibytes * 1024).div_ceil(element_bytes);
+            let html = generate_density_html(elements, padding);
+            assert_eq!(
+                parse(&html, queries).unwrap().get("span").unwrap().count(),
+                elements
+            );
+            group.throughput(Throughput::Bytes(html.len() as u64));
+            group.bench_with_input(
+                BenchmarkId::new(format!("{kibibytes}_kib"), padding),
+                &html,
+                |b, html| {
+                    b.iter(|| {
+                        let store = parse(black_box(html), black_box(queries)).unwrap();
+                        black_box(store.get("span").unwrap().count())
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn generate_long_attribute_html(elements: usize, value_bytes: usize) -> String {
     let value = "x".repeat(value_bytes);
     let mut html = String::with_capacity(elements * (value_bytes + 72));
@@ -1497,6 +1531,35 @@ fn bench_attribute_span_policy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_huge_attribute_policy(c: &mut Criterion) {
+    let value = "x".repeat(64 * 1024);
+    let html = format!("<a data-padding=\"{value}\" data-x=\"yes\">x</a>");
+    let queries = &[Query::all("[data-x]", Save::name_only())
+        .expect("attribute selector should compile")
+        .build()];
+    assert_eq!(
+        parse(&html, queries)
+            .unwrap()
+            .get("[data-x]")
+            .unwrap()
+            .count(),
+        1
+    );
+
+    let mut group = c.benchmark_group("full_index_huge_attribute");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Bytes(html.len() as u64));
+    group.bench_function("64_kib_value", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&html), black_box(queries)).unwrap();
+            black_box(store.get("[data-x]").unwrap().count())
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_element_tape,
@@ -1505,6 +1568,8 @@ criterion_group!(
     bench_sparse_index_policy,
     bench_parser_hot_paths,
     bench_density_crossover,
-    bench_attribute_span_policy
+    bench_density_crossover_by_document_size,
+    bench_attribute_span_policy,
+    bench_huge_attribute_policy
 );
 criterion_main!(benches);

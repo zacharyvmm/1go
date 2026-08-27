@@ -187,16 +187,14 @@ where
             );
         }
         #[cfg(any(debug_assertions, test))]
-        if preflight.runner_epoch == self.runner_epoch {
-            for (runner_index, runner) in self.runners.iter().enumerate() {
-                if !preflight.runner_indices.contains(&runner_index) {
-                    runner.trace_name_rejections(
-                        runner_index,
-                        xhtml_element,
-                        position.element_depth,
-                        store,
-                    );
-                }
+        for (runner_index, runner) in self.runners.iter().enumerate() {
+            if !preflight.runner_indices.contains(&runner_index) {
+                runner.trace_name_rejections(
+                    runner_index,
+                    xhtml_element,
+                    position.element_depth,
+                    store,
+                );
             }
         }
         #[cfg(feature = "bench-internals")]

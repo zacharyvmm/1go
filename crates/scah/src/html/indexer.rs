@@ -12,11 +12,10 @@ const FULL_INDEX_CHUNK_EVENTS: usize = 2_048;
 const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
 const FULL_INDEX_SAMPLE_WINDOWS: usize = 4;
-const FULL_INDEX_DENSITY_WINDOW_BYTES: usize = 512;
+const FULL_INDEX_DENSITY_WINDOW_BYTES: usize = 8 * 1024;
 const FULL_INDEX_MARKUP_WINDOW_BYTES: usize = 1024;
-const FULL_INDEX_REFINED_WINDOW_BYTES: usize = 8 * 1024;
-const FULL_INDEX_REFINEMENT_MARGIN_TAGS: usize = 1;
 const FULL_INDEX_MAX_MARKUP_PERCENT: usize = 50;
+const FULL_INDEX_MAX_SAMPLED_TAG_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IndexingMode {
@@ -954,50 +953,67 @@ impl TagIndexer for PackedTagIndexer {
     }
 }
 
-fn sampled_markup_bytes(sample: &[u8]) -> usize {
-    let mut markup_bytes = 0;
-    let mut tag_start = 0;
-    let mut inside_tag = false;
+fn find_sampled_tag_end(source: &[u8], mut position: usize, limit: usize) -> Option<usize> {
     let mut quote = None;
     let mut backslash_run = 0;
 
-    for (position, &byte) in sample.iter().enumerate() {
-        if !inside_tag {
-            if byte == b'<' {
-                tag_start = position;
-                inside_tag = true;
-                quote = None;
-                backslash_run = 0;
-            }
-            continue;
-        }
-
+    while position < limit {
+        let byte = source[position];
         if let Some(delimiter) = quote {
             if byte == b'\\' {
                 backslash_run += 1;
+                position += 1;
                 continue;
             }
             if byte == delimiter && backslash_run % 2 == 0 {
                 quote = None;
             }
             backslash_run = 0;
-            continue;
-        }
-
-        match byte {
-            b'\'' | b'"' => quote = Some(byte),
-            b'>' => {
-                markup_bytes += position + 1 - tag_start;
-                inside_tag = false;
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'>' => return Some(position + 1),
+                _ => {}
             }
-            _ => {}
         }
+        position += 1;
+    }
+    None
+}
+
+fn sampled_markup_bytes(source: &[u8], start: usize, end: usize) -> (usize, bool) {
+    let mut markup_bytes = 0;
+    let mut position = if start == 0 {
+        0
+    } else {
+        let anchor_start = start.saturating_sub(FULL_INDEX_MAX_SAMPLED_TAG_BYTES);
+        let Some(offset) = source[anchor_start..start]
+            .iter()
+            .rposition(|&byte| byte == b'<')
+        else {
+            // The window may begin inside an exceptionally long attribute value.
+            // Treat an unbounded lexical state as markup-heavy instead of guessing.
+            return (0, true);
+        };
+        anchor_start + offset
+    };
+
+    while position < end {
+        let Some(offset) = source[position..end].iter().position(|&byte| byte == b'<') else {
+            break;
+        };
+        let tag_start = position + offset;
+        let scan_limit = source
+            .len()
+            .min(tag_start + FULL_INDEX_MAX_SAMPLED_TAG_BYTES + 1);
+        let Some(tag_end) = find_sampled_tag_end(source, tag_start + 1, scan_limit) else {
+            return (markup_bytes + end.saturating_sub(tag_start), true);
+        };
+        markup_bytes += end.min(tag_end).saturating_sub(start.max(tag_start));
+        position = tag_end.max(tag_start + 1);
     }
 
-    if inside_tag {
-        markup_bytes += sample.len() - tag_start;
-    }
-    markup_bytes
+    (markup_bytes, false)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1005,17 +1021,10 @@ struct FullIndexWindowSample {
     bytes: usize,
     less_than_count: usize,
     markup_bytes: usize,
+    oversized_tag: bool,
 }
 
 impl FullIndexWindowSample {
-    fn is_near_density_crossover(self) -> bool {
-        self.less_than_count > 0
-            && self.bytes.abs_diff(
-                self.less_than_count
-                    .saturating_mul(FULL_INDEX_MIN_BYTES_PER_TAG),
-            ) <= FULL_INDEX_MIN_BYTES_PER_TAG * FULL_INDEX_REFINEMENT_MARGIN_TAGS
-    }
-
     fn is_dense(self) -> bool {
         self.bytes
             < self
@@ -1024,7 +1033,7 @@ impl FullIndexWindowSample {
     }
 
     fn is_markup_heavy(self) -> bool {
-        self.markup_bytes * 100 > self.bytes * FULL_INDEX_MAX_MARKUP_PERCENT
+        self.oversized_tag || self.markup_bytes * 100 > self.bytes * FULL_INDEX_MAX_MARKUP_PERCENT
     }
 }
 
@@ -1034,12 +1043,6 @@ struct FullIndexSample {
 }
 
 impl FullIndexSample {
-    fn is_near_density_crossover(self) -> bool {
-        self.windows
-            .iter()
-            .any(|window| window.is_near_density_crossover())
-    }
-
     fn should_build_full_index(self, attributes_may_be_parsed: bool) -> bool {
         let dense_windows = self
             .windows
@@ -1072,7 +1075,11 @@ fn sample_full_index_windows(
 
     for window in 0..FULL_INDEX_SAMPLE_WINDOWS {
         let start = window_stride * window;
-        let available = source.len().saturating_sub(start).min(window_bytes);
+        let available = source
+            .len()
+            .saturating_sub(start)
+            .min(window_bytes)
+            .min(window_stride);
         let bytes = available / SIMD_BLOCK_BYTES * SIMD_BLOCK_BYTES;
         let end = start + bytes;
 
@@ -1088,7 +1095,8 @@ fn sample_full_index_windows(
             })
             .sum::<usize>();
         if measure_markup {
-            current.markup_bytes = sampled_markup_bytes(&source[start..end]);
+            (current.markup_bytes, current.oversized_tag) =
+                sampled_markup_bytes(source, start, end);
         }
     }
 
@@ -1141,20 +1149,12 @@ impl AutoTagIndexer {
         } else {
             FULL_INDEX_DENSITY_WINDOW_BYTES
         };
-        let mut sample = sample_full_index_windows(
+        let sample = sample_full_index_windows(
             source,
             classifier,
             sample_window_bytes,
             attributes_may_be_parsed,
         );
-        if sample.is_near_density_crossover() {
-            sample = sample_full_index_windows(
-                source,
-                classifier,
-                FULL_INDEX_REFINED_WINDOW_BYTES,
-                attributes_may_be_parsed,
-            );
-        }
 
         sample.should_build_full_index(attributes_may_be_parsed)
     }
@@ -1700,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_policy_refines_density_at_the_crossover() {
+    fn adaptive_policy_separates_density_at_the_crossover() {
         fn source(padding: usize) -> String {
             let filler = "x".repeat(padding);
             format!("<span>{filler}</span>").repeat(5_000)
@@ -1725,6 +1725,20 @@ mod tests {
             "<a class=\"hit\" href=\"/item\" data-padding=\"{value}\" data-x=\"yes\">x</a>"
         )
         .repeat(5_000);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(!indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_keeps_a_tag_spanning_sample_windows_scalar() {
+        let value = "x".repeat(48 * 1024);
+        let source = format!(
+            "<main>{}<a data-padding=\"{value}\" data-x=\"yes\">x</a></main>",
+            "x".repeat(8 * 1024)
+        );
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
