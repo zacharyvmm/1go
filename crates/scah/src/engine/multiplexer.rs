@@ -80,7 +80,12 @@ pub struct CursorStatsSnapshot {
 }
 
 pub struct QueryMultiplexer<'query, Q> {
+    /// Permanent slots indexed by [`RunnerId`]. Retired runners become `None`
+    /// but never shift or reuse slots while a parse is in progress.
     runners: Runner<'query, Q>,
+    /// Compact index of still-live runners for open/close dispatch.
+    /// Callbacks continue to address `runners` by permanent [`RunnerId`].
+    active_runners: Vec<RunnerId>,
     #[cfg(feature = "bench-internals")]
     cursor_stats: Option<CursorStats>,
 }
@@ -89,21 +94,25 @@ impl<'html, 'query: 'html, Q> QueryMultiplexer<'query, Q>
 where
     Q: QuerySpec<'query>,
 {
-    fn build_runners(queries: &'query [Q]) -> Runner<'query, Q> {
-        queries
+    fn build_runners(queries: &'query [Q]) -> (Runner<'query, Q>, Vec<RunnerId>) {
+        let runners = queries
             .iter()
             .map(|query| Some(QueryExecutor::new(query)))
-            .collect()
+            .collect::<Vec<_>>();
+        let active_runners = (0..runners.len()).map(RunnerId).collect();
+        (runners, active_runners)
     }
 
     #[inline]
     fn all_runners_retired(&self) -> bool {
-        self.runners.iter().all(Option::is_none)
+        self.active_runners.is_empty()
     }
 
     pub fn new(queries: &'query [Q]) -> Self {
+        let (runners, active_runners) = Self::build_runners(queries);
         Self {
-            runners: Self::build_runners(queries),
+            runners,
+            active_runners,
             #[cfg(feature = "bench-internals")]
             cursor_stats: None,
         }
@@ -111,8 +120,10 @@ where
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn new_with_cursor_stats(queries: &'query [Q]) -> Self {
+        let (runners, active_runners) = Self::build_runners(queries);
         Self {
-            runners: Self::build_runners(queries),
+            runners,
+            active_runners,
             cursor_stats: Some(CursorStats::default()),
         }
     }
@@ -123,7 +134,7 @@ where
         self.cursor_stats.is_some()
     }
 
-    /// Update peak cursor counts from the current runner state.
+    /// Update peak cursor counts from currently live executors only.
     #[cfg(feature = "bench-internals")]
     #[inline]
     fn track_cursor_stats(&mut self) {
@@ -131,20 +142,19 @@ where
             return;
         };
 
-        let resident = self
-            .runners
-            .iter()
-            .filter_map(Option::as_ref)
-            .map(|runner| runner.cursors.len())
-            .sum();
-
-        let active = self
-            .runners
-            .iter()
-            .filter_map(Option::as_ref)
-            .flat_map(|runner| runner.cursors.iter())
-            .filter(|cursor| cursor.is_active())
-            .count();
+        let mut resident = 0;
+        let mut active = 0;
+        for runner in self.active_runners.iter().copied() {
+            let session = self.runners[runner.index()]
+                .as_ref()
+                .expect("active runner must occupy its stable slot");
+            resident += session.cursors.len();
+            active += session
+                .cursors
+                .iter()
+                .filter(|cursor| cursor.is_active())
+                .count();
+        }
 
         stats.peak_resident_cursor_slots = stats.peak_resident_cursor_slots.max(resident);
         stats.peak_active_obligations = stats.peak_active_obligations.max(active);
@@ -165,10 +175,13 @@ where
     }
 
     pub(crate) fn requires_text_content(&self) -> bool {
-        self.runners
-            .iter()
-            .filter_map(Option::as_ref)
-            .any(|runner| runner.query().requires_text_content())
+        self.active_runners.iter().any(|runner| {
+            self.runners[runner.index()]
+                .as_ref()
+                .expect("active runner must occupy its stable slot")
+                .query()
+                .requires_text_content()
+        })
     }
 
     pub(crate) fn requires_attribute_storage(&self) -> bool {
@@ -200,10 +213,11 @@ where
         preflight.runner_indices.clear();
         preflight.runner_len = self.runners.len();
         let name_hash = ascii_case_insensitive_hash(name);
-        for (runner_index, runner) in self.runners.iter().enumerate() {
-            let Some(runner) = runner.as_ref() else {
-                continue;
-            };
+        for runner_id in self.active_runners.iter().copied() {
+            let runner_index = runner_id.index();
+            let runner = self.runners[runner_index]
+                .as_ref()
+                .expect("active runner must occupy its stable slot");
             if runner.extend_attribute_interest_for(
                 name,
                 name_hash,
@@ -297,19 +311,27 @@ where
         reader: &Reader<'html>,
         store: &mut Store<'html, 'query>,
     ) -> bool {
-        for (index, slot) in self.runners.iter_mut().enumerate() {
-            let retire = match slot.as_mut() {
-                Some(session) => {
-                    let runner = RunnerId(index);
-                    let significant_close = session.back(runner, xhtml_element, position, store);
-                    // A First runner can exit only after close handling finalizes its winner.
-                    significant_close && session.early_exit()
-                }
-                None => false,
+        // Preserve original query order in `active_runners` so debug traces stay
+        // deterministic; retirement count is small relative to open/close work.
+        let mut active_index = 0;
+        while active_index < self.active_runners.len() {
+            let runner = self.active_runners[active_index];
+
+            let retire = {
+                let session = self.runners[runner.index()]
+                    .as_mut()
+                    .expect("active runner must occupy its stable slot");
+
+                let significant_close = session.back(runner, xhtml_element, position, store);
+                // A First runner can exit only after close handling finalizes its winner.
+                significant_close && session.early_exit()
             };
 
             if retire {
-                *slot = None;
+                self.runners[runner.index()] = None;
+                self.active_runners.remove(active_index);
+            } else {
+                active_index += 1;
             }
         }
         let _ = reader;
@@ -326,6 +348,11 @@ where
     }
 
     #[cfg(test)]
+    pub(crate) fn active_runner_ids(&self) -> &[RunnerId] {
+        &self.active_runners
+    }
+
+    #[cfg(test)]
     pub(crate) fn runner_slot_occupied(&self, runner: RunnerId) -> bool {
         matches!(self.runners.get(runner.index()), Some(Some(_)))
     }
@@ -335,6 +362,18 @@ where
         if let Some(slot) = self.runners.get_mut(runner.index()) {
             *slot = None;
         }
+        if let Some(index) = self
+            .active_runners
+            .iter()
+            .position(|&active| active == runner)
+        {
+            self.active_runners.remove(index);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_runners_retired_for_test(&self) -> bool {
+        self.all_runners_retired()
     }
 
     #[cfg(test)]
@@ -353,7 +392,9 @@ where
 
 #[cfg(test)]
 mod runner_slot_tests {
-    use super::{QueryMultiplexer, RunnerId};
+    use super::{QueryMultiplexer, RunnerId, SiblingCallback};
+    use crate::Position;
+    use crate::store::{ElementId, Store};
     use crate::{Query, Save};
 
     #[test]
@@ -381,6 +422,74 @@ mod runner_slot_tests {
         assert_eq!(mux.runner_query_source(RunnerId(1)), Some("section + p"));
         assert_eq!(mux.runner_query_source(RunnerId(2)), Some("aside + footer"));
         assert_eq!(mux.runner_query_source(RunnerId(0)), None);
+    }
+
+    #[test]
+    fn active_list_removes_only_retired_runner() {
+        let queries = [
+            Query::first("h1", Save::none()).unwrap().build(),
+            Query::all("section + p", Save::none()).unwrap().build(),
+            Query::all("aside + footer", Save::none()).unwrap().build(),
+        ];
+        let mut mux = QueryMultiplexer::new(&queries);
+
+        assert_eq!(
+            mux.active_runner_ids(),
+            &[RunnerId(0), RunnerId(1), RunnerId(2)]
+        );
+
+        mux.retire_runner_for_test(RunnerId(1));
+
+        assert_eq!(mux.active_runner_ids(), &[RunnerId(0), RunnerId(2)]);
+        assert_eq!(mux.runner_slot_count(), 3);
+        assert!(!mux.runner_slot_occupied(RunnerId(1)));
+        assert!(mux.runner_slot_occupied(RunnerId(2)));
+        assert_eq!(mux.runner_query_source(RunnerId(2)), Some("aside + footer"));
+    }
+
+    #[test]
+    fn callback_to_retired_runner_is_ignored() {
+        let queries = [
+            Query::first("h1", Save::none()).unwrap().build(),
+            Query::all("section + p", Save::none()).unwrap().build(),
+        ];
+        let mut mux = QueryMultiplexer::new(&queries);
+        let mut store = Store::with_capacity(0);
+
+        mux.retire_runner_for_test(RunnerId(0));
+
+        mux.activate_sibling_callback(
+            SiblingCallback {
+                runner: RunnerId(0),
+                output_parent: ElementId(0),
+                continuation: Position {
+                    selection: crate::QuerySectionId(0),
+                    state: crate::TransitionId(0),
+                },
+            },
+            0,
+            &mut store,
+        );
+
+        assert!(!mux.runner_slot_occupied(RunnerId(0)));
+        assert!(mux.runner_slot_occupied(RunnerId(1)));
+        assert_eq!(store.elements.len(), 0);
+    }
+
+    #[test]
+    fn all_runners_retired_when_active_list_empty() {
+        let queries = [
+            Query::first("h1", Save::none()).unwrap().build(),
+            Query::first("p", Save::none()).unwrap().build(),
+        ];
+        let mut mux = QueryMultiplexer::new(&queries);
+
+        assert!(!mux.all_runners_retired_for_test());
+        mux.retire_runner_for_test(RunnerId(0));
+        assert!(!mux.all_runners_retired_for_test());
+        mux.retire_runner_for_test(RunnerId(1));
+        assert!(mux.active_runner_ids().is_empty());
+        assert!(mux.all_runners_retired_for_test());
     }
 }
 
