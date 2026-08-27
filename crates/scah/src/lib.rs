@@ -402,17 +402,39 @@ mod tests {
 
     #[test]
     fn name_only_capture_matches_attributes_without_storing_them() {
-        let html = "<a id='hero' class='promoted' href='/kept'>link</a>";
+        let html = concat!(
+            "<a id='one' class='promoted' href='/one'>one</a>",
+            "<a id='two' class='promoted' href='/two'>two</a>",
+            "<a id='three' class='promoted' href='/three'>three</a>"
+        );
         let queries = &[Query::all("a.promoted[href]", Save::name_only())
             .unwrap()
             .build()];
 
         let store = parse(html, queries).unwrap();
-        let anchor = store.get("a.promoted[href]").unwrap().next().unwrap();
+        let anchors = store.get("a.promoted[href]").unwrap().collect::<Vec<_>>();
+        assert_eq!(anchors.len(), 3);
+        let anchor = anchors[0];
         assert_eq!(anchor.name, "a");
         assert_eq!(anchor.id, None);
         assert_eq!(anchor.class, None);
         assert_eq!(anchor.attributes(&store), None);
+        assert_eq!(store.attributes.len(), 0);
+    }
+
+    #[test]
+    fn name_only_queries_discard_attributes_when_another_query_saves() {
+        let html = "<a href='/kept'>link</a>";
+        let queries = &[
+            Query::all("a[data-missing]", Save::name_only())
+                .unwrap()
+                .build(),
+            Query::all("a", Save::name_only()).unwrap().build(),
+        ];
+
+        let store = parse(html, queries).unwrap();
+        assert_eq!(store.get("a").unwrap().count(), 1);
+        assert_eq!(store.attributes.len(), 0);
     }
 
     #[test]

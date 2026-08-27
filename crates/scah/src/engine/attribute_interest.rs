@@ -50,6 +50,11 @@ impl<'query> AttributeInterest<'query> {
     }
 
     #[inline]
+    pub fn requires_all(&self) -> bool {
+        self.all
+    }
+
+    #[inline]
     pub fn includes_id(&self) -> bool {
         self.all || self.id
     }

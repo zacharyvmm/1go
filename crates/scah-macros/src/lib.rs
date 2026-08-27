@@ -94,6 +94,16 @@ fn parse_kind(input: ParseStream<'_>) -> Result<SelectionKind> {
 }
 
 fn parse_save_expr(expr: &Expr) -> Result<Save> {
+    if let Expr::MethodCall(call) = expr {
+        if call.method == "without_attributes" && call.args.is_empty() {
+            return Ok(parse_save_expr(&call.receiver)?.without_attributes());
+        }
+        return Err(syn::Error::new_spanned(
+            expr,
+            "unsupported Save modifier in query!",
+        ));
+    }
+
     let Expr::Call(call) = expr else {
         return Err(syn::Error::new_spanned(
             expr,
@@ -362,6 +372,16 @@ mod tests {
         assert_eq!(
             parse_save_expr(&expression).unwrap(),
             scah_query_ir::Save::name_only()
+        );
+    }
+
+    #[test]
+    fn accepts_without_attributes_save_modifier() {
+        let expression =
+            syn::parse_str::<Expr>("Save::only_text_content().without_attributes()").unwrap();
+        assert_eq!(
+            parse_save_expr(&expression).unwrap(),
+            scah_query_ir::Save::only_text_content().without_attributes()
         );
     }
 }
