@@ -196,6 +196,20 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     /// }
     /// ```
     pub fn get(&'html self, query: &str) -> Option<impl Iterator<Item = &'html Element<'html>>> {
+        self.result_meta(query)
+            .map(|(first, _)| self.elements.iter_from(first))
+    }
+
+    /// Resolve the first match id and length for `query` in O(number of query
+    /// nodes), without walking the result linked list.
+    ///
+    /// Returns `None` when the selector has no stored matches.
+    pub fn result_meta(&self, query: &str) -> Option<(ElementId, usize)> {
+        self.result_ids(query).map(|ids| (ids[0], ids.len()))
+    }
+
+    /// Borrow the contiguous match-id list for `query`.
+    pub fn result_ids(&self, query: &str) -> Option<&[ElementId]> {
         if self.queries.is_empty() {
             return None;
         }
@@ -203,8 +217,8 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
         self.queries
             .iter_from(QueryId(0))
             .find(|q| q.query == query)
-            .map(|query_node| query_node.elements.start())
-            .map(|element_id| self.elements.iter_from(element_id))
+            .map(|query_node| query_node.match_ids.as_slice())
+            .filter(|ids| !ids.is_empty())
     }
 
     fn link_query_to_query(&mut self, query: QueryId, mut root: QueryId) {
@@ -246,6 +260,8 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
         assert!(self.elements[id].next_sibling.is_none());
         self.elements[id].next_sibling = Some(element);
         self.queries[query].elements.set_end(element);
+        self.queries[query].match_count += 1;
+        self.queries[query].match_ids.push(element);
     }
 
     pub fn push(
@@ -292,6 +308,8 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
                     query: selection.source,
                     elements: Span::new(index),
                     next_sibling: None,
+                    match_count: 1,
+                    match_ids: vec![index],
                 });
 
                 QueryId(self.queries.len() - 1)
@@ -551,7 +569,9 @@ mod tests {
             vec![QueryNode {
                 query: "1",
                 next_sibling: None,
-                elements: Span::new(ElementId(0))
+                elements: Span::new(ElementId(0)),
+                match_count: 1,
+                match_ids: vec![ElementId(0)],
             }]
         );
 
@@ -570,12 +590,16 @@ mod tests {
                 QueryNode {
                     query: "1",
                     next_sibling: None,
-                    elements: Span::new(ElementId(0))
+                    elements: Span::new(ElementId(0)),
+                    match_count: 1,
+                    match_ids: vec![ElementId(0)],
                 },
                 QueryNode {
                     query: "2",
                     next_sibling: None,
-                    elements: Span::new(ElementId(1))
+                    elements: Span::new(ElementId(1)),
+                    match_count: 1,
+                    match_ids: vec![ElementId(1)],
                 }
             ]
         );
@@ -606,17 +630,23 @@ mod tests {
                 QueryNode {
                     query: "1",
                     next_sibling: None,
-                    elements: Span::new(ElementId(0))
+                    elements: Span::new(ElementId(0)),
+                    match_count: 1,
+                    match_ids: vec![ElementId(0)],
                 },
                 QueryNode {
                     query: "2",
                     next_sibling: Some(QueryId(2)),
-                    elements: Span::new(ElementId(1))
+                    elements: Span::new(ElementId(1)),
+                    match_count: 1,
+                    match_ids: vec![ElementId(1)],
                 },
                 QueryNode {
                     query: "3",
                     next_sibling: None,
-                    elements: Span::new(ElementId(2))
+                    elements: Span::new(ElementId(2)),
+                    match_count: 1,
+                    match_ids: vec![ElementId(2)],
                 }
             ]
         );
@@ -699,7 +729,9 @@ mod tests {
             vec![QueryNode {
                 query: "main > section",
                 next_sibling: None,
-                elements: Span::from(ElementId(0), ElementId(1))
+                elements: Span::from(ElementId(0), ElementId(1)),
+                match_count: 2,
+                match_ids: vec![ElementId(0), ElementId(1)],
             },]
         );
 
@@ -718,12 +750,16 @@ mod tests {
                 QueryNode {
                     query: "main > section",
                     next_sibling: None,
-                    elements: Span::from(ElementId(0), ElementId(1))
+                    elements: Span::from(ElementId(0), ElementId(1)),
+                    match_count: 2,
+                    match_ids: vec![ElementId(0), ElementId(1)],
                 },
                 QueryNode {
                     query: "> a[href]",
                     next_sibling: None,
-                    elements: Span::new(ElementId(2))
+                    elements: Span::new(ElementId(2)),
+                    match_count: 1,
+                    match_ids: vec![ElementId(2)],
                 }
             ]
         );
@@ -780,5 +816,41 @@ mod tests {
 
         assert!(store.get("a").is_some());
         assert_eq!(store.get("a").iter().count(), 1);
+    }
+
+    #[test]
+    fn result_meta_match_count_tracks_linked_list_length() {
+        use crate::{Query, Save, parse};
+
+        let html = (0..50)
+            .map(|i| format!("<a href='{i}'></a>"))
+            .collect::<String>();
+        let queries = &[Query::all("a", Save::none()).unwrap().build()];
+        let store = parse(&html, queries).unwrap();
+
+        let (first, count) = store.result_meta("a").expect("matches");
+        assert_eq!(count, 50);
+        assert_eq!(store.get("a").unwrap().count(), count);
+        assert_eq!(first, ElementId(0));
+
+        // First-only queries keep a single match.
+        let first_q = &[Query::first("a", Save::none()).unwrap().build()];
+        let first_store = parse(&html, first_q).unwrap();
+        let (_first, first_count) = first_store.result_meta("a").expect("one match");
+        assert_eq!(first_count, 1);
+        assert_eq!(first_store.get("a").unwrap().count(), 1);
+
+        // Nested counts are independent per parent.
+        let nested = &[Query::all("div", Save::none())
+            .unwrap()
+            .then(|div| Ok([div.all("span", Save::none())?]))
+            .unwrap()
+            .build()];
+        let nested_html = "<div><span></span><span></span></div><div><span></span></div>";
+        let nested_store = parse(nested_html, nested).unwrap();
+        let divs: Vec<_> = nested_store.get("div").unwrap().collect();
+        assert_eq!(divs[0].result_meta(&nested_store, "span").unwrap().1, 2);
+        assert_eq!(divs[1].result_meta(&nested_store, "span").unwrap().1, 1);
+        assert!(nested_store.result_meta("missing").is_none());
     }
 }
