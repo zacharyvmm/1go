@@ -52,6 +52,11 @@ fn parse(html: String, queries: Vec<PyRef<PyQuery>>) -> PyResult<PyStore> {
                 "HTML nesting depth exceeds the maximum supported depth",
             ));
         }
+        Err(scah_core::ParseError::TextCaptureRequired) => {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "internal error: unexpected TextCaptureRequired from parse",
+            ));
+        }
     };
 
     Ok(PyStore {

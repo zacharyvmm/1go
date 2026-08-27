@@ -248,6 +248,8 @@ pub enum ParseError {
     EmptyQueries,
     /// The open-element stack exceeded [`engine::MAX_ELEMENT_DEPTH`].
     MaximumDepthExceeded,
+    /// [`parse_without_text_capture`] received a query that requests text.
+    TextCaptureRequired,
 }
 
 impl std::fmt::Display for ParseError {
@@ -257,6 +259,10 @@ impl std::fmt::Display for ParseError {
             ParseError::MaximumDepthExceeded => {
                 write!(f, "HTML nesting depth exceeds the maximum supported depth")
             }
+            ParseError::TextCaptureRequired => write!(
+                f,
+                "parse_without_text_capture cannot run queries that capture raw or normalized text; use parse"
+            ),
         }
     }
 }
@@ -325,6 +331,42 @@ where
         return Err(err);
     }
 
+    Ok(parser.finish())
+}
+
+/// Parse queries that do not request raw or normalized text.
+///
+/// This entry point references only the no-capture parser specialization, so
+/// link-time optimization can discard entity decoding and text normalization.
+pub fn parse_without_text_capture<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+    html: &'html str,
+    queries: &'a [Q],
+) -> Result<Store<'html, 'query>, ParseError>
+where
+    Q: QuerySpec<'query>,
+{
+    if queries.is_empty() {
+        return Err(ParseError::EmptyQueries);
+    }
+
+    let no_extra_allocations = queries.iter().all(|q| q.exit_at_section_end().is_some());
+    let selectors = QueryMultiplexer::new(queries);
+    if selectors.text_requirements().any() {
+        return Err(ParseError::TextCaptureRequired);
+    }
+
+    let mut parser = if no_extra_allocations {
+        XHtmlParser::new(selectors)
+    } else {
+        XHtmlParser::with_capacity(selectors, html.len())
+    };
+    let mut reader = Reader::new(html);
+    parser.trace_parse_started(html.len(), queries.len());
+    parser.run_without_text_capture(&mut reader);
+
+    if let Some(err) = parser.take_parse_error() {
+        return Err(err);
+    }
     Ok(parser.finish())
 }
 

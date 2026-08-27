@@ -281,7 +281,6 @@ where
         }
     }
 
-    #[allow(dead_code)] // exposed by the dedicated no-text API in the next stack layer
     pub(crate) fn run_without_text_capture(&mut self, reader: &mut Reader<'html>) {
         debug_assert!(!self.capture_mode.captures_any());
         if self.parse_error.is_some() {
