@@ -624,6 +624,39 @@ mod tests {
     }
 
     #[test]
+    fn isolated_first_retirement_close_compacts_dense_active_set() {
+        let queries: Vec<_> = (0..64)
+            .map(|_| Query::first(".early", Save::none()).unwrap().build())
+            .collect();
+        let mut parser = XHtmlParser::new(QueryMultiplexer::new(&queries));
+        let mut reader = Reader::new("<main><h1 class=\"early\"></h1></main>");
+
+        assert!(parser.selectors.active_set_is_dense());
+        assert_eq!(parser.selectors.runner_slot_count(), 64);
+
+        assert!(parser.next(&mut reader)); // <main>
+        assert!(parser.next(&mut reader)); // <h1>
+        assert!(parser.selectors.active_set_is_dense());
+
+        // Closing </h1> retires every First runner; next() returns false because
+        // early-exit drains the remainder of the document.
+        assert!(!parser.next(&mut reader));
+
+        assert!(!parser.selectors.active_set_is_dense());
+        assert!(parser.selectors.active_runner_ids().is_empty());
+        assert!(parser.selectors.all_runners_retired_for_test());
+        assert_eq!(parser.selectors.runner_slot_count(), 64);
+        assert_eq!(
+            parser.selectors.runner_query_source(RunnerId(0)),
+            Some(".early")
+        );
+        assert_eq!(
+            parser.selectors.runner_query_source(RunnerId(63)),
+            Some(".early")
+        );
+    }
+
+    #[test]
     fn callback_to_retired_runner_is_ignored() {
         let queries = [
             Query::first("h1", Save::none()).unwrap().build(),
