@@ -25,6 +25,28 @@ impl<'a> Reader<'a> {
         self.position
     }
 
+    /// Return the complete byte source backing this reader.
+    ///
+    /// This is primarily useful for structural scanners that discover a
+    /// bounded region before the token parser consumes it.
+    #[inline]
+    pub fn source(&self) -> &'a [u8] {
+        self.source
+    }
+
+    /// Advance the reader to an already-discovered byte boundary.
+    ///
+    /// Structural scanners use this to hand a completed tag span back to the
+    /// streaming parser without making the parser search for `>` again.
+    #[inline]
+    pub fn advance_to(&mut self, position: usize) {
+        assert!(
+            position >= self.position && position <= self.source.len(),
+            "reader can only advance to an in-bounds position"
+        );
+        self.position = position;
+    }
+
     #[inline]
     pub fn slice(&self, range: Range<usize>) -> &'a str {
         // SAFETY: The source was originally a &str, and structural characters are ASCII.
