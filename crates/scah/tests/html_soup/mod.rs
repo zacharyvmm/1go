@@ -5,4 +5,5 @@ mod implied_close_test;
 mod misnesting_test;
 mod parser_edge_case_test;
 mod selector_stability_test;
+mod sibling_combinator_test;
 mod void_rawtext_test;

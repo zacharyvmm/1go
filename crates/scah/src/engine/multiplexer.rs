@@ -1,6 +1,7 @@
 use super::attribute_interest::AttributeInterest;
 use super::executor::QueryExecutor;
 use crate::__private::ascii_case_insensitive_hash;
+use crate::Position;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
@@ -34,6 +35,18 @@ pub(crate) struct ElementPreflight<'query> {
     pub attribute_interest: AttributeInterest<'query>,
     runner_indices: SmallVec<[usize; 8]>,
     runner_len: usize,
+}
+
+/// Deferred close-time activation of a CSS `+` / `~` right-hand cursor.
+///
+/// Created when the left-hand transition matches; activated when that element
+/// closes (or immediately for void/self-closing sources). Lifetime is derived
+/// from the continuation transition's combinator, not stored here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SiblingCallback {
+    pub runner_index: usize,
+    pub output_parent: ElementId,
+    pub continuation: Position,
 }
 
 type Runner<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
@@ -177,9 +190,11 @@ where
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
+        sibling_callbacks: &mut Vec<SiblingCallback>,
     ) {
         debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
+        sibling_callbacks.clear();
         for &runner_index in &preflight.runner_indices {
             self.runners[runner_index].next(
                 runner_index,
@@ -187,6 +202,7 @@ where
                 position,
                 store,
                 save_hits,
+                sibling_callbacks,
             );
         }
         #[cfg(any(debug_assertions, test))]
@@ -199,6 +215,22 @@ where
                     store,
                 );
             }
+        }
+        #[cfg(feature = "bench-internals")]
+        self.track_cursor_stats();
+    }
+
+    pub(crate) fn activate_sibling_callbacks(
+        &mut self,
+        callbacks: &mut Vec<SiblingCallback>,
+        source_depth: crate::engine::DepthSize,
+        store: &mut Store<'html, 'query>,
+    ) {
+        for callback in callbacks.drain(..) {
+            let Some(session) = self.runners.get_mut(callback.runner_index) else {
+                continue;
+            };
+            let _ = session.activate_sibling(callback.runner_index, callback, source_depth, store);
         }
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
