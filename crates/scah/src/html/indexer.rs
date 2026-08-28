@@ -14,6 +14,9 @@ const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
 // rolling path is faster even for one long sparse text span.
 const FULL_INDEX_MIN_ATTRIBUTE_BYTES: usize = 128 * 1024;
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
+// A full index needs enough structural events to amortize its extra pass.
+// Attribute-sensitive inputs with fewer sampled tags stay on the rolling path.
+const FULL_INDEX_MIN_SAMPLED_TAGS: usize = 4;
 const FULL_INDEX_SAMPLE_WINDOWS: usize = 4;
 const FULL_INDEX_DENSITY_WINDOW_BYTES: usize = 8 * 1024;
 const FULL_INDEX_MARKUP_WINDOW_BYTES: usize = 1024;
@@ -1119,6 +1122,17 @@ impl FullIndexSample {
             return false;
         }
 
+        if attributes_may_be_parsed
+            && self
+                .windows
+                .iter()
+                .map(|window| window.less_than_count)
+                .sum::<usize>()
+                < FULL_INDEX_MIN_SAMPLED_TAGS
+        {
+            return false;
+        }
+
         !attributes_may_be_parsed
             || self
                 .windows
@@ -1891,14 +1905,14 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_policy_full_indexes_a_single_large_text_gap() {
+    fn adaptive_policy_keeps_a_single_large_text_gap_scalar() {
         let text = "x".repeat(1024 * 1024);
         let source = format!("<a data-x=\"yes\">{text}</a>");
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
 
-        assert!(indexer.uses_full_index());
+        assert!(!indexer.uses_full_index());
     }
 
     #[test]
@@ -1918,11 +1932,18 @@ mod tests {
         let position = text.len() - 512;
         text.replace_range(position..position + 1, ">");
         let source = format!("<a data-x=\"yes\">{text}</a>");
+        let sample = sample_full_index_windows(
+            source.as_bytes(),
+            BlockClassifier::default(),
+            FULL_INDEX_MARKUP_WINDOW_BYTES,
+            true,
+        );
+        assert!(!sample.decisive_oversized_tag);
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
 
-        assert!(indexer.uses_full_index());
+        assert!(!indexer.uses_full_index());
     }
 
     #[test]
