@@ -1125,14 +1125,12 @@ impl FullIndexSample {
             return false;
         }
 
-        if attributes_may_be_parsed
-            && self
-                .windows
-                .iter()
-                .map(|window| window.less_than_count)
-                .sum::<usize>()
-                < FULL_INDEX_MIN_SAMPLED_TAGS
-        {
+        let sampled_tags = self
+            .windows
+            .iter()
+            .map(|window| window.less_than_count)
+            .sum::<usize>();
+        if sampled_tags < FULL_INDEX_MIN_SAMPLED_TAGS {
             return false;
         }
 
@@ -1812,17 +1810,13 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_policy_full_indexes_sparse_exhaustive_documents() {
+    fn adaptive_policy_keeps_sparse_exhaustive_documents_rolling() {
         let source = format!("<main>{}</main>", "x".repeat(FULL_INDEX_MIN_BYTES));
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, false);
 
         indexer.prepare(source.as_bytes());
 
-        assert!(indexer.uses_full_index());
-        let Some(TagEvent::Open(open)) = indexer.next(source.as_bytes(), 0) else {
-            panic!("expected indexed opening tag");
-        };
-        assert_eq!(open.end_hint, Some(6));
+        assert!(!indexer.uses_full_index());
     }
 
     #[test]

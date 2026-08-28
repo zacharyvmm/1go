@@ -1662,6 +1662,45 @@ fn bench_attribute_index_strategy_crossover(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_tag_only_index_strategy_crossover(c: &mut Criterion) {
+    let query = Query::all("a", Save::name_only())
+        .expect("tag-only selector should compile")
+        .build();
+    let queries = std::slice::from_ref(&query);
+    let mut group = c.benchmark_group("tag_only_index_strategy_crossover");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(1));
+
+    for (name, text_bytes) in [
+        ("64_kib", 64 * 1024),
+        ("128_kib", 128 * 1024),
+        ("1_mib", 1024 * 1024),
+    ] {
+        let html = format!("<a>{}</a>", "x".repeat(text_bytes));
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        for (strategy, full_index) in [("rolling", false), ("full_index", true)] {
+            assert_eq!(
+                parse_with_indexing_mode(&html, queries, full_index)
+                    .unwrap()
+                    .get("a")
+                    .unwrap()
+                    .count(),
+                1
+            );
+            group.bench_with_input(BenchmarkId::new(strategy, name), &html, |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse_with_indexing_mode(black_box(html), black_box(queries), full_index)
+                            .unwrap();
+                    black_box(store.get("a").unwrap().count())
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_element_tape,
@@ -1674,6 +1713,7 @@ criterion_group!(
     bench_attribute_span_policy,
     bench_huge_attribute_policy,
     bench_single_long_text_gap_policy,
-    bench_attribute_index_strategy_crossover
+    bench_attribute_index_strategy_crossover,
+    bench_tag_only_index_strategy_crossover
 );
 criterion_main!(benches);
