@@ -15,7 +15,7 @@ const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
 const FULL_INDEX_MIN_ATTRIBUTE_BYTES: usize = 128 * 1024;
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
 // A full index needs enough structural events to amortize its extra pass.
-// Attribute-sensitive inputs with fewer sampled tags stay on the rolling path.
+// Inputs with too few sampled tags stay on the rolling path.
 const FULL_INDEX_MIN_SAMPLED_TAGS: usize = 4;
 const FULL_INDEX_SAMPLE_WINDOWS: usize = 4;
 const FULL_INDEX_DENSITY_WINDOW_BYTES: usize = 8 * 1024;
