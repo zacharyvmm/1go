@@ -128,8 +128,8 @@ impl<'query> PredicateMetadata<'query> {
 #[derive(PartialEq, Debug, Clone)]
 pub struct Transition<'query> {
     pub guard: Combinator,
-    pub predicate: ElementPredicate<'query>,
-    pub metadata: PredicateMetadata<'query>,
+    predicate: ElementPredicate<'query>,
+    metadata: PredicateMetadata<'query>,
 }
 
 impl<'query> Transition<'query> {
@@ -152,6 +152,23 @@ impl<'query> Transition<'query> {
             predicate,
             metadata,
         }
+    }
+
+    #[inline]
+    pub const fn predicate(&self) -> &ElementPredicate<'query> {
+        &self.predicate
+    }
+
+    #[inline]
+    pub const fn metadata(&self) -> &PredicateMetadata<'query> {
+        &self.metadata
+    }
+
+    /// Replace the predicate and atomically refresh its compiled metadata.
+    pub fn set_predicate(&mut self, predicate: ElementPredicate<'query>) {
+        let metadata = PredicateMetadata::compile(&predicate);
+        self.predicate = predicate;
+        self.metadata = metadata;
     }
 
     pub fn generate_transitions_from_string(
@@ -255,12 +272,45 @@ mod tests {
 
         assert!(
             transition
-                .metadata
+                .metadata()
                 .matches_name("article", ascii_case_insensitive_hash("article"))
         );
-        assert!(transition.metadata.needs_id());
-        assert!(transition.metadata.needs_class());
-        assert_eq!(transition.metadata.attribute_names(), &["href"]);
+        assert!(transition.metadata().needs_id());
+        assert!(transition.metadata().needs_class());
+        assert_eq!(transition.metadata().attribute_names(), &["href"]);
+    }
+
+    #[test]
+    fn replacing_predicate_refreshes_metadata() {
+        let mut transition = Transition::new(
+            Combinator::Descendant,
+            ElementPredicate {
+                name: Some("a"),
+                id: None,
+                classes: ClassSelections::from_static(&[]),
+                attributes: AttributeSelections::from_static(&[]),
+            },
+        );
+
+        transition.set_predicate(ElementPredicate {
+            name: Some("div"),
+            id: Some("hero"),
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from_static(&[]),
+        });
+
+        assert_eq!(transition.predicate().name, Some("div"));
+        assert!(
+            transition
+                .metadata()
+                .matches_name("div", ascii_case_insensitive_hash("div"))
+        );
+        assert!(
+            !transition
+                .metadata()
+                .matches_name("a", ascii_case_insensitive_hash("a"))
+        );
+        assert!(transition.metadata().needs_id());
     }
 
     #[test]

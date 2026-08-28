@@ -422,7 +422,7 @@ fn metadata_const_tokens(
         &format!("__SCAH_ATTRIBUTE_NAMES_{index}"),
         Span::call_site(),
     );
-    let attribute_names = transition.metadata.attribute_names();
+    let attribute_names = transition.metadata().attribute_names();
     quote! {
         const #ident: &[&'static str] = &[#(#attribute_names),*];
     }
@@ -431,7 +431,7 @@ fn metadata_const_tokens(
 fn class_const_tokens((index, transition): (usize, &Transition<'_>)) -> proc_macro2::TokenStream {
     let ident = syn::Ident::new(&format!("__SCAH_CLASSES_{index}"), Span::call_site());
     let classes = transition
-        .predicate
+        .predicate()
         .classes
         .as_slice()
         .iter()
@@ -446,7 +446,7 @@ fn attribute_const_tokens(
 ) -> proc_macro2::TokenStream {
     let ident = syn::Ident::new(&format!("__SCAH_ATTRS_{index}"), Span::call_site());
     let attrs = transition
-        .predicate
+        .predicate()
         .attributes
         .as_slice()
         .iter()
@@ -458,10 +458,10 @@ fn attribute_const_tokens(
 
 fn transition_tokens(index: usize, transition: &Transition<'_>) -> proc_macro2::TokenStream {
     let guard = combinator_tokens(&transition.guard);
-    let predicate = predicate_tokens(index, &transition.predicate);
-    let name = option_str_tokens(transition.predicate.name);
-    let needs_id = transition.metadata.needs_id();
-    let needs_class = transition.metadata.needs_class();
+    let predicate = predicate_tokens(index, transition.predicate());
+    let name = option_str_tokens(transition.predicate().name);
+    let needs_id = transition.metadata().needs_id();
+    let needs_class = transition.metadata().needs_class();
     let names_ident = syn::Ident::new(
         &format!("__SCAH_ATTRIBUTE_NAMES_{index}"),
         Span::call_site(),

@@ -331,15 +331,18 @@ fn test_macro_query_matches_runtime_query_structure() {
     assert_eq!(static_query.states().len(), runtime_query.states().len());
     for (static_state, runtime_state) in static_query.states().iter().zip(runtime_query.states()) {
         assert_eq!(static_state.guard, runtime_state.guard);
-        assert_eq!(static_state.predicate.name, runtime_state.predicate.name);
-        assert_eq!(static_state.predicate.id, runtime_state.predicate.id);
         assert_eq!(
-            static_state.predicate.classes.as_slice(),
-            runtime_state.predicate.classes.as_slice()
+            static_state.predicate().name,
+            runtime_state.predicate().name
+        );
+        assert_eq!(static_state.predicate().id, runtime_state.predicate().id);
+        assert_eq!(
+            static_state.predicate().classes.as_slice(),
+            runtime_state.predicate().classes.as_slice()
         );
         assert_eq!(
-            static_state.predicate.attributes.as_slice(),
-            runtime_state.predicate.attributes.as_slice()
+            static_state.predicate().attributes.as_slice(),
+            runtime_state.predicate().attributes.as_slice()
         );
     }
 
@@ -402,6 +405,21 @@ fn test_macro_query_matches_runtime_store_contents() {
             "selector mismatch for {selector}"
         );
     }
+}
+
+#[test]
+fn replacing_transition_predicate_refreshes_parser_preflight() {
+    let mut query = Query::all("a", Save::name_only()).unwrap().build();
+    let mut predicate = query.states[0].predicate().clone();
+    predicate.name = Some("div");
+    query.states[0].set_predicate(predicate);
+
+    let queries = [query];
+    let store = parse("<a></a><div></div>", &queries).unwrap();
+    let mut matches = store.get("a").unwrap();
+
+    assert_eq!(matches.next().unwrap().name, "div");
+    assert!(matches.next().is_none());
 }
 
 #[test]

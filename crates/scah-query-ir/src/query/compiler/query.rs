@@ -436,8 +436,8 @@ mod tests {
         assert_eq!(query.states.len(), 2);
         assert_eq!(query.queries.len(), 2);
         assert_eq!(
-            query.states[1].predicate,
-            ElementPredicate {
+            query.states[1].predicate(),
+            &ElementPredicate {
                 name: Some("a"),
                 id: Some("link1"),
                 classes: ClassSelections::from_static(&["foo"]),

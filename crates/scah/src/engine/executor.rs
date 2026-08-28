@@ -156,7 +156,7 @@ where
             }
 
             let position = cursor.position;
-            let metadata = &self.query.get_transition(position.state).metadata;
+            let metadata = self.query.get_transition(position.state).metadata();
             if !metadata.matches_name(name, name_hash) {
                 continue;
             }
@@ -190,7 +190,7 @@ where
 
             let position = cursor.position;
             let transition = self.query.get_transition(position.state);
-            if transition.metadata.matches_name(element.name, name_hash) {
+            if transition.metadata().matches_name(element.name, name_hash) {
                 continue;
             }
 
@@ -252,7 +252,7 @@ where
         element: &XHtmlElement<'html>,
     ) -> TransitionRejectReason {
         let transition = tree.get_transition(position.state);
-        if transition.predicate.matches_element(element) {
+        if transition.predicate().matches_element(element) {
             let _ = (depth, last_depth);
             TransitionRejectReason::DepthGuardFailed
         } else {
