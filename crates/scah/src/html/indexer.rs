@@ -28,6 +28,9 @@ const FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES: usize = 4 * 1024;
 pub(crate) enum IndexingMode {
     Rolling,
     FullDocument,
+    /// Force the full-document backend, bypassing adaptive strategy selection.
+    /// This is intended for isolated strategy benchmarks.
+    ForcedFullDocument,
 }
 
 /// The kind of completed structural span discovered by a [`TagIndexer`].
@@ -1216,6 +1219,7 @@ pub(crate) struct AutoTagIndexer {
     rolling: Option<PackedTagIndexer>,
     full: Option<PackedTagIndexer>,
     allow_full_index: bool,
+    force_full_index: bool,
     attributes_may_be_parsed: bool,
     prepared_source: usize,
     prepared_len: usize,
@@ -1235,7 +1239,11 @@ impl AutoTagIndexer {
             scalar: ScalarTagIndexer,
             rolling: accelerated.then(|| PackedTagIndexer::new(IndexingMode::Rolling)),
             full: None,
-            allow_full_index: mode == IndexingMode::FullDocument,
+            allow_full_index: matches!(
+                mode,
+                IndexingMode::FullDocument | IndexingMode::ForcedFullDocument
+            ),
+            force_full_index: mode == IndexingMode::ForcedFullDocument,
             attributes_may_be_parsed,
             prepared_source: 0,
             prepared_len: 0,
@@ -1292,6 +1300,12 @@ impl AutoTagIndexer {
         self.prepared_len = source.len();
         self.full = None;
 
+        if self.force_full_index {
+            let mut full = PackedTagIndexer::new(IndexingMode::FullDocument);
+            full.prepare(source);
+            self.full = Some(full);
+            return;
+        }
         let Some(rolling) = self.rolling.as_ref() else {
             return;
         };
@@ -1913,6 +1927,17 @@ mod tests {
         indexer.prepare(source.as_bytes());
 
         assert!(!indexer.uses_full_index());
+    }
+
+    #[test]
+    fn forced_full_mode_bypasses_adaptive_policy() {
+        let text = "x".repeat(1024 * 1024);
+        let source = format!("<a data-x=\"yes\">{text}</a>");
+        let mut indexer = AutoTagIndexer::new(IndexingMode::ForcedFullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
     }
 
     #[test]

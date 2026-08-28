@@ -219,7 +219,7 @@ pub mod bench_internals {
 
         let selectors = QueryMultiplexer::new(queries);
         let indexing_mode = if full_index {
-            IndexingMode::FullDocument
+            IndexingMode::ForcedFullDocument
         } else {
             IndexingMode::Rolling
         };
