@@ -20,7 +20,7 @@
 //! open-element stack, runs query cursors, stores matches, and handles recovery.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use scah::bench_internals::LessThanScanner;
+use scah::bench_internals::{LessThanScanner, parse_with_indexing_mode};
 use scah::{Query, Save, parse};
 use std::hint::black_box;
 use std::time::Duration;
@@ -1619,6 +1619,49 @@ fn bench_single_long_text_gap_policy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_attribute_index_strategy_crossover(c: &mut Criterion) {
+    let query = Query::all("[data-x]", Save::name_only())
+        .expect("attribute selector should compile")
+        .build();
+    let queries = std::slice::from_ref(&query);
+    let mut group = c.benchmark_group("attribute_index_strategy_crossover");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(1));
+
+    for (name, text_bytes) in [
+        ("64_kib", 64 * 1024),
+        ("96_kib", 96 * 1024),
+        ("128_kib", 128 * 1024),
+        ("192_kib", 192 * 1024),
+        ("256_kib", 256 * 1024),
+        ("512_kib", 512 * 1024),
+        ("1_mib", 1024 * 1024),
+    ] {
+        let html = format!("<a data-x=\"yes\">{}</a>", "x".repeat(text_bytes));
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        for (strategy, full_index) in [("rolling", false), ("full_index", true)] {
+            assert_eq!(
+                parse_with_indexing_mode(&html, queries, full_index)
+                    .unwrap()
+                    .get("[data-x]")
+                    .unwrap()
+                    .count(),
+                1
+            );
+            group.bench_with_input(BenchmarkId::new(strategy, name), &html, |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse_with_indexing_mode(black_box(html), black_box(queries), full_index)
+                            .unwrap();
+                    black_box(store.get("[data-x]").unwrap().count())
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_element_tape,
@@ -1630,6 +1673,7 @@ criterion_group!(
     bench_density_crossover_by_document_size,
     bench_attribute_span_policy,
     bench_huge_attribute_policy,
-    bench_single_long_text_gap_policy
+    bench_single_long_text_gap_policy,
+    bench_attribute_index_strategy_crossover
 );
 criterion_main!(benches);

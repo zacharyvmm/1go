@@ -141,13 +141,15 @@ pub mod bench_internals {
     pub use crate::engine::cursor::ScopedCursor;
     #[cfg(feature = "bench-internals")]
     pub use crate::engine::multiplexer::CursorStatsSnapshot;
-    #[cfg(feature = "bench-internals")]
+    #[cfg(any(feature = "bench-internals", feature = "simd-bench-internals"))]
     use crate::engine::multiplexer::QueryMultiplexer;
     #[cfg(feature = "simd-bench-internals")]
     use crate::html::BlockClassifier;
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "simd-bench-internals")]
+    use crate::html::IndexingMode;
+    #[cfg(any(feature = "bench-internals", feature = "simd-bench-internals"))]
     use crate::store::Store;
-    #[cfg(feature = "bench-internals")]
+    #[cfg(any(feature = "bench-internals", feature = "simd-bench-internals"))]
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
 
     /// Reusable production `<` scanner for delimiter-distance benchmarks.
@@ -198,6 +200,39 @@ pub mod bench_internals {
 
         let stats = parser.selectors.cursor_stats_snapshot();
         Ok((parser.finish(), stats))
+    }
+
+    /// Parse HTML with a fixed indexer strategy for strategy crossover
+    /// benchmarks.
+    #[cfg(feature = "simd-bench-internals")]
+    pub fn parse_with_indexing_mode<'a: 'query, 'html: 'query, 'query: 'html, Q>(
+        html: &'html str,
+        queries: &'a [Q],
+        full_index: bool,
+    ) -> Result<Store<'html, 'query>, ParseError>
+    where
+        Q: QuerySpec<'query>,
+    {
+        if queries.is_empty() {
+            return Err(ParseError::EmptyQueries);
+        }
+
+        let selectors = QueryMultiplexer::new(queries);
+        let indexing_mode = if full_index {
+            IndexingMode::FullDocument
+        } else {
+            IndexingMode::Rolling
+        };
+        let mut parser =
+            XHtmlParser::with_indexing_mode(selectors, Some(html.len()), indexing_mode);
+        let mut reader = Reader::new(html);
+        while parser.next(&mut reader) {}
+
+        if let Some(err) = parser.take_parse_error() {
+            return Err(err);
+        }
+
+        Ok(parser.finish())
     }
 }
 

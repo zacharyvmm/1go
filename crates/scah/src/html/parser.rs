@@ -47,14 +47,33 @@ where
     Q: QuerySpec<'query>,
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
-        let capture_text_content = selectors.requires_text_content();
-        let persist_attributes = selectors.requires_attribute_storage();
-        let parse_attributes = selectors.requires_attribute_parsing();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
             IndexingMode::FullDocument
         };
+        Self::with_indexing_mode(selectors, None, indexing_mode)
+    }
+
+    pub(crate) fn with_indexing_mode(
+        selectors: QueryMultiplexer<'query, Q>,
+        capacity: Option<usize>,
+        indexing_mode: IndexingMode,
+    ) -> Self {
+        let capture_text_content = selectors.requires_text_content();
+        let persist_attributes = selectors.requires_attribute_storage();
+        let parse_attributes = selectors.requires_attribute_parsing();
+        let store = capacity.map_or_else(Store::default, |capacity| {
+            Store::with_capacity_requirements(
+                capacity,
+                crate::CapacityOptions {
+                    reserve_text_content: capture_text_content,
+                    ..crate::CapacityOptions::default()
+                },
+                persist_attributes,
+            )
+        });
+
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -74,47 +93,17 @@ where
             indexer: AutoTagIndexer::new(indexing_mode, parse_attributes),
             #[cfg(test)]
             attribute_parse_count: 0,
-            store: Store::default(),
+            store,
         }
     }
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
-        let capture_text_content = selectors.requires_text_content();
-        let reserve_attributes = selectors.requires_attribute_storage();
-        let parse_attributes = selectors.requires_attribute_parsing();
         let indexing_mode = if selectors.allows_early_exit() {
             IndexingMode::Rolling
         } else {
             IndexingMode::FullDocument
         };
-        Self {
-            position: DocumentPosition {
-                element_depth: 0,
-                reader_position: 0, // for inner_html
-                text_content_position: usize::MAX,
-                self_closing: false,
-            },
-            selectors,
-            element: XHtmlElement::default(),
-            open_elements: OpenElementStack::default(),
-            temp_state: ParserTempState::default(),
-            capture_text_content,
-            persist_attributes: reserve_attributes,
-            raw_text_close: None,
-            eof_drained: false,
-            parse_error: None,
-            indexer: AutoTagIndexer::new(indexing_mode, parse_attributes),
-            #[cfg(test)]
-            attribute_parse_count: 0,
-            store: Store::with_capacity_requirements(
-                capacity,
-                crate::CapacityOptions {
-                    reserve_text_content: capture_text_content,
-                    ..crate::CapacityOptions::default()
-                },
-                reserve_attributes,
-            ),
-        }
+        Self::with_indexing_mode(selectors, Some(capacity), indexing_mode)
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {

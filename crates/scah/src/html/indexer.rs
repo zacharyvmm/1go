@@ -1041,7 +1041,9 @@ fn resolve_unknown_sample_start(source: &[u8], start: usize) -> (SampleLexicalSt
     };
     let boundary = start + offset;
     let state = match source[boundary] {
-        b'>' => SampleLexicalState::OversizedTag,
+        // A `>` in ordinary text is common. Tail probing handles a quoted
+        // tag end separately, where the preceding quote is useful evidence.
+        b'>' => SampleLexicalState::Normal,
         b'<' if matches!(
             source.get(boundary + 1),
             Some(b'/') | Some(b'!') | Some(b'?')
@@ -1053,6 +1055,21 @@ fn resolve_unknown_sample_start(source: &[u8], start: usize) -> (SampleLexicalSt
         _ => unreachable!(),
     };
     (state, boundary)
+}
+
+fn has_quoted_tag_end(source: &[u8], boundary: usize) -> bool {
+    let mut position = boundary;
+    for _ in 0..=16 {
+        let Some(&byte) = position.checked_sub(1).and_then(|index| source.get(index)) else {
+            return false;
+        };
+        position -= 1;
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        return matches!(byte, b'\'' | b'\"');
+    }
+    false
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1084,6 +1101,7 @@ impl FullIndexWindowSample {
 #[derive(Debug, Default, Clone, Copy)]
 struct FullIndexSample {
     windows: [FullIndexWindowSample; FULL_INDEX_SAMPLE_WINDOWS],
+    decisive_oversized_tag: bool,
 }
 
 impl FullIndexSample {
@@ -1097,12 +1115,7 @@ impl FullIndexSample {
             return false;
         }
 
-        if attributes_may_be_parsed
-            && self
-                .windows
-                .iter()
-                .any(|window| window.decisive_oversized_tag)
-        {
+        if attributes_may_be_parsed && self.decisive_oversized_tag {
             return false;
         }
 
@@ -1127,28 +1140,11 @@ fn sample_full_index_windows(
     let window_stride = source.len() / FULL_INDEX_SAMPLE_WINDOWS;
     let window_capacity = window_bytes.min(window_stride);
 
-    // Inspect the document boundaries before the interior quarters. For a
-    // closing tag near EOF, end the tail window immediately before that tag.
-    // This lets it distinguish a large opening tag from a long text node
-    // followed by the same closing boundary.
-    for window in [0, FULL_INDEX_SAMPLE_WINDOWS - 1, 1, 2] {
-        let end_limit = if window == FULL_INDEX_SAMPLE_WINDOWS - 1 {
-            let suffix_start = source
-                .len()
-                .saturating_sub(FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES);
-            source[suffix_start..]
-                .iter()
-                .position(|&byte| byte == b'<')
-                .map_or(source.len(), |offset| suffix_start + offset)
-        } else {
-            source.len()
-        };
-        let start = if window == FULL_INDEX_SAMPLE_WINDOWS - 1 {
-            end_limit.saturating_sub(window_capacity)
-        } else {
-            window_stride * window
-        };
-        let available = end_limit.saturating_sub(start).min(window_capacity);
+    // Sample all four representative quarters. The tail lexical probe below
+    // is separate so it cannot replace the 75% shape sample.
+    for window in 0..FULL_INDEX_SAMPLE_WINDOWS {
+        let start = window_stride * window;
+        let available = source.len().saturating_sub(start).min(window_capacity);
         let bytes = available / SIMD_BLOCK_BYTES * SIMD_BLOCK_BYTES;
         let end = start + bytes;
 
@@ -1168,19 +1164,32 @@ fn sample_full_index_windows(
                 sampled_markup_bytes(source, start, end);
             current.decisive_oversized_tag =
                 current.lexical_state == SampleLexicalState::OversizedTag;
-            if current.decisive_oversized_tag {
-                return sample;
-            }
+            sample.decisive_oversized_tag |= current.decisive_oversized_tag;
             if current.lexical_state == SampleLexicalState::Unknown {
                 let (state, _) = resolve_unknown_sample_start(source, start);
                 current.lexical_state = state;
-                if window == FULL_INDEX_SAMPLE_WINDOWS - 1
-                    && state == SampleLexicalState::OversizedTag
-                {
-                    current.decisive_oversized_tag = true;
-                    return sample;
-                }
+                sample.decisive_oversized_tag |= state == SampleLexicalState::OversizedTag;
             }
+        }
+    }
+
+    if measure_markup {
+        let suffix_start = source
+            .len()
+            .saturating_sub(FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES);
+        let tail_end = source[suffix_start..]
+            .iter()
+            .position(|&byte| byte == b'<')
+            .map_or(source.len(), |offset| suffix_start + offset);
+        let tail_start = tail_end.saturating_sub(window_capacity);
+        if tail_end > tail_start {
+            let (_, lexical_state) = sampled_markup_bytes(source, tail_start, tail_end);
+            let (resolved_state, boundary) = resolve_unknown_sample_start(source, tail_start);
+            let quoted_tag_end = has_quoted_tag_end(source, boundary);
+            sample.decisive_oversized_tag |= lexical_state == SampleLexicalState::OversizedTag
+                || (lexical_state == SampleLexicalState::Unknown
+                    && resolved_state == SampleLexicalState::Normal
+                    && quoted_tag_end);
         }
     }
 
@@ -1849,7 +1858,7 @@ mod tests {
             FULL_INDEX_MARKUP_WINDOW_BYTES,
             true,
         );
-        assert!(sample.windows[FULL_INDEX_SAMPLE_WINDOWS - 1].decisive_oversized_tag);
+        assert!(sample.decisive_oversized_tag);
 
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
@@ -1901,6 +1910,19 @@ mod tests {
         indexer.prepare(source.as_bytes());
 
         assert!(!indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_does_not_treat_text_gt_before_close_as_oversized_tag() {
+        let mut text = "x".repeat(1024 * 1024);
+        let position = text.len() - 512;
+        text.replace_range(position..position + 1, ">");
+        let source = format!("<a data-x=\"yes\">{text}</a>");
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
     }
 
     #[test]
