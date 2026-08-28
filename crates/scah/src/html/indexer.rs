@@ -16,6 +16,7 @@ const FULL_INDEX_DENSITY_WINDOW_BYTES: usize = 8 * 1024;
 const FULL_INDEX_MARKUP_WINDOW_BYTES: usize = 1024;
 const FULL_INDEX_MAX_MARKUP_PERCENT: usize = 50;
 const FULL_INDEX_MAX_SAMPLED_TAG_BYTES: usize = 1024;
+const FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IndexingMode {
@@ -1026,11 +1027,14 @@ fn sampled_markup_bytes(source: &[u8], start: usize, end: usize) -> (usize, Samp
 }
 
 fn resolve_unknown_sample_start(source: &[u8], start: usize) -> (SampleLexicalState, usize) {
-    let Some(offset) = source[start..]
+    let probe_end = source
+        .len()
+        .min(start.saturating_add(FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES));
+    let Some(offset) = source[start..probe_end]
         .iter()
         .position(|&byte| matches!(byte, b'<' | b'>'))
     else {
-        return (SampleLexicalState::Unknown, source.len());
+        return (SampleLexicalState::Unknown, probe_end);
     };
     let boundary = start + offset;
     let state = match source[boundary] {
@@ -1054,6 +1058,9 @@ struct FullIndexWindowSample {
     less_than_count: usize,
     markup_bytes: usize,
     lexical_state: SampleLexicalState,
+    // Set only when bounded tag parsing, rather than the forward heuristic,
+    // establishes that a sampled tag exceeds the cheap attribute threshold.
+    confirmed_oversized_tag: bool,
 }
 
 impl FullIndexWindowSample {
@@ -1084,6 +1091,15 @@ impl FullIndexSample {
             .filter(|window| window.is_dense())
             .count();
         if dense_windows * 2 >= FULL_INDEX_SAMPLE_WINDOWS {
+            return false;
+        }
+
+        if attributes_may_be_parsed
+            && self
+                .windows
+                .iter()
+                .any(|window| window.confirmed_oversized_tag)
+        {
             return false;
         }
 
@@ -1132,6 +1148,8 @@ fn sample_full_index_windows(
         if measure_markup {
             (current.markup_bytes, current.lexical_state) =
                 sampled_markup_bytes(source, start, end);
+            current.confirmed_oversized_tag =
+                current.lexical_state == SampleLexicalState::OversizedTag;
             if current.lexical_state == SampleLexicalState::Unknown {
                 let (state, boundary) = next_boundary_cache
                     .filter(|(_, boundary)| *boundary >= start)
@@ -1777,10 +1795,7 @@ mod tests {
     #[test]
     fn adaptive_policy_keeps_a_tag_spanning_sample_windows_scalar() {
         let value = "x".repeat(48 * 1024);
-        let source = format!(
-            "<main>{}<a data-padding=\"{value}\" data-x=\"yes\">x</a></main>",
-            "x".repeat(8 * 1024)
-        );
+        let source = format!("<a data-padding=\"{value}\" data-x=\"yes\">x</a>");
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
@@ -1793,6 +1808,28 @@ mod tests {
         let text = "x".repeat(256);
         let source =
             format!("<a class=\"hit\" href=\"/item\" data-x=\"yes\">{text}</a>").repeat(5_000);
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(indexer.uses_full_index());
+    }
+
+    #[test]
+    fn unknown_sample_resolution_stops_at_its_byte_budget() {
+        let start = 128;
+        let source = vec![b'x'; start + FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES * 2];
+
+        let (state, boundary) = resolve_unknown_sample_start(&source, start);
+
+        assert_eq!(state, SampleLexicalState::Unknown);
+        assert_eq!(boundary, start + FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES);
+    }
+
+    #[test]
+    fn adaptive_policy_full_indexes_a_single_large_text_gap() {
+        let text = "x".repeat(1024 * 1024);
+        let source = format!("<a data-x=\"yes\">{text}</a>");
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());

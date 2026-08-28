@@ -69,7 +69,7 @@ pub trait QuerySpec<'query> {
             || self
                 .states()
                 .iter()
-                .any(|transition| transition.predicate.requires_attributes())
+                .any(|transition| transition.predicate().requires_attributes())
     }
 
     fn get_transition(&self, state: TransitionId) -> &Transition<'query> {

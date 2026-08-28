@@ -1454,6 +1454,10 @@ fn generate_long_text_gap_html(elements: usize, text_bytes: usize) -> String {
     html
 }
 
+fn generate_single_long_text_gap(text_bytes: usize) -> String {
+    format!("<a data-x=\"yes\">{}</a>", "x".repeat(text_bytes))
+}
+
 fn with_long_script_prefix(body: &str) -> String {
     let script = "x".repeat(8 * 1024);
     let mut html = String::with_capacity(script.len() + body.len() + 17);
@@ -1571,6 +1575,41 @@ fn bench_huge_attribute_policy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_single_long_text_gap_policy(c: &mut Criterion) {
+    let query = Query::all("[data-x]", Save::name_only())
+        .expect("attribute selector should compile")
+        .build();
+    let queries = std::slice::from_ref(&query);
+    let mut group = c.benchmark_group("full_index_single_long_text_gap");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(1));
+
+    for (name, text_bytes) in [
+        ("64_kib", 64 * 1024),
+        ("1_mib", 1024 * 1024),
+        ("16_mib", 16 * 1024 * 1024),
+    ] {
+        let html = generate_single_long_text_gap(text_bytes);
+        assert_eq!(
+            parse(&html, queries)
+                .unwrap()
+                .get("[data-x]")
+                .unwrap()
+                .count(),
+            1
+        );
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(name, &html, |b, html| {
+            b.iter(|| {
+                let store = parse(black_box(html), black_box(queries)).unwrap();
+                black_box(store.get("[data-x]").unwrap().count())
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_element_tape,
@@ -1581,6 +1620,7 @@ criterion_group!(
     bench_density_crossover,
     bench_density_crossover_by_document_size,
     bench_attribute_span_policy,
-    bench_huge_attribute_policy
+    bench_huge_attribute_policy,
+    bench_single_long_text_gap_policy
 );
 criterion_main!(benches);
