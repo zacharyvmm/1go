@@ -1548,30 +1548,39 @@ fn bench_attribute_span_policy(c: &mut Criterion) {
 
 fn bench_huge_attribute_policy(c: &mut Criterion) {
     let value = "x".repeat(64 * 1024);
-    let html = format!("<a data-padding=\"{value}\" data-x=\"yes\">x</a>");
+    let aligned = format!("<a data-padding=\"{value}\" data-x=\"yes\">x</a>");
+    let prefixed = format!(
+        "{}<a data-padding=\"{value}\" data-x=\"yes\">x</a>",
+        "x".repeat(8 * 1024)
+    );
     let queries = &[Query::all("[data-x]", Save::name_only())
         .expect("attribute selector should compile")
         .build()];
-    assert_eq!(
-        parse(&html, queries)
-            .unwrap()
-            .get("[data-x]")
-            .unwrap()
-            .count(),
-        1
-    );
 
     let mut group = c.benchmark_group("full_index_huge_attribute");
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
-    group.throughput(Throughput::Bytes(html.len() as u64));
-    group.bench_function("64_kib_value", |b| {
-        b.iter(|| {
-            let store = parse(black_box(&html), black_box(queries)).unwrap();
-            black_box(store.get("[data-x]").unwrap().count())
-        })
-    });
+    for (name, html) in [
+        ("aligned_64_kib_value", aligned),
+        ("prefixed_64_kib_value", prefixed),
+    ] {
+        assert_eq!(
+            parse(&html, queries)
+                .unwrap()
+                .get("[data-x]")
+                .unwrap()
+                .count(),
+            1
+        );
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(name, &html, |b, html| {
+            b.iter(|| {
+                let store = parse(black_box(html), black_box(queries)).unwrap();
+                black_box(store.get("[data-x]").unwrap().count())
+            })
+        });
+    }
     group.finish();
 }
 

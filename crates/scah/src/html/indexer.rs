@@ -10,6 +10,9 @@ const ROLLING_WINDOW_BLOCKS: usize = 256;
 const FULL_INDEX_CHUNK_BYTES: usize = 64 * 1024;
 const FULL_INDEX_CHUNK_EVENTS: usize = 2_048;
 const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
+// Attribute-sensitive sampling does more setup work; below this crossover the
+// rolling path is faster even for one long sparse text span.
+const FULL_INDEX_MIN_ATTRIBUTE_BYTES: usize = 128 * 1024;
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
 const FULL_INDEX_SAMPLE_WINDOWS: usize = 4;
 const FULL_INDEX_DENSITY_WINDOW_BYTES: usize = 8 * 1024;
@@ -1058,9 +1061,9 @@ struct FullIndexWindowSample {
     less_than_count: usize,
     markup_bytes: usize,
     lexical_state: SampleLexicalState,
-    // Set only when bounded tag parsing, rather than the forward heuristic,
-    // establishes that a sampled tag exceeds the cheap attribute threshold.
-    confirmed_oversized_tag: bool,
+    // Direct bounded tag parsing and an end-aligned `>` probe are strong
+    // enough signals to reject the extra full-index pass immediately.
+    decisive_oversized_tag: bool,
 }
 
 impl FullIndexWindowSample {
@@ -1098,7 +1101,7 @@ impl FullIndexSample {
             && self
                 .windows
                 .iter()
-                .any(|window| window.confirmed_oversized_tag)
+                .any(|window| window.decisive_oversized_tag)
         {
             return false;
         }
@@ -1122,15 +1125,18 @@ fn sample_full_index_windows(
 ) -> FullIndexSample {
     let mut sample = FullIndexSample::default();
     let window_stride = source.len() / FULL_INDEX_SAMPLE_WINDOWS;
-    let mut next_boundary_cache = None;
+    let window_capacity = window_bytes.min(window_stride);
 
-    for window in 0..FULL_INDEX_SAMPLE_WINDOWS {
-        let start = window_stride * window;
-        let available = source
-            .len()
-            .saturating_sub(start)
-            .min(window_bytes)
-            .min(window_stride);
+    // Inspect the document boundaries before the interior quarters. An
+    // end-aligned window can distinguish a tag ending near EOF from a long
+    // text node followed by a closing tag, and may settle the policy early.
+    for window in [0, FULL_INDEX_SAMPLE_WINDOWS - 1, 1, 2] {
+        let start = if window == FULL_INDEX_SAMPLE_WINDOWS - 1 {
+            source.len().saturating_sub(window_capacity)
+        } else {
+            window_stride * window
+        };
+        let available = source.len().saturating_sub(start).min(window_capacity);
         let bytes = available / SIMD_BLOCK_BYTES * SIMD_BLOCK_BYTES;
         let end = start + bytes;
 
@@ -1148,14 +1154,20 @@ fn sample_full_index_windows(
         if measure_markup {
             (current.markup_bytes, current.lexical_state) =
                 sampled_markup_bytes(source, start, end);
-            current.confirmed_oversized_tag =
+            current.decisive_oversized_tag =
                 current.lexical_state == SampleLexicalState::OversizedTag;
+            if current.decisive_oversized_tag {
+                return sample;
+            }
             if current.lexical_state == SampleLexicalState::Unknown {
-                let (state, boundary) = next_boundary_cache
-                    .filter(|(_, boundary)| *boundary >= start)
-                    .unwrap_or_else(|| resolve_unknown_sample_start(source, start));
+                let (state, _) = resolve_unknown_sample_start(source, start);
                 current.lexical_state = state;
-                next_boundary_cache = Some((state, boundary));
+                if window == FULL_INDEX_SAMPLE_WINDOWS - 1
+                    && state == SampleLexicalState::OversizedTag
+                {
+                    current.decisive_oversized_tag = true;
+                    return sample;
+                }
             }
         }
     }
@@ -1200,7 +1212,12 @@ impl AutoTagIndexer {
         classifier: BlockClassifier,
         attributes_may_be_parsed: bool,
     ) -> bool {
-        if source.len() < FULL_INDEX_MIN_BYTES || source.len() > u32::MAX as usize {
+        let minimum_bytes = if attributes_may_be_parsed {
+            FULL_INDEX_MIN_ATTRIBUTE_BYTES
+        } else {
+            FULL_INDEX_MIN_BYTES
+        };
+        if source.len() < minimum_bytes || source.len() > u32::MAX as usize {
             return false;
         }
 
@@ -1795,7 +1812,10 @@ mod tests {
     #[test]
     fn adaptive_policy_keeps_a_tag_spanning_sample_windows_scalar() {
         let value = "x".repeat(48 * 1024);
-        let source = format!("<a data-padding=\"{value}\" data-x=\"yes\">x</a>");
+        let source = format!(
+            "<main>{}<a data-padding=\"{value}\" data-x=\"yes\">x</a></main>",
+            "x".repeat(8 * 1024)
+        );
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
@@ -1835,6 +1855,17 @@ mod tests {
         indexer.prepare(source.as_bytes());
 
         assert!(indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_keeps_small_attribute_sensitive_text_gaps_scalar() {
+        let text = "x".repeat(64 * 1024);
+        let source = format!("<a data-x=\"yes\">{text}</a>");
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(!indexer.uses_full_index());
     }
 
     #[test]
