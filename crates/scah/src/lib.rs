@@ -125,7 +125,8 @@ pub use store::{CapacityOptions, Element, ElementId, Store};
 
 /// Internal APIs used by benchmarks.
 ///
-/// Cursor instrumentation is available only with `bench-internals`.
+/// Cursor instrumentation is available only with `bench-internals`. SIMD
+/// scanner access is available only with `simd-bench-internals`.
 #[doc(hidden)]
 pub mod bench_internals {
     pub use crate::html::tag::{ScopeKind, TagFlags};
@@ -136,7 +137,7 @@ pub mod bench_internals {
     pub use crate::engine::multiplexer::CursorStatsSnapshot;
     #[cfg(feature = "bench-internals")]
     use crate::engine::multiplexer::QueryMultiplexer;
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "simd-bench-internals")]
     use crate::html::BlockClassifier;
     #[cfg(feature = "bench-internals")]
     use crate::store::Store;
@@ -144,13 +145,13 @@ pub mod bench_internals {
     use crate::{ParseError, QuerySpec, Reader, XHtmlParser};
 
     /// Reusable production `<` scanner for delimiter-distance benchmarks.
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "simd-bench-internals")]
     #[derive(Debug, Default)]
     pub struct LessThanScanner {
         classifier: BlockClassifier,
     }
 
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "simd-bench-internals")]
     impl LessThanScanner {
         #[inline]
         pub fn find(&self, source: &[u8], from: usize) -> Option<usize> {

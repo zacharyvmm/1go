@@ -5,5 +5,5 @@ pub mod parser;
 mod simd_classifier;
 pub mod tag;
 
-#[cfg(feature = "bench-internals")]
+#[cfg(feature = "simd-bench-internals")]
 pub(crate) use simd_classifier::BlockClassifier;
