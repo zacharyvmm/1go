@@ -1127,16 +1127,28 @@ fn sample_full_index_windows(
     let window_stride = source.len() / FULL_INDEX_SAMPLE_WINDOWS;
     let window_capacity = window_bytes.min(window_stride);
 
-    // Inspect the document boundaries before the interior quarters. An
-    // end-aligned window can distinguish a tag ending near EOF from a long
-    // text node followed by a closing tag, and may settle the policy early.
+    // Inspect the document boundaries before the interior quarters. For a
+    // closing tag near EOF, end the tail window immediately before that tag.
+    // This lets it distinguish a large opening tag from a long text node
+    // followed by the same closing boundary.
     for window in [0, FULL_INDEX_SAMPLE_WINDOWS - 1, 1, 2] {
+        let end_limit = if window == FULL_INDEX_SAMPLE_WINDOWS - 1 {
+            let suffix_start = source
+                .len()
+                .saturating_sub(FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES);
+            source[suffix_start..]
+                .iter()
+                .position(|&byte| byte == b'<')
+                .map_or(source.len(), |offset| suffix_start + offset)
+        } else {
+            source.len()
+        };
         let start = if window == FULL_INDEX_SAMPLE_WINDOWS - 1 {
-            source.len().saturating_sub(window_capacity)
+            end_limit.saturating_sub(window_capacity)
         } else {
             window_stride * window
         };
-        let available = source.len().saturating_sub(start).min(window_capacity);
+        let available = end_limit.saturating_sub(start).min(window_capacity);
         let bytes = available / SIMD_BLOCK_BYTES * SIMD_BLOCK_BYTES;
         let end = start + bytes;
 
@@ -1816,6 +1828,29 @@ mod tests {
             "<main>{}<a data-padding=\"{value}\" data-x=\"yes\">x</a></main>",
             "x".repeat(8 * 1024)
         );
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+
+        indexer.prepare(source.as_bytes());
+
+        assert!(!indexer.uses_full_index());
+    }
+
+    #[test]
+    fn adaptive_policy_detects_misaligned_large_tag_above_attribute_cutoff() {
+        let value = "x".repeat(256 * 1024);
+        let source = format!(
+            "<main>{}<a data-padding=\"{value}\" data-x=\"yes\">x</a></main>",
+            "x".repeat(8 * 1024)
+        );
+        assert!(source.len() > FULL_INDEX_MIN_ATTRIBUTE_BYTES);
+        let sample = sample_full_index_windows(
+            source.as_bytes(),
+            BlockClassifier::default(),
+            FULL_INDEX_MARKUP_WINDOW_BYTES,
+            true,
+        );
+        assert!(sample.windows[FULL_INDEX_SAMPLE_WINDOWS - 1].decisive_oversized_tag);
+
         let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
 
         indexer.prepare(source.as_bytes());
