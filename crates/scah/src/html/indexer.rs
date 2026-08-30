@@ -297,6 +297,14 @@ mod tests {
 
     #[test]
     fn empty_opening_tags_skip_the_whole_candidate() {
+        for source in ["<>", "< >", "<<>>"] {
+            assert_eq!(
+                ScalarTagIndexer.next(source.as_bytes(), 0),
+                None,
+                "source={source:?}"
+            );
+        }
+
         for source in ["<><p>", "< ><p>", "<<>><p>"] {
             let TagEvent::Open(open) = ScalarTagIndexer.next(source.as_bytes(), 0).unwrap() else {
                 panic!("expected opening tag for source={source:?}");
