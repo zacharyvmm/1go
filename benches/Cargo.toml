@@ -9,6 +9,7 @@ scah = { path = "../crates/scah" }
 
 # Benchmarking Tools
 criterion = { version = "0.8.1", features = ["html_reports"] }
+memchr = "2.7.6"
 
 # Competitor libraries
 lexbor_css = { git = "https://github.com/zacharyvmm/lexbor_css.git", rev = "d6aa234648c6d1883c3563431b62688a109e3142", features = ["vendor"] }
@@ -87,4 +88,9 @@ harness = false
 [[bench]]
 name = "speed_bench_escape_scanner"
 path = "escape_scanner/speed_bench.rs"
+harness = false
+
+[[bench]]
+name = "speed_bench_element_tape"
+path = "element_tape/speed_bench.rs"
 harness = false
