@@ -1453,21 +1453,43 @@ mod tests {
     }
 
     #[test]
-    fn empty_opening_tags_skip_the_whole_candidate() {
+    fn empty_opening_tags_are_skipped_without_hiding_later_tags() {
         for source in ["<>", "< >", "<<>>"] {
+            let bytes = source.as_bytes();
             assert_eq!(
-                ScalarTagIndexer.next(source.as_bytes(), 0),
+                ScalarTagIndexer.next(bytes, 0),
                 None,
-                "source={source:?}"
+                "scalar source={source:?}"
             );
+            assert_eq!(
+                PackedTagIndexer::default().next(bytes, 0),
+                None,
+                "rolling source={source:?}"
+            );
+
+            let mut full = PackedTagIndexer::new(IndexingMode::FullDocument);
+            assert_eq!(full.next(bytes, 0), None, "full source={source:?}");
         }
 
         for source in ["<><p>", "< ><p>", "<<>><p>"] {
-            let TagEvent::Open(open) = ScalarTagIndexer.next(source.as_bytes(), 0).unwrap() else {
-                panic!("expected opening tag for source={source:?}");
+            let bytes = source.as_bytes();
+            let expected_start = source.rfind('<').unwrap();
+            let TagEvent::Open(scalar_open) = ScalarTagIndexer.next(bytes, 0).unwrap() else {
+                panic!("expected scalar opening tag for source={source:?}");
             };
-            assert_eq!(open.start, source.rfind('<').unwrap());
-            assert_eq!(open.name(source.as_bytes()), "p");
+            assert_eq!(scalar_open.start, expected_start);
+            assert_eq!(scalar_open.name(bytes), "p");
+
+            for mode in [IndexingMode::Rolling, IndexingMode::FullDocument] {
+                let mut packed = PackedTagIndexer::new(mode);
+                let event = packed.next(bytes, 0).expect("later tag should be found");
+                let TagEvent::Open(open) = event else {
+                    panic!("expected opening tag for source={source:?}, mode={mode:?}");
+                };
+                assert_eq!(open.start, expected_start, "source={source:?}");
+                assert_eq!(open.name(bytes), "p", "source={source:?}, mode={mode:?}");
+            }
+        }
     }
 
     #[test]
