@@ -31,7 +31,7 @@ impl<'query> AttributeNames<'query> {
         Self::Static(names)
     }
 
-    pub fn as_slice(&self) -> &[&'query str] {
+    pub const fn as_slice(&self) -> &[&'query str] {
         match self {
             Self::Static(names) => names,
             Self::Owned(names) => names,
@@ -82,6 +82,7 @@ impl<'query> PredicateMetadata<'query> {
         }
     }
 
+    #[doc(hidden)]
     pub const fn new_const(
         name: Option<&'query str>,
         needs_id: bool,
@@ -98,6 +99,54 @@ impl<'query> PredicateMetadata<'query> {
             needs_class,
             attribute_names,
         }
+    }
+
+    const fn matches_predicate(&self, predicate: &ElementPredicate<'query>) -> bool {
+        let names_match = match (self.name, predicate.name) {
+            (Some(metadata_name), Some(predicate_name)) => {
+                const_ascii_case_insensitive_eq(metadata_name, predicate_name)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        let predicate_name_hash = match predicate.name {
+            Some(name) => ascii_case_insensitive_hash(name),
+            None => 0,
+        };
+        if !names_match || self.name_hash != predicate_name_hash {
+            return false;
+        }
+
+        let attributes = predicate.attributes.as_slice();
+        let needs_id = predicate.id.is_some() || has_attribute_named(attributes, "id");
+        let needs_class =
+            !predicate.classes.as_slice().is_empty() || has_attribute_named(attributes, "class");
+        if self.needs_id != needs_id || self.needs_class != needs_class {
+            return false;
+        }
+
+        let metadata_names = self.attribute_names.as_slice();
+        let mut metadata_index = 0;
+        let mut attribute_index = 0;
+        while attribute_index < attributes.len() {
+            let attribute_name = attributes[attribute_index].name;
+            if !is_metadata_attribute(attribute_name)
+                && !has_previous_attribute(attributes, attribute_index, attribute_name)
+            {
+                if metadata_index >= metadata_names.len()
+                    || !const_ascii_case_insensitive_eq(
+                        metadata_names[metadata_index],
+                        attribute_name,
+                    )
+                {
+                    return false;
+                }
+                metadata_index += 1;
+            }
+            attribute_index += 1;
+        }
+
+        metadata_index == metadata_names.len()
     }
 
     #[inline]
@@ -142,11 +191,21 @@ impl<'query> Transition<'query> {
         }
     }
 
+    /// Constructs a transition for a generated static query.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `metadata` does not describe `predicate`.
+    #[doc(hidden)]
     pub const fn new_const(
         guard: Combinator,
         predicate: ElementPredicate<'query>,
         metadata: PredicateMetadata<'query>,
     ) -> Self {
+        assert!(
+            metadata.matches_predicate(&predicate),
+            "predicate metadata does not match predicate"
+        );
         Self {
             guard,
             predicate,
@@ -205,6 +264,71 @@ impl<'query> Transition<'query> {
     pub fn back<'html>(&self, _element: &'html str, current_depth: u16, last_depth: u16) -> bool {
         last_depth == current_depth
     }
+}
+
+const fn const_ascii_case_insensitive_eq(left: &str, right: &str) -> bool {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    if left_bytes.len() != right_bytes.len() {
+        return false;
+    }
+
+    let mut index = 0;
+    while index < left_bytes.len() {
+        let left_byte = left_bytes[index];
+        let right_byte = right_bytes[index];
+        let left_lower = if left_byte.is_ascii_uppercase() {
+            left_byte + (b'a' - b'A')
+        } else {
+            left_byte
+        };
+        let right_lower = if right_byte.is_ascii_uppercase() {
+            right_byte + (b'a' - b'A')
+        } else {
+            right_byte
+        };
+        if left_lower != right_lower {
+            return false;
+        }
+        index += 1;
+    }
+
+    true
+}
+
+const fn has_attribute_named(
+    attributes: &[crate::query::selector::AttributeSelection<'_>],
+    expected: &str,
+) -> bool {
+    let mut index = 0;
+    while index < attributes.len() {
+        if const_ascii_case_insensitive_eq(attributes[index].name, expected) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+const fn is_metadata_attribute(name: &str) -> bool {
+    const_ascii_case_insensitive_eq(name, "id") || const_ascii_case_insensitive_eq(name, "class")
+}
+
+const fn has_previous_attribute(
+    attributes: &[crate::query::selector::AttributeSelection<'_>],
+    end: usize,
+    name: &str,
+) -> bool {
+    let mut index = 0;
+    while index < end {
+        if !is_metadata_attribute(attributes[index].name)
+            && const_ascii_case_insensitive_eq(attributes[index].name, name)
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -311,6 +435,29 @@ mod tests {
                 .matches_name("a", ascii_case_insensitive_hash("a"))
         );
         assert!(transition.metadata().needs_id());
+    }
+
+    #[test]
+    #[should_panic(expected = "predicate metadata does not match predicate")]
+    fn const_constructor_rejects_inconsistent_metadata() {
+        let predicate = ElementPredicate {
+            name: Some("a"),
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from_static(&[AttributeSelection {
+                name: "href",
+                value: None,
+                kind: AttributeSelectionKind::Presence,
+            }]),
+        };
+        let metadata = PredicateMetadata::new_const(
+            Some("a"),
+            false,
+            false,
+            AttributeNames::from_static(&[]),
+        );
+
+        let _ = Transition::new_const(Combinator::Descendant, predicate, metadata);
     }
 
     #[test]
