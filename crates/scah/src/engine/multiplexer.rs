@@ -452,6 +452,11 @@ where
     }
 
     #[cfg(test)]
+    pub(crate) fn active_set_is_dense(&self) -> bool {
+        self.active.is_none()
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_runner_ids(&self) -> &[RunnerId] {
         match &self.active {
             None => panic!("dense active set has implicit IDs"),
@@ -640,10 +645,12 @@ mod tests {
         let mut parser = XHtmlParser::new(QueryMultiplexer::new(&queries));
         let mut reader = Reader::new("<main><h1></h1><footer></footer></main>");
 
+        assert!(parser.selectors.active_set_is_dense());
         assert!(parser.next(&mut reader)); // <main>
         assert!(parser.next(&mut reader)); // <h1>
         assert!(parser.next(&mut reader)); // </h1>: runners 0 and 2 retire together
 
+        assert!(!parser.selectors.active_set_is_dense());
         assert_eq!(
             parser.selectors.active_runner_ids(),
             &[RunnerId(1), RunnerId(3)]
