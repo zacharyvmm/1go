@@ -181,6 +181,18 @@ test('Save defaults omitted object to false', () => {
   expect(span?.textContent).toBeNull()
 })
 
+test('Save can match attributes without retaining them', () => {
+  const html = `<a id="hero" class="promoted" href="/post">Post</a>`
+  const query = Query.all('a.promoted[href]', { attributes: false }).build()
+  const store = parse(html, [query])
+
+  const anchor = store.get('a.promoted[href]')?.at(0)
+  expect(anchor?.name).toBe('a')
+  expect(anchor?.attributes).toEqual({})
+  expect(anchor?.id).toBeNull()
+  expect(anchor?.className).toBeNull()
+})
+
 test("store remains valid after query object goes out of scope", () => {
   // Query tapes (selector strings) are owned by the query objects.
   // This test verifies that dropping the query does not invalidate

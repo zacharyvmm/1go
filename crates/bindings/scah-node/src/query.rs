@@ -10,6 +10,7 @@ use napi_derive::napi;
 pub struct JsSave {
     pub inner_html: Option<bool>,
     pub text_content: Option<bool>,
+    pub attributes: Option<bool>,
 }
 
 #[napi]
@@ -19,6 +20,7 @@ impl JsSave {
         Self {
             inner_html: Some(true),
             text_content: Some(false),
+            attributes: Some(true),
         }
     }
 
@@ -27,6 +29,7 @@ impl JsSave {
         Self {
             inner_html: Some(false),
             text_content: Some(true),
+            attributes: Some(true),
         }
     }
 
@@ -35,6 +38,7 @@ impl JsSave {
         Self {
             inner_html: Some(true),
             text_content: Some(true),
+            attributes: Some(true),
         }
     }
 
@@ -43,14 +47,29 @@ impl JsSave {
         Self {
             inner_html: Some(false),
             text_content: Some(false),
+            attributes: Some(true),
         }
     }
 
     #[napi]
-    pub fn new(inner_html: Option<bool>, text_content: Option<bool>) -> Self {
+    pub fn name_only() -> Self {
+        Self {
+            inner_html: Some(false),
+            text_content: Some(false),
+            attributes: Some(false),
+        }
+    }
+
+    #[napi]
+    pub fn new(
+        inner_html: Option<bool>,
+        text_content: Option<bool>,
+        attributes: Option<bool>,
+    ) -> Self {
         Self {
             inner_html,
             text_content,
+            attributes,
         }
     }
 
@@ -58,6 +77,7 @@ impl JsSave {
         Save {
             inner_html: self.inner_html.unwrap_or(false),
             text_content: self.text_content.unwrap_or(false),
+            attributes: self.attributes.unwrap_or(true),
         }
     }
 }

@@ -57,4 +57,5 @@ export declare function parse(html: string, queries: Array<JsQuery>): Store
 export interface Save {
   innerHtml?: boolean
   textContent?: boolean
+  attributes?: boolean
 }

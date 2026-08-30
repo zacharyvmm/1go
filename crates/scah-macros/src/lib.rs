@@ -94,10 +94,20 @@ fn parse_kind(input: ParseStream<'_>) -> Result<SelectionKind> {
 }
 
 fn parse_save_expr(expr: &Expr) -> Result<Save> {
+    if let Expr::MethodCall(call) = expr {
+        if call.method == "without_attributes" && call.args.is_empty() {
+            return Ok(parse_save_expr(&call.receiver)?.without_attributes());
+        }
+        return Err(syn::Error::new_spanned(
+            expr,
+            "unsupported Save modifier in query!",
+        ));
+    }
+
     let Expr::Call(call) = expr else {
         return Err(syn::Error::new_spanned(
             expr,
-            "expected Save::all(), Save::none(), Save::only_inner_html(), or Save::only_text_content()",
+            "expected a supported Save constructor",
         ));
     };
     if !call.args.is_empty() {
@@ -126,6 +136,7 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
             ["Save", "none"] => Ok(Save::none()),
             ["Save", "only_inner_html"] => Ok(Save::only_inner_html()),
             ["Save", "only_text_content"] => Ok(Save::only_text_content()),
+            ["Save", "name_only"] => Ok(Save::name_only()),
             _ => Err(syn::Error::new_spanned(
                 expr,
                 "unsupported save expression in query!",
@@ -281,7 +292,8 @@ fn query_section_tokens(section: &QuerySection<'_>) -> proc_macro2::TokenStream 
 fn save_tokens(save: Save) -> proc_macro2::TokenStream {
     let inner_html = save.inner_html;
     let text_content = save.text_content;
-    quote! { ::scah::Save { inner_html: #inner_html, text_content: #text_content } }
+    let attributes = save.attributes;
+    quote! { ::scah::Save { inner_html: #inner_html, text_content: #text_content, attributes: #attributes } }
 }
 
 fn selection_kind_tokens(kind: SelectionKind) -> proc_macro2::TokenStream {
@@ -338,7 +350,8 @@ fn option_query_section_id_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::QueryNode;
+    use super::{QueryNode, parse_save_expr};
+    use syn::Expr;
 
     #[test]
     fn rejects_selector_constants_with_actionable_error() {
@@ -351,5 +364,24 @@ mod tests {
         assert!(message.contains("selector must be a string literal"));
         assert!(message.contains("constants like `QUERY` are not resolved by this macro"));
         assert!(message.contains("Query::all(QUERY, ...)"));
+    }
+
+    #[test]
+    fn accepts_name_only_save_constructor() {
+        let expression = syn::parse_str::<Expr>("Save::name_only()").unwrap();
+        assert_eq!(
+            parse_save_expr(&expression).unwrap(),
+            scah_query_ir::Save::name_only()
+        );
+    }
+
+    #[test]
+    fn accepts_without_attributes_save_modifier() {
+        let expression =
+            syn::parse_str::<Expr>("Save::only_text_content().without_attributes()").unwrap();
+        assert_eq!(
+            parse_save_expr(&expression).unwrap(),
+            scah_query_ir::Save::only_text_content().without_attributes()
+        );
     }
 }

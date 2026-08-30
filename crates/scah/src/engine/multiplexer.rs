@@ -1,3 +1,4 @@
+use super::attribute_interest::AttributeInterest;
 use super::executor::QueryExecutor;
 use crate::XHtmlElement;
 use crate::store::ElementId;
@@ -120,10 +121,15 @@ where
     /// Whether the active query frontier may inspect or save attributes for
     /// this element name.
     #[inline]
-    pub(crate) fn requires_attributes_for(&self, name: &str) -> bool {
-        self.runners
-            .iter()
-            .any(|runner| runner.requires_attributes_for(name))
+    pub(crate) fn attribute_interest_for(&self, name: &str) -> AttributeInterest<'query> {
+        let mut interest = AttributeInterest::default();
+        for runner in &self.runners {
+            runner.extend_attribute_interest_for(name, &mut interest);
+            if interest.requires_all() {
+                break;
+            }
+        }
+        interest
     }
 
     pub(crate) fn next_into(
@@ -133,14 +139,19 @@ where
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
     ) {
-        let len = store.elements.len();
         save_hits.clear();
         for (runner_index, session) in self.runners.iter_mut().enumerate() {
             session.next(runner_index, xhtml_element, position, store, save_hits);
         }
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
-        if len == store.elements.len() {
+        let retains_parsed_attributes = save_hits.iter().any(|hit| {
+            store.elements[hit.element_id]
+                .attributes
+                .as_ref()
+                .is_some_and(|range| !range.is_empty())
+        });
+        if !retains_parsed_attributes {
             xhtml_element.remove_attributes(&mut store.attributes);
         }
     }

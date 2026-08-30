@@ -256,9 +256,13 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     ) -> ElementId {
         let new_element = Element {
             name: element.name,
-            class: element.class,
-            id: element.id,
-            attributes: self.attributes.attribute_slice_to_range(element.attributes),
+            class: selection.save.attributes.then_some(element.class).flatten(),
+            id: selection.save.attributes.then_some(element.id).flatten(),
+            attributes: if selection.save.attributes {
+                self.attributes.attribute_slice_to_range(element.attributes)
+            } else {
+                None
+            },
             ..Default::default()
         };
 

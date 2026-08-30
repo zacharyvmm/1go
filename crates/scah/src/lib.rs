@@ -400,6 +400,62 @@ mod tests {
         assert_eq!(a.attribute(&store, "Href"), Some("x"));
     }
 
+    #[test]
+    fn name_only_capture_matches_attributes_without_storing_them() {
+        let html = concat!(
+            "<a id='one' class='promoted' href='/one'>one</a>",
+            "<a id='two' class='promoted' href='/two'>two</a>",
+            "<a id='three' class='promoted' href='/three'>three</a>"
+        );
+        let queries = &[Query::all("a.promoted[href]", Save::name_only())
+            .unwrap()
+            .build()];
+
+        let store = parse(html, queries).unwrap();
+        let anchors = store.get("a.promoted[href]").unwrap().collect::<Vec<_>>();
+        assert_eq!(anchors.len(), 3);
+        let anchor = anchors[0];
+        assert_eq!(anchor.name, "a");
+        assert_eq!(anchor.id, None);
+        assert_eq!(anchor.class, None);
+        assert_eq!(anchor.attributes(&store), None);
+        assert_eq!(store.attributes.len(), 0);
+    }
+
+    #[test]
+    fn name_only_queries_discard_attributes_when_another_query_saves() {
+        let html = "<a href='/kept'>link</a>";
+        let queries = &[
+            Query::all("a[href='/missing']", Save::name_only())
+                .unwrap()
+                .build(),
+            Query::all("a", Save::name_only()).unwrap().build(),
+        ];
+
+        let store = parse(html, queries).unwrap();
+        assert_eq!(store.get("a").unwrap().count(), 1);
+        assert_eq!(store.attributes.len(), 0);
+    }
+
+    #[test]
+    fn attribute_capture_is_independent_for_queries_on_the_same_element() {
+        let html = "<a id='hero' class='promoted' href='/kept'>link</a>";
+        let queries = &[
+            Query::all("a.promoted[href]", Save::name_only())
+                .unwrap()
+                .build(),
+            Query::all("a", Save::none()).unwrap().build(),
+        ];
+
+        let store = parse(html, queries).unwrap();
+        let lean = store.get("a.promoted[href]").unwrap().next().unwrap();
+        let complete = store.get("a").unwrap().next().unwrap();
+        assert_eq!(lean.attributes(&store), None);
+        assert_eq!(complete.id, Some("hero"));
+        assert_eq!(complete.class, Some("promoted"));
+        assert_eq!(complete.attribute(&store, "href"), Some("/kept"));
+    }
+
     #[cfg(feature = "bench-internals")]
     #[test]
     fn cursor_stats_disabled_for_normal_multiplexer() {
