@@ -1613,4 +1613,14 @@ mod tests {
         assert_eq!(parser.attribute_parse_count, 2);
         assert_eq!(parser.matches().get("div.hit").unwrap().count(), 1);
     }
+
+    #[test]
+    fn empty_opening_tags_do_not_reach_attribute_preflight() {
+        let html = "<>< > <<>><p data-x='hit'></p>";
+        let queries = &[Query::all("[data-x]", Save::all()).unwrap().build()];
+
+        let store = parse(html, queries).expect("parse succeeds");
+
+        assert_eq!(store.get("[data-x]").unwrap().count(), 1);
+    }
 }

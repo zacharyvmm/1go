@@ -142,86 +142,94 @@ fn find_comment_end(source: &[u8], content_start: usize) -> usize {
 
 impl TagIndexer for ScalarTagIndexer {
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
-        let relative_start = source.get(from..)?.iter().position(|&byte| byte == b'<')?;
-        let start = from + relative_start;
-        let mut position = start + 1;
+        let mut from = from;
+        loop {
+            let relative_start = source.get(from..)?.iter().position(|&byte| byte == b'<')?;
+            let start = from + relative_start;
+            let mut position = start + 1;
 
-        // Match the legacy parser's tolerance for whitespace and repeated
-        // `<` bytes before a tag name.
-        while source
-            .get(position)
-            .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
-        {
-            position += 1;
-        }
-
-        match source.get(position).copied() {
-            Some(b'/') => {
-                let content_start = position + 1;
-                let gt = source[content_start..]
-                    .iter()
-                    .position(|&byte| byte == b'>')
-                    .map_or(source.len(), |offset| content_start + offset);
-                let mut name_start = content_start;
-                let mut name_end = gt;
-                while name_start < name_end && is_html_whitespace(source[name_start]) {
-                    name_start += 1;
-                }
-                while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
-                    name_end -= 1;
-                }
-                Some(TagEvent::Complete(TagSpan {
-                    start,
-                    end: if gt < source.len() { gt + 1 } else { gt },
-                    kind: TagKind::Close,
-                    name: name_start..name_end,
-                }))
+            // Match the legacy parser's tolerance for whitespace and repeated
+            // `<` bytes before a tag name.
+            while source
+                .get(position)
+                .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
+            {
+                position += 1;
             }
-            Some(b'!') => {
-                let after_bang = position + 1;
-                let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
-                    find_comment_end(source, after_bang + 2)
-                } else {
-                    source[after_bang..]
+
+            let event = match source.get(position).copied() {
+                Some(b'/') => {
+                    let content_start = position + 1;
+                    let gt = source[content_start..]
                         .iter()
                         .position(|&byte| byte == b'>')
-                        .map_or(source.len(), |offset| after_bang + offset + 1)
-                };
-                Some(TagEvent::Complete(TagSpan {
-                    start,
-                    end,
-                    kind: TagKind::Ignored,
-                    name: position..position,
-                }))
-            }
-            // A bare or repeated `<` at EOF is incomplete markup, not an
-            // opening element. Returning an empty name would violate the
-            // parser's element-builder contract when a wildcard query asks
-            // for attributes.
-            None => None,
-            Some(_) => {
-                let name_start = position;
-                while source
-                    .get(position)
-                    .is_some_and(|&byte| !is_name_boundary(byte))
-                {
-                    position += 1;
+                        .map_or(source.len(), |offset| content_start + offset);
+                    let mut name_start = content_start;
+                    let mut name_end = gt;
+                    while name_start < name_end && is_html_whitespace(source[name_start]) {
+                        name_start += 1;
+                    }
+                    while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
+                        name_end -= 1;
+                    }
+                    TagEvent::Complete(TagSpan {
+                        start,
+                        end: if gt < source.len() { gt + 1 } else { gt },
+                        kind: TagKind::Close,
+                        name: name_start..name_end,
+                    })
                 }
-
-                let mut name_end = position;
-                if source.get(position) == Some(&b'>')
-                    && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
-                {
-                    name_end -= 1;
+                Some(b'!') => {
+                    let after_bang = position + 1;
+                    let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
+                        find_comment_end(source, after_bang + 2)
+                    } else {
+                        source[after_bang..]
+                            .iter()
+                            .position(|&byte| byte == b'>')
+                            .map_or(source.len(), |offset| after_bang + offset + 1)
+                    };
+                    TagEvent::Complete(TagSpan {
+                        start,
+                        end,
+                        kind: TagKind::Ignored,
+                        name: position..position,
+                    })
                 }
+                // A bare or repeated `<` at EOF is incomplete markup, not an
+                // opening element. Returning an empty name would violate the
+                // parser's element-builder contract when a wildcard query asks
+                // for attributes.
+                None => return None,
+                Some(_) => {
+                    let name_start = position;
+                    while source
+                        .get(position)
+                        .is_some_and(|&byte| !is_name_boundary(byte))
+                    {
+                        position += 1;
+                    }
 
-                Some(TagEvent::Open(OpenTagStart {
-                    start,
-                    name: name_start..name_end,
-                    attributes_start: position,
-                    end_hint: None,
-                }))
-            }
+                    let mut name_end = position;
+                    if source.get(position) == Some(&b'>')
+                        && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
+                    {
+                        name_end -= 1;
+                    }
+                    if name_start == name_end {
+                        from = find_unquoted_tag_end(source, position).max(start + 1);
+                        continue;
+                    }
+
+                    TagEvent::Open(OpenTagStart {
+                        start,
+                        name: name_start..name_end,
+                        attributes_start: position,
+                        end_hint: None,
+                    })
+                }
+            };
+            return Some(event);
         }
     }
 }
@@ -285,5 +293,23 @@ mod tests {
         for html in ["<", "hello <", "<<<", "hello < <<"] {
             assert_eq!(ScalarTagIndexer.next(html.as_bytes(), 0), None, "{html:?}");
         }
+    }
+
+    #[test]
+    fn empty_opening_tags_skip_the_whole_candidate() {
+        for source in ["<><p>", "< ><p>", "<<>><p>"] {
+            let TagEvent::Open(open) = ScalarTagIndexer.next(source.as_bytes(), 0).unwrap() else {
+                panic!("expected opening tag for source={source:?}");
+            };
+            assert_eq!(open.start, source.rfind('<').unwrap());
+            assert_eq!(open.name(source.as_bytes()), "p");
+        }
+
+        let source = format!("{}><p>", "<".repeat(16_384));
+        let TagEvent::Open(open) = ScalarTagIndexer.next(source.as_bytes(), 0).unwrap() else {
+            panic!("expected opening tag after malformed delimiter run");
+        };
+        assert_eq!(open.start, source.len() - 3);
+        assert_eq!(open.name(source.as_bytes()), "p");
     }
 }
