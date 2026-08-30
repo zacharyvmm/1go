@@ -248,7 +248,11 @@ where
     }
 
     #[inline]
-    pub(crate) fn prepare_element(&self, name: &str, preflight: &mut ElementPreflight<'query>) {
+    pub(crate) fn prepare_element<const SIBLINGS: bool>(
+        &self,
+        name: &str,
+        preflight: &mut ElementPreflight<'query>,
+    ) {
         preflight.attribute_interest.clear();
         preflight.runner_indices.clear();
         preflight.runner_len = self.runners.len();
@@ -257,7 +261,7 @@ where
         match &self.active {
             None => {
                 for (runner_index, runner) in self.runners.iter().enumerate() {
-                    if runner.extend_attribute_interest_for(
+                    if runner.extend_attribute_interest_for::<SIBLINGS>(
                         name,
                         name_hash,
                         &mut preflight.attribute_interest,
@@ -269,7 +273,7 @@ where
             Some(ids) => {
                 for runner_id in ids.iter().copied() {
                     let runner_index = runner_id.index();
-                    if self.runners[runner_index].extend_attribute_interest_for(
+                    if self.runners[runner_index].extend_attribute_interest_for::<SIBLINGS>(
                         name,
                         name_hash,
                         &mut preflight.attribute_interest,
@@ -730,7 +734,7 @@ mod tests {
         let selectors = QueryMultiplexer::new(&queries);
         let mut preflight = ElementPreflight::default();
 
-        selectors.prepare_element("span", &mut preflight);
+        selectors.prepare_element::<false>("span", &mut preflight);
 
         assert_eq!(preflight.runner_indices.as_slice(), &[1, 2]);
         assert!(preflight.attribute_interest.includes_class());

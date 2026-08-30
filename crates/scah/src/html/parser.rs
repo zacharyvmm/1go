@@ -227,7 +227,7 @@ where
                     }
 
                     self.selectors
-                        .prepare_element(name, &mut self.temp_state.preflight);
+                        .prepare_element::<SIBLINGS>(name, &mut self.temp_state.preflight);
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {

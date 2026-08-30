@@ -143,7 +143,7 @@ where
     /// is safe, while skipping attributes needed by a viable transition is
     /// not. Save points always need the complete element because attributes
     /// are part of the stored result even when the selector itself is tag-only.
-    pub(crate) fn extend_attribute_interest_for(
+    pub(crate) fn extend_attribute_interest_for<const SIBLINGS: bool>(
         &self,
         name: &str,
         name_hash: u64,
@@ -156,8 +156,10 @@ where
                 continue;
             }
 
-            consumes_adjacent_sibling |=
-                matches!(cursor.lifetime(), CursorLifetime::AdjacentSibling);
+            if SIBLINGS {
+                consumes_adjacent_sibling |=
+                    matches!(cursor.lifetime(), CursorLifetime::AdjacentSibling);
+            }
 
             let position = cursor.position;
             let metadata = self.query.get_transition(position.state).metadata();
