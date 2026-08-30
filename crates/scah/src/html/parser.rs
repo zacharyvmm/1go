@@ -1302,6 +1302,17 @@ mod tests {
     }
 
     #[test]
+    fn comment_does_not_drop_following_text_content() {
+        let queries = &[Query::all("div", Save::only_text_content())
+            .unwrap()
+            .build()];
+        let store = parse("<div>abc<!--c-->def</div>", queries).unwrap();
+        let div = store.get("div").unwrap().next().unwrap();
+
+        assert_eq!(div.text_content(&store), Some("abc def"));
+    }
+
+    #[test]
     fn test_text_before_first_tag_does_not_break_text_content() {
         let html = "intro<div>Hello</div>";
         let mut reader = Reader::new(html);
