@@ -402,7 +402,7 @@ mod tests {
     fn test_builder_with_class_chaining() {
         let query = Query::all("a.blue.exit", Save::all()).unwrap().build();
         assert_eq!(
-            query.states[0].predicate.classes,
+            query.states[0].predicate().classes,
             ClassSelections::from_static(&["blue", "exit"])
         );
     }

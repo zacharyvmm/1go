@@ -1,5 +1,5 @@
 use super::element::builder::XHtmlTag;
-use super::indexer::{AutoTagIndexer, TagEvent, TagIndexer, TagKind};
+use super::indexer::{AutoTagIndexer, IndexingMode, TagEvent, TagIndexer, TagKind};
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
 use crate::ParseError;
@@ -43,6 +43,11 @@ where
 {
     pub fn new(selectors: QueryMultiplexer<'query, Q>) -> Self {
         let capture_text_content = selectors.requires_text_content();
+        let indexing_mode = if selectors.allows_early_exit() {
+            IndexingMode::Rolling
+        } else {
+            IndexingMode::FullDocument
+        };
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -58,7 +63,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: AutoTagIndexer::default(),
+            indexer: AutoTagIndexer::new(indexing_mode),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::default(),
@@ -67,6 +72,11 @@ where
 
     pub fn with_capacity(selectors: QueryMultiplexer<'query, Q>, capacity: usize) -> Self {
         let capture_text_content = selectors.requires_text_content();
+        let indexing_mode = if selectors.allows_early_exit() {
+            IndexingMode::Rolling
+        } else {
+            IndexingMode::FullDocument
+        };
         Self {
             position: DocumentPosition {
                 element_depth: 0,
@@ -82,7 +92,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: AutoTagIndexer::default(),
+            indexer: AutoTagIndexer::new(indexing_mode),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::with_capacity_options(
@@ -99,6 +109,7 @@ where
         if self.parse_error.is_some() {
             return false;
         }
+        self.indexer.prepare(reader.source());
         if let Some(close_tag) = self.raw_text_close {
             let source = reader.source();
             let Some(close_position) =
@@ -801,6 +812,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn full_index_skips_false_events_inside_long_raw_text() {
+        let html = format!(
+            "<script>{}<span>fake</span></script><span>real</span>",
+            "const x = 1;".repeat(2_000)
+        );
+        let queries = &[Query::all("span", Save::name_only()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+        let matches = store.get("span").unwrap().collect::<Vec<_>>();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].inner_html, None);
+    }
+
+    #[test]
+    fn full_index_finds_raw_close_after_tag_like_quote_inside_script() {
+        let html = format!(
+            "<script>{}const s = \"<div data='unterminated\";</script><span>real</span>",
+            "x".repeat(20_000)
+        );
+        let queries = &[Query::all("span", Save::name_only()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+
+        assert_eq!(store.get("span").unwrap().count(), 1);
+    }
+
+    #[test]
+    fn full_index_uses_earliest_literal_raw_close() {
+        for (open, close) in [("script", "script"), ("style", "style")] {
+            let html = format!(
+                "<{open}>{}<div data=\"</{close}><span>first</span>\"></{close}><span>second</span>",
+                "x".repeat(20_000)
+            );
+            let queries = &[Query::all("span", Save::name_only()).unwrap().build()];
+
+            let store = parse(&html, queries).unwrap();
+
+            assert_eq!(store.get("span").unwrap().count(), 2, "raw tag {open}");
+        }
+    }
+
     const BASIC_HTML_WITH_SELF_CLOSING_TAG: &str = r#"
         <html>
             <h1>Hello World</h1>
@@ -1325,6 +1379,29 @@ mod tests {
         let div = store.get("div").unwrap().next().unwrap();
 
         assert_eq!(div.text_content(&store), Some("abc def"));
+    }
+
+    #[test]
+    fn full_index_trailing_bare_delimiter_still_drains_open_elements() {
+        let unit = format!("{}<span></span>", "x".repeat(900));
+        let html = format!("<div>{}<", unit.repeat(200));
+        let queries = &[Query::all("div", Save::all()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+        let div = store.get("div").unwrap().next().unwrap();
+
+        assert_eq!(div.inner_html, Some(&html["<div>".len()..]));
+    }
+
+    #[test]
+    fn full_index_ignores_a_trailing_bare_open_delimiter() {
+        let unit = format!("<p data-x='1'>a</p>{}", "y".repeat(400));
+        let html = format!("{}<", unit.repeat(512));
+        let queries = &[Query::all("[data-x]", Save::name_only()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+
+        assert_eq!(store.get("[data-x]").unwrap().count(), 512);
     }
 
     #[test]

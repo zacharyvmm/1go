@@ -1,3 +1,5 @@
+use crate::__private::PredicateMetadata;
+#[cfg(test)]
 use crate::ElementPredicate;
 use smallvec::SmallVec;
 
@@ -31,6 +33,7 @@ impl<'query> AttributeInterest<'query> {
         self.keys.clear();
     }
 
+    #[cfg(test)]
     pub fn add_predicate(&mut self, predicate: &ElementPredicate<'query>) {
         if self.all {
             return;
@@ -58,6 +61,29 @@ impl<'query> AttributeInterest<'query> {
         }
     }
 
+    pub fn add_metadata(&mut self, metadata: &PredicateMetadata<'query>) {
+        if self.all {
+            return;
+        }
+
+        self.id |= metadata.needs_id();
+        self.class |= metadata.needs_class();
+        for &key in metadata.attribute_names() {
+            if !self
+                .keys
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(key))
+            {
+                if self.keys.len() == INLINE_ATTRIBUTE_KEYS {
+                    self.require_all();
+                    return;
+                }
+                self.keys.push(key);
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub fn merge(&mut self, other: &Self) {
         if self.all || other.is_empty() {
             return;
@@ -166,7 +192,7 @@ mod tests {
     #[test]
     fn excess_selected_keys_fall_back_without_spilling() {
         let mut interest = AttributeInterest::default();
-        interest.add_predicate(&ElementPredicate {
+        let predicate = ElementPredicate {
             name: Some("a"),
             id: None,
             classes: ClassSelections::default(),
@@ -180,7 +206,9 @@ mod tests {
                     })
                     .collect::<Vec<_>>(),
             ),
-        });
+        };
+        let metadata = PredicateMetadata::compile(&predicate);
+        interest.add_metadata(&metadata);
 
         assert!(interest.all);
         assert!(interest.keys.is_empty());

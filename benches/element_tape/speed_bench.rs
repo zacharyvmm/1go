@@ -1211,10 +1211,89 @@ fn bench_less_than_distance(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_sparse_index_policy(c: &mut Criterion) {
+    let mut html = String::with_capacity(4 * 1024 * 1024);
+    html.push_str("<main>");
+    html.push_str(&"long ordinary text ".repeat(220_000));
+    html.push_str("<span>hit</span></main>");
+    let queries = &[Query::all("span", Save::name_only())
+        .expect("sparse benchmark selector should compile")
+        .build()];
+    assert_eq!(
+        parse(&html, queries).unwrap().get("span").unwrap().count(),
+        1
+    );
+
+    let mut group = c.benchmark_group("sparse_index_policy");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    group.throughput(Throughput::Bytes(html.len() as u64));
+    group.bench_function("production_parse_all", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&html), black_box(queries)).unwrap();
+            black_box(store.get("span").unwrap().count())
+        })
+    });
+
+    let first_queries = &[Query::first("span", Save::name_only())
+        .expect("sparse first selector should compile")
+        .build()];
+    group.bench_function("production_parse_first", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&html), black_box(first_queries)).unwrap();
+            black_box(store.get("span").unwrap().count())
+        })
+    });
+
+    let mut raw_html = String::with_capacity(4 * 1024 * 1024);
+    raw_html.push_str("<script>");
+    raw_html.push_str(&"const value = 'ordinary script text';\n".repeat(110_000));
+    raw_html.push_str("</script><span>after</span>");
+    let raw_queries = &[Query::first("script", Save::name_only())
+        .expect("raw benchmark selector should compile")
+        .build()];
+    assert_eq!(
+        parse(&raw_html, raw_queries)
+            .unwrap()
+            .get("script")
+            .unwrap()
+            .count(),
+        1
+    );
+    group.throughput(Throughput::Bytes(raw_html.len() as u64));
+    group.bench_function("production_parse_first_raw", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&raw_html), black_box(raw_queries)).unwrap();
+            black_box(store.get("script").unwrap().count())
+        })
+    });
+
+    let exhaustive_raw_queries = &[Query::all("span", Save::name_only())
+        .expect("exhaustive raw benchmark selector should compile")
+        .build()];
+    assert_eq!(
+        parse(&raw_html, exhaustive_raw_queries)
+            .unwrap()
+            .get("span")
+            .unwrap()
+            .count(),
+        1
+    );
+    group.bench_function("production_parse_all_raw", |b| {
+        b.iter(|| {
+            let store = parse(black_box(&raw_html), black_box(exhaustive_raw_queries)).unwrap();
+            black_box(store.get("span").unwrap().count())
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_element_tape,
     bench_production_query_scaling,
-    bench_less_than_distance
+    bench_less_than_distance,
+    bench_sparse_index_policy
 );
 criterion_main!(benches);

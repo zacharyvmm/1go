@@ -123,6 +123,12 @@ pub use scah_query_ir::{
 pub use scah_reader::Reader;
 pub use store::{CapacityOptions, Element, ElementId, Store};
 
+/// Implementation details referenced by `query!` expansions.
+#[doc(hidden)]
+pub mod __private {
+    pub use scah_query_ir::{AttributeNames, PredicateMetadata, ascii_case_insensitive_hash};
+}
+
 /// Internal APIs used by benchmarks.
 ///
 /// Cursor instrumentation is available only with `bench-internals`. SIMD

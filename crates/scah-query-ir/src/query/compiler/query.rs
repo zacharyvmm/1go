@@ -368,15 +368,15 @@ mod tests {
 
         assert_eq!(
             query.states.iter().as_slice(),
-            [Transition {
-                predicate: ElementPredicate {
+            [Transition::new(
+                Combinator::Descendant,
+                ElementPredicate {
                     name: Some("a"),
                     id: None,
                     classes: ClassSelections::from_static(&[]),
                     attributes: AttributeSelections::from_static(&[])
-                },
-                guard: Combinator::Descendant,
-            }]
+                }
+            )]
         );
 
         assert_eq!(
@@ -403,24 +403,24 @@ mod tests {
         assert_eq!(
             query.states.iter().as_slice(),
             [
-                Transition {
-                    predicate: ElementPredicate {
+                Transition::new(
+                    Combinator::Descendant,
+                    ElementPredicate {
                         name: Some("span"),
                         id: None,
                         classes: ClassSelections::from_static(&[]),
                         attributes: AttributeSelections::from_static(&[])
-                    },
-                    guard: Combinator::Descendant,
-                },
-                Transition {
-                    predicate: ElementPredicate {
+                    }
+                ),
+                Transition::new(
+                    Combinator::Descendant,
+                    ElementPredicate {
                         name: Some("a"),
                         id: None,
                         classes: ClassSelections::from_static(&[]),
                         attributes: AttributeSelections::from_static(&[])
-                    },
-                    guard: Combinator::Descendant,
-                }
+                    }
+                )
             ]
         );
     }
@@ -436,8 +436,8 @@ mod tests {
         assert_eq!(query.states.len(), 2);
         assert_eq!(query.queries.len(), 2);
         assert_eq!(
-            query.states[1].predicate,
-            ElementPredicate {
+            query.states[1].predicate(),
+            &ElementPredicate {
                 name: Some("a"),
                 id: Some("link1"),
                 classes: ClassSelections::from_static(&["foo"]),

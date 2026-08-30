@@ -51,7 +51,7 @@ impl<'query> AttributeSelections<'query> {
         Self::Static(attributes)
     }
 
-    pub fn as_slice(&self) -> &[AttributeSelection<'query>] {
+    pub const fn as_slice(&self) -> &[AttributeSelection<'query>] {
         match self {
             Self::Static(attributes) => attributes,
             Self::Owned(attributes) => attributes,
@@ -82,7 +82,7 @@ impl<'query> ClassSelections<'query> {
         Self::Static(classes)
     }
 
-    pub fn as_slice(&self) -> &[&'query str] {
+    pub const fn as_slice(&self) -> &[&'query str] {
         match self {
             Self::Static(classes) => classes,
             Self::Owned(classes) => classes,

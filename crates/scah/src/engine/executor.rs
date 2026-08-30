@@ -1,6 +1,8 @@
 use super::attribute_interest::AttributeInterest;
 use super::cursor::{SENTINEL_SCOPE, ScopedCursor};
 use super::multiplexer::{DocumentPosition, SaveHit};
+#[cfg(any(debug_assertions, test))]
+use crate::__private::ascii_case_insensitive_hash;
 use crate::debug::ScopedCursorReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::{CursorSuppressionReason, CursorTraceKind, TraceEvent, TransitionRejectReason};
@@ -18,41 +20,6 @@ enum SpawnOutcome {
     Dominated,
 }
 
-#[inline]
-pub(super) fn ascii_case_insensitive_hash(value: &str) -> u64 {
-    value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
-#[derive(Debug)]
-struct PredicateMetadata<'query> {
-    name: Option<&'query str>,
-    name_hash: u64,
-    attribute_interest: AttributeInterest<'query>,
-}
-
-impl<'query> PredicateMetadata<'query> {
-    fn compile(predicate: &crate::ElementPredicate<'query>) -> Self {
-        let mut attribute_interest = AttributeInterest::default();
-        attribute_interest.add_predicate(predicate);
-        Self {
-            name: predicate.name,
-            name_hash: predicate.name.map_or(0, ascii_case_insensitive_hash),
-            attribute_interest,
-        }
-    }
-
-    #[inline]
-    fn matches_name(&self, name: &str, name_hash: u64) -> bool {
-        self.name.is_none_or(|expected| {
-            expected.len() == name.len()
-                && self.name_hash == name_hash
-                && expected.eq_ignore_ascii_case(name)
-        })
-    }
-}
-
 /// NFA execution engine for streaming StAX events.
 ///
 /// Cursor 0 is the sentinel root. It is never depth-pruned; query progress is
@@ -61,7 +28,7 @@ impl<'query> PredicateMetadata<'query> {
 pub struct QueryExecutor<'a, 'query, Q> {
     pub(crate) query: &'a Q,
     pub(crate) cursors: Vec<ScopedCursor>,
-    predicate_metadata: Vec<PredicateMetadata<'query>>,
+    query_lifetime: std::marker::PhantomData<&'query ()>,
 }
 
 impl<'a, 'html, 'query: 'html, Q> QueryExecutor<'a, 'query, Q>
@@ -79,11 +46,7 @@ where
         Self {
             query,
             cursors: vec![root],
-            predicate_metadata: query
-                .states()
-                .iter()
-                .map(|transition| PredicateMetadata::compile(&transition.predicate))
-                .collect(),
+            query_lifetime: std::marker::PhantomData,
         }
     }
 
@@ -193,7 +156,7 @@ where
             }
 
             let position = cursor.position;
-            let metadata = &self.predicate_metadata[position.state.index()];
+            let metadata = self.query.get_transition(position.state).metadata();
             if !metadata.matches_name(name, name_hash) {
                 continue;
             }
@@ -206,7 +169,7 @@ where
                 return true;
             }
 
-            interest.merge(&metadata.attribute_interest);
+            interest.add_metadata(metadata);
         }
         viable
     }
@@ -226,8 +189,8 @@ where
             }
 
             let position = cursor.position;
-            let metadata = &self.predicate_metadata[position.state.index()];
-            if metadata.matches_name(element.name, name_hash) {
+            let transition = self.query.get_transition(position.state);
+            if transition.metadata().matches_name(element.name, name_hash) {
                 continue;
             }
 
@@ -289,7 +252,7 @@ where
         element: &XHtmlElement<'html>,
     ) -> TransitionRejectReason {
         let transition = tree.get_transition(position.state);
-        if transition.predicate.matches_element(element) {
+        if transition.predicate().matches_element(element) {
             let _ = (depth, last_depth);
             TransitionRejectReason::DepthGuardFailed
         } else {
