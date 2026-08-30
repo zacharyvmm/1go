@@ -359,82 +359,89 @@ fn find_raw_text_close_packed(
 }
 
 fn next_event(search: &mut impl StructuralSearch, source: &[u8], from: usize) -> Option<TagEvent> {
-    let start = search.find_byte(source, from, b'<')?;
-    let mut position = start + 1;
+    let mut from = from;
+    loop {
+        let start = search.find_byte(source, from, b'<')?;
+        let mut position = start + 1;
 
-    // Match the legacy parser's tolerance for whitespace and repeated
-    // `<` bytes before a tag name.
-    while source
-        .get(position)
-        .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
-    {
-        position += 1;
-    }
-
-    match source.get(position).copied() {
-        Some(b'/') => {
-            let content_start = position + 1;
-            let gt = search
-                .find_byte(source, content_start, b'>')
-                .unwrap_or(source.len());
-            let mut name_start = content_start;
-            let mut name_end = gt;
-            while name_start < name_end && is_html_whitespace(source[name_start]) {
-                name_start += 1;
-            }
-            while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
-                name_end -= 1;
-            }
-            Some(TagEvent::Complete(TagSpan {
-                start,
-                end: if gt < source.len() { gt + 1 } else { gt },
-                kind: TagKind::Close,
-                name: name_start..name_end,
-            }))
+        // Match the legacy parser's tolerance for whitespace and repeated
+        // `<` bytes before a tag name.
+        while source
+            .get(position)
+            .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
+        {
+            position += 1;
         }
-        Some(b'!') => {
-            let after_bang = position + 1;
-            let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
-                search.find_comment_end(source, after_bang + 2)
-            } else {
-                search
-                    .find_byte(source, after_bang, b'>')
-                    .map_or(source.len(), |position| position + 1)
-            };
-            Some(TagEvent::Complete(TagSpan {
-                start,
-                end,
-                kind: TagKind::Ignored,
-                name: position..position,
-            }))
-        }
-        // A bare or repeated `<` at EOF is incomplete markup, not an opening
-        // element. Returning an empty name would violate the element-builder
-        // contract when an attribute query reaches preflight.
-        None => None,
-        Some(_) => {
-            let name_start = position;
-            while source
-                .get(position)
-                .is_some_and(|&byte| !is_name_boundary(byte))
-            {
-                position += 1;
-            }
 
-            let mut name_end = position;
-            if source.get(position) == Some(&b'>')
-                && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
-            {
-                name_end -= 1;
+        return match source.get(position).copied() {
+            Some(b'/') => {
+                let content_start = position + 1;
+                let gt = search
+                    .find_byte(source, content_start, b'>')
+                    .unwrap_or(source.len());
+                let mut name_start = content_start;
+                let mut name_end = gt;
+                while name_start < name_end && is_html_whitespace(source[name_start]) {
+                    name_start += 1;
+                }
+                while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
+                    name_end -= 1;
+                }
+                Some(TagEvent::Complete(TagSpan {
+                    start,
+                    end: if gt < source.len() { gt + 1 } else { gt },
+                    kind: TagKind::Close,
+                    name: name_start..name_end,
+                }))
             }
+            Some(b'!') => {
+                let after_bang = position + 1;
+                let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
+                    search.find_comment_end(source, after_bang + 2)
+                } else {
+                    search
+                        .find_byte(source, after_bang, b'>')
+                        .map_or(source.len(), |position| position + 1)
+                };
+                Some(TagEvent::Complete(TagSpan {
+                    start,
+                    end,
+                    kind: TagKind::Ignored,
+                    name: position..position,
+                }))
+            }
+            // A bare or repeated `<` at EOF is incomplete markup, not an opening
+            // element. Returning an empty name would violate the element-builder
+            // contract when an attribute query reaches preflight.
+            None => None,
+            Some(_) => {
+                let name_start = position;
+                while source
+                    .get(position)
+                    .is_some_and(|&byte| !is_name_boundary(byte))
+                {
+                    position += 1;
+                }
 
-            Some(TagEvent::Open(OpenTagStart {
-                start,
-                name: name_start..name_end,
-                attributes_start: position,
-                end_hint: None,
-            }))
-        }
+                let mut name_end = position;
+                if source.get(position) == Some(&b'>')
+                    && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
+                {
+                    name_end -= 1;
+                }
+                if name_start == name_end {
+                    from = search.find_tag_end(source, position).max(start + 1);
+                    continue;
+                }
+
+                Some(TagEvent::Open(OpenTagStart {
+                    start,
+                    name: name_start..name_end,
+                    attributes_start: position,
+                    end_hint: None,
+                }))
+            }
+        };
     }
 }
 
@@ -608,6 +615,17 @@ mod tests {
         ] {
             assert_packed_matches_scalar(source);
         }
+    }
+
+    #[test]
+    fn packed_scanner_skips_large_empty_candidate_once() {
+        let source = format!("{}><p>", "<".repeat(16_384));
+        let mut packed = PackedTagIndexer::default();
+        let TagEvent::Open(open) = packed.next(source.as_bytes(), 0).unwrap() else {
+            panic!("expected opening tag after malformed delimiter run");
+        };
+        assert_eq!(open.start, source.len() - 3);
+        assert_eq!(open.name(source.as_bytes()), "p");
     }
 
     #[test]
