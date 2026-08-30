@@ -1394,6 +1394,17 @@ mod tests {
     }
 
     #[test]
+    fn full_index_ignores_a_trailing_bare_open_delimiter() {
+        let unit = format!("<p data-x='1'>a</p>{}", "y".repeat(400));
+        let html = format!("{}<", unit.repeat(512));
+        let queries = &[Query::all("[data-x]", Save::name_only()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+
+        assert_eq!(store.get("[data-x]").unwrap().count(), 512);
+    }
+
+    #[test]
     fn test_text_before_first_tag_does_not_break_text_content() {
         let html = "intro<div>Hello</div>";
         let mut reader = Reader::new(html);

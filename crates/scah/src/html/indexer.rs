@@ -615,7 +615,10 @@ impl PackedTagIndexer {
         self.prepare_masks(source);
         let block = base / SIMD_BLOCK_BYTES;
         if !self.cache.contains(block) {
-            debug_assert_eq!(self.mode, IndexingMode::Rolling);
+            debug_assert!(
+                self.mode == IndexingMode::Rolling || source.len() > u32::MAX as usize,
+                "full-document indexing only falls back to mask search above the u32 event limit"
+            );
             let total_blocks = source.len() / SIMD_BLOCK_BYTES;
             let block_count = ROLLING_WINDOW_BLOCKS.min(total_blocks - block);
             self.cache
