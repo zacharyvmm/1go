@@ -141,6 +141,11 @@ impl<'html> OpenElementStack<'html> {
         }
     }
 
+    /// Pop the top entry when it is the element that `name` closes.
+    ///
+    /// This is exactly `find_matching_index`'s first iteration: that loop tests
+    /// the entry name before the scope barrier, so a matching top always wins
+    /// there too. Callers can take this path without deriving `close_scope()`.
     #[inline]
     pub fn pop_matching_top(&mut self, name: &str) -> Option<OpenElement<'html>> {
         self.entries

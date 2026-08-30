@@ -459,6 +459,12 @@ where
             }
         );
 
+        // Well-formed markup closes the element on top of the stack. Handling
+        // that here duplicates `close_by_end_tag_into`'s fast path on purpose:
+        // it keeps the common case off `temp_state.closing_elements` entirely.
+        // The outcome is identical, because `pop_closing_elements` suppresses
+        // the implied-close trace when the popped name matches `expected_tag`
+        // and derives the same `close_depth` for a single popped element.
         if let Some(open_element) = self.open_elements.pop_matching_top(closing_tag) {
             let close_depth = self.open_elements.depth().saturating_add(1);
             return self.pop_open_element(open_element, close_depth, reader);

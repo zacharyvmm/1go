@@ -13,6 +13,10 @@ const FULL_INDEX_MIN_BYTES: usize = 16 * 1024;
 // Attribute-sensitive sampling does more setup work; below this crossover the
 // rolling path is faster even for one long sparse text span.
 const FULL_INDEX_MIN_ATTRIBUTE_BYTES: usize = 128 * 1024;
+// Mean bytes per `<` below which a second indexing pass stops paying for
+// itself: the rolling scan already reaches the next delimiter without a long
+// text skip, so the extra pass is pure overhead. Both sides of this boundary
+// are pinned by `adaptive_policy_separates_density_at_the_crossover`.
 const FULL_INDEX_MIN_BYTES_PER_TAG: usize = 67;
 // A full index needs enough structural events to amortize its extra pass.
 // Inputs with too few sampled tags stay on the rolling path.
