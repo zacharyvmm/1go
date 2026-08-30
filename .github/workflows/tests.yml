@@ -30,6 +30,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --exclude scah-benches --exclude scah-cursor-benches -- -D warnings
       - name: Test
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
+      - name: Test optimized parser semantics
+        run: cargo test --release -p scah
       - name: Test cursor instrumentation
         run: cargo test -p scah --features bench-internals
       - name: Test optimized implied-close preflight

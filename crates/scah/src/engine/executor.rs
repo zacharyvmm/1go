@@ -238,6 +238,7 @@ where
 
         SaveHit {
             element_id: element_pointer,
+            save_attributes: section.save.attributes,
             save_inner_html: section.save.inner_html,
             save_text_content: section.save.text_content,
         }

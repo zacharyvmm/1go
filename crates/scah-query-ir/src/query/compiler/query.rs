@@ -60,6 +60,18 @@ pub trait QuerySpec<'query> {
             .any(|section| section.save.text_content)
     }
 
+    fn requires_attribute_storage(&self) -> bool {
+        self.queries().iter().any(|section| section.save.attributes)
+    }
+
+    fn requires_attribute_parsing(&self) -> bool {
+        self.requires_attribute_storage()
+            || self
+                .states()
+                .iter()
+                .any(|transition| transition.predicate().requires_attributes())
+    }
+
     fn get_transition(&self, state: TransitionId) -> &Transition<'query> {
         &self.states()[state.index()]
     }

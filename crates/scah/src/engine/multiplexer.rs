@@ -19,6 +19,7 @@ pub(crate) struct DocumentPosition {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SaveHit {
     pub element_id: ElementId,
+    pub save_attributes: bool,
     pub save_inner_html: bool,
     pub save_text_content: bool,
 }
@@ -32,7 +33,7 @@ pub(crate) struct SaveHit {
 pub(crate) struct ElementPreflight<'query> {
     pub attribute_interest: AttributeInterest<'query>,
     runner_indices: SmallVec<[usize; 8]>,
-    runner_epoch: usize,
+    runner_len: usize,
 }
 
 type Runner<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
@@ -53,7 +54,6 @@ pub struct CursorStatsSnapshot {
 
 pub struct QueryMultiplexer<'query, Q> {
     runners: Runner<'query, Q>,
-    runner_epoch: usize,
     #[cfg(feature = "bench-internals")]
     cursor_stats: Option<CursorStats>,
 }
@@ -73,7 +73,6 @@ where
     pub fn new(queries: &'query [Q]) -> Self {
         Self {
             runners: Self::build_runners(queries),
-            runner_epoch: 0,
             #[cfg(feature = "bench-internals")]
             cursor_stats: None,
         }
@@ -83,7 +82,6 @@ where
     pub(crate) fn new_with_cursor_stats(queries: &'query [Q]) -> Self {
         Self {
             runners: Self::build_runners(queries),
-            runner_epoch: 0,
             cursor_stats: Some(CursorStats::default()),
         }
     }
@@ -135,6 +133,18 @@ where
             .any(|runner| runner.query().requires_text_content())
     }
 
+    pub(crate) fn requires_attribute_storage(&self) -> bool {
+        self.runners
+            .iter()
+            .any(|runner| runner.query().requires_attribute_storage())
+    }
+
+    pub(crate) fn requires_attribute_parsing(&self) -> bool {
+        self.runners
+            .iter()
+            .any(|runner| runner.query().requires_attribute_parsing())
+    }
+
     pub(crate) fn allows_early_exit(&self) -> bool {
         self.runners
             .iter()
@@ -147,7 +157,7 @@ where
     pub(crate) fn prepare_element(&self, name: &str, preflight: &mut ElementPreflight<'query>) {
         preflight.attribute_interest.clear();
         preflight.runner_indices.clear();
-        preflight.runner_epoch = self.runner_epoch;
+        preflight.runner_len = self.runners.len();
         let name_hash = ascii_case_insensitive_hash(name);
         for (runner_index, runner) in self.runners.iter().enumerate() {
             if runner.extend_attribute_interest_for(
@@ -168,49 +178,30 @@ where
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
     ) {
+        debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
-        if preflight.runner_epoch == self.runner_epoch {
-            for &runner_index in &preflight.runner_indices {
-                self.runners[runner_index].next(
-                    runner_index,
-                    xhtml_element,
-                    position,
-                    store,
-                    save_hits,
-                );
-            }
-        } else {
-            // An implied close can complete and remove a `First` runner after
-            // tag-name preflight but before this open tag is executed. That is
-            // uncommon; use the current runner set rather than stale indices.
-            for (runner_index, session) in self.runners.iter_mut().enumerate() {
-                session.next(runner_index, xhtml_element, position, store, save_hits);
-            }
+        for &runner_index in &preflight.runner_indices {
+            self.runners[runner_index].next(
+                runner_index,
+                xhtml_element,
+                position,
+                store,
+                save_hits,
+            );
         }
         #[cfg(any(debug_assertions, test))]
-        if preflight.runner_epoch == self.runner_epoch {
-            for (runner_index, runner) in self.runners.iter().enumerate() {
-                if !preflight.runner_indices.contains(&runner_index) {
-                    runner.trace_name_rejections(
-                        runner_index,
-                        xhtml_element,
-                        position.element_depth,
-                        store,
-                    );
-                }
+        for (runner_index, runner) in self.runners.iter().enumerate() {
+            if !preflight.runner_indices.contains(&runner_index) {
+                runner.trace_name_rejections(
+                    runner_index,
+                    xhtml_element,
+                    position.element_depth,
+                    store,
+                );
             }
         }
         #[cfg(feature = "bench-internals")]
         self.track_cursor_stats();
-        let retains_parsed_attributes = save_hits.iter().any(|hit| {
-            store.elements[hit.element_id]
-                .attributes
-                .as_ref()
-                .is_some_and(|range| !range.is_empty())
-        });
-        if !retains_parsed_attributes {
-            xhtml_element.remove_attributes(&mut store.attributes);
-        }
     }
 
     pub(crate) fn back(
@@ -231,7 +222,6 @@ where
         let _ = reader;
         for idx in remove_indices.into_iter().rev() {
             self.runners.remove(idx);
-            self.runner_epoch = self.runner_epoch.wrapping_add(1);
         }
 
         #[cfg(feature = "bench-internals")]
@@ -274,5 +264,17 @@ mod tests {
             Query::all("span", Save::name_only()).unwrap().build(),
         ];
         assert!(!QueryMultiplexer::new(&mixed).allows_early_exit());
+    }
+
+    #[test]
+    fn indexing_policy_tracks_whether_queries_may_parse_attributes() {
+        let tag_only = [Query::all("a", Save::name_only()).unwrap().build()];
+        assert!(!QueryMultiplexer::new(&tag_only).requires_attribute_parsing());
+
+        let selector_attributes = [Query::all("a[href]", Save::name_only()).unwrap().build()];
+        assert!(QueryMultiplexer::new(&selector_attributes).requires_attribute_parsing());
+
+        let saved_attributes = [Query::all("a", Save::all()).unwrap().build()];
+        assert!(QueryMultiplexer::new(&saved_attributes).requires_attribute_parsing());
     }
 }

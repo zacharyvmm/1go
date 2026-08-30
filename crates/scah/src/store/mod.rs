@@ -141,6 +141,14 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
     ///
     /// Every divisor is clamped to at least 1 to avoid division by zero.
     pub fn with_capacity_options(capacity: usize, options: CapacityOptions) -> Self {
+        Self::with_capacity_requirements(capacity, options, true)
+    }
+
+    pub(crate) fn with_capacity_requirements(
+        capacity: usize,
+        options: CapacityOptions,
+        reserve_attributes: bool,
+    ) -> Self {
         let element_divisor = options.element_bytes_per_slot.max(1);
         let attribute_divisor = options.attribute_bytes_per_slot.max(1);
 
@@ -152,7 +160,11 @@ impl<'html, 'query: 'html> Store<'html, 'query> {
             } else {
                 TextContent::new()
             },
-            attributes: Arena::with_capacity(capacity / attribute_divisor),
+            attributes: if reserve_attributes {
+                Arena::with_capacity(capacity / attribute_divisor)
+            } else {
+                Arena::new()
+            },
             #[cfg(any(debug_assertions, test))]
             trace: crate::debug::TraceStore::with_capacity(
                 (capacity / element_divisor).min(options.trace_capacity_limit),

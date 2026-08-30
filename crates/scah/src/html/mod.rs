@@ -6,4 +6,6 @@ mod simd_classifier;
 pub mod tag;
 
 #[cfg(feature = "simd-bench-internals")]
+pub(crate) use indexer::IndexingMode;
+#[cfg(feature = "simd-bench-internals")]
 pub(crate) use simd_classifier::BlockClassifier;
