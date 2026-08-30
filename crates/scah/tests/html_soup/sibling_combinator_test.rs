@@ -310,3 +310,39 @@ fn sibling_callback_not_activated_at_eof() {
     assert!(elements(&store, "h1 + p").is_empty());
     assert!(elements(&store, "h1 ~ p").is_empty());
 }
+
+#[test]
+fn sibling_callbacks_keep_stable_runner_identity_after_earlier_runner_exits() {
+    let html = r#"
+        <main>
+          <section>
+            <aside>
+              <h1></h1>
+            </aside>
+            <footer id="footer-hit"></footer>
+          </section>
+          <p id="p-hit"></p>
+        </main>
+    "#;
+
+    let queries = [
+        Query::first("h1", Save::none()).unwrap().build(),
+        Query::all("section + p", Save::none()).unwrap().build(),
+        Query::all("aside + footer", Save::none()).unwrap().build(),
+    ];
+
+    let store = parse(html, &queries).expect("parse succeeds");
+    let p_ids: Vec<_> = store
+        .get("section + p")
+        .unwrap()
+        .map(|element| element.id)
+        .collect();
+    let footer_ids: Vec<_> = store
+        .get("aside + footer")
+        .unwrap()
+        .map(|element| element.id)
+        .collect();
+
+    assert_eq!(p_ids, [Some("p-hit")]);
+    assert_eq!(footer_ids, [Some("footer-hit")]);
+}
