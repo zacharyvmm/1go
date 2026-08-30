@@ -211,6 +211,7 @@ impl PackedTagIndexer {
 
 impl StructuralSearch for PackedTagIndexer {
     fn find_byte(&mut self, source: &[u8], from: usize, needle: u8) -> Option<usize> {
+        debug_assert!(matches!(needle, b'<' | b'>' | b'\'' | b'"'));
         if needle == b'<' {
             self.classifier.find_less_than(source, from)
         } else {
