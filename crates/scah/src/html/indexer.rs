@@ -333,92 +333,99 @@ impl<'source> FusedMaskStream<'source> {
     }
 
     fn next_event(&mut self, from: usize) -> Option<(IndexedEvent, usize)> {
-        let start = self.find_less_than(from)?;
-        let mut position = start + 1;
-        while self
-            .source
-            .get(position)
-            .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
-        {
-            position += 1;
-        }
+        let mut from = from;
+        loop {
+            let start = self.find_less_than(from)?;
+            let mut position = start + 1;
+            while self
+                .source
+                .get(position)
+                .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
+            {
+                position += 1;
+            }
 
-        let event = match self.source.get(position).copied() {
-            Some(b'/') => {
-                let content_start = position + 1;
-                let gt = self
-                    .find_greater_than(content_start)
-                    .unwrap_or(self.source.len());
-                let mut name_start = content_start;
-                let mut name_end = gt;
-                while name_start < name_end && is_html_whitespace(self.source[name_start]) {
-                    name_start += 1;
+            let event = match self.source.get(position).copied() {
+                Some(b'/') => {
+                    let content_start = position + 1;
+                    let gt = self
+                        .find_greater_than(content_start)
+                        .unwrap_or(self.source.len());
+                    let mut name_start = content_start;
+                    let mut name_end = gt;
+                    while name_start < name_end && is_html_whitespace(self.source[name_start]) {
+                        name_start += 1;
+                    }
+                    while name_end > name_start && is_html_whitespace(self.source[name_end - 1]) {
+                        name_end -= 1;
+                    }
+                    IndexedEvent {
+                        start: start as u32,
+                        end: if gt < self.source.len() {
+                            (gt + 1) as u32
+                        } else {
+                            gt as u32
+                        },
+                        name_start: name_start as u32,
+                        name_end: name_end as u32,
+                        attributes_start: 0,
+                        kind: IndexedKind::Close,
+                    }
                 }
-                while name_end > name_start && is_html_whitespace(self.source[name_end - 1]) {
-                    name_end -= 1;
-                }
-                IndexedEvent {
-                    start: start as u32,
-                    end: if gt < self.source.len() {
-                        (gt + 1) as u32
+                Some(b'!') => {
+                    let after_bang = position + 1;
+                    let end = if self.source.get(after_bang..after_bang + 2) == Some(b"--") {
+                        self.find_comment_end(after_bang + 2)
                     } else {
-                        gt as u32
-                    },
-                    name_start: name_start as u32,
-                    name_end: name_end as u32,
-                    attributes_start: 0,
-                    kind: IndexedKind::Close,
+                        self.find_greater_than(after_bang)
+                            .map_or(self.source.len(), |position| position + 1)
+                    };
+                    IndexedEvent {
+                        start: start as u32,
+                        end: end as u32,
+                        name_start: position as u32,
+                        name_end: position as u32,
+                        attributes_start: 0,
+                        kind: IndexedKind::Ignored,
+                    }
                 }
-            }
-            Some(b'!') => {
-                let after_bang = position + 1;
-                let end = if self.source.get(after_bang..after_bang + 2) == Some(b"--") {
-                    self.find_comment_end(after_bang + 2)
-                } else {
-                    self.find_greater_than(after_bang)
-                        .map_or(self.source.len(), |position| position + 1)
-                };
-                IndexedEvent {
-                    start: start as u32,
-                    end: end as u32,
-                    name_start: position as u32,
-                    name_end: position as u32,
-                    attributes_start: 0,
-                    kind: IndexedKind::Ignored,
+                // Match the scalar indexer: a bare or repeated `<` at EOF is
+                // incomplete markup, not an opening element. In particular, an
+                // empty name violates the element-builder preflight contract.
+                None => return None,
+                Some(_) => {
+                    let name_start = position;
+                    while self
+                        .source
+                        .get(position)
+                        .is_some_and(|&byte| !is_name_boundary(byte))
+                    {
+                        position += 1;
+                    }
+                    let mut name_end = position;
+                    if self.source.get(position) == Some(&b'>')
+                        && self.source.get(name_end.wrapping_sub(1)) == Some(&b'/')
+                    {
+                        name_end -= 1;
+                    }
+                    if name_start == name_end {
+                        from = self.find_unquoted_tag_end(position).max(start + 1);
+                        continue;
+                    }
+                    IndexedEvent {
+                        start: start as u32,
+                        end: self.find_unquoted_tag_end(position) as u32,
+                        name_start: name_start as u32,
+                        name_end: name_end as u32,
+                        attributes_start: position as u32,
+                        kind: IndexedKind::Open,
+                    }
                 }
-            }
-            // Match the scalar indexer: a bare or repeated `<` at EOF is
-            // incomplete markup, not an opening element. In particular, an
-            // empty name violates the element-builder preflight contract.
-            None => return None,
-            Some(_) => {
-                let name_start = position;
-                while self
-                    .source
-                    .get(position)
-                    .is_some_and(|&byte| !is_name_boundary(byte))
-                {
-                    position += 1;
-                }
-                let mut name_end = position;
-                if self.source.get(position) == Some(&b'>')
-                    && self.source.get(name_end.wrapping_sub(1)) == Some(&b'/')
-                {
-                    name_end -= 1;
-                }
-                IndexedEvent {
-                    start: start as u32,
-                    end: self.find_unquoted_tag_end(position) as u32,
-                    name_start: name_start as u32,
-                    name_end: name_end as u32,
-                    attributes_start: position as u32,
-                    kind: IndexedKind::Open,
-                }
-            }
-        };
+            };
 
-        let next = (event.end as usize).max(start + 1);
-        Some((event, next))
+            let next = (event.end as usize).max(start + 1);
+            return Some((event, next));
+        }
     }
 }
 
@@ -816,80 +823,87 @@ fn find_raw_text_close_packed(
 }
 
 fn next_event(search: &mut impl StructuralSearch, source: &[u8], from: usize) -> Option<TagEvent> {
-    let start = search.find_byte(source, from, b'<')?;
-    let mut position = start + 1;
+    let mut from = from;
+    loop {
+        let start = search.find_byte(source, from, b'<')?;
+        let mut position = start + 1;
 
-    while source
-        .get(position)
-        .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
-    {
-        position += 1;
-    }
-
-    match source.get(position).copied() {
-        Some(b'/') => {
-            let content_start = position + 1;
-            let gt = search
-                .find_byte(source, content_start, b'>')
-                .unwrap_or(source.len());
-            let mut name_start = content_start;
-            let mut name_end = gt;
-            while name_start < name_end && is_html_whitespace(source[name_start]) {
-                name_start += 1;
-            }
-            while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
-                name_end -= 1;
-            }
-            Some(TagEvent::Complete(TagSpan {
-                start,
-                end: if gt < source.len() { gt + 1 } else { gt },
-                kind: TagKind::Close,
-                name: name_start..name_end,
-            }))
+        while source
+            .get(position)
+            .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
+        {
+            position += 1;
         }
-        Some(b'!') => {
-            let after_bang = position + 1;
-            let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
-                search.find_comment_end(source, after_bang + 2)
-            } else {
-                search
-                    .find_byte(source, after_bang, b'>')
-                    .map_or(source.len(), |position| position + 1)
-            };
-            Some(TagEvent::Complete(TagSpan {
-                start,
-                end,
-                kind: TagKind::Ignored,
-                name: position..position,
-            }))
-        }
-        // A bare or repeated `<` at EOF is incomplete markup, not an opening
-        // element. Returning an empty name would violate the element-builder
-        // contract when an attribute query reaches preflight.
-        None => None,
-        Some(_) => {
-            let name_start = position;
-            while source
-                .get(position)
-                .is_some_and(|&byte| !is_name_boundary(byte))
-            {
-                position += 1;
-            }
 
-            let mut name_end = position;
-            if source.get(position) == Some(&b'>')
-                && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
-            {
-                name_end -= 1;
+        return match source.get(position).copied() {
+            Some(b'/') => {
+                let content_start = position + 1;
+                let gt = search
+                    .find_byte(source, content_start, b'>')
+                    .unwrap_or(source.len());
+                let mut name_start = content_start;
+                let mut name_end = gt;
+                while name_start < name_end && is_html_whitespace(source[name_start]) {
+                    name_start += 1;
+                }
+                while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
+                    name_end -= 1;
+                }
+                Some(TagEvent::Complete(TagSpan {
+                    start,
+                    end: if gt < source.len() { gt + 1 } else { gt },
+                    kind: TagKind::Close,
+                    name: name_start..name_end,
+                }))
             }
+            Some(b'!') => {
+                let after_bang = position + 1;
+                let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
+                    search.find_comment_end(source, after_bang + 2)
+                } else {
+                    search
+                        .find_byte(source, after_bang, b'>')
+                        .map_or(source.len(), |position| position + 1)
+                };
+                Some(TagEvent::Complete(TagSpan {
+                    start,
+                    end,
+                    kind: TagKind::Ignored,
+                    name: position..position,
+                }))
+            }
+            // A bare or repeated `<` at EOF is incomplete markup, not an opening
+            // element. Returning an empty name would violate the element-builder
+            // contract when an attribute query reaches preflight.
+            None => None,
+            Some(_) => {
+                let name_start = position;
+                while source
+                    .get(position)
+                    .is_some_and(|&byte| !is_name_boundary(byte))
+                {
+                    position += 1;
+                }
 
-            Some(TagEvent::Open(OpenTagStart {
-                start,
-                name: name_start..name_end,
-                attributes_start: position,
-                end_hint: None,
-            }))
-        }
+                let mut name_end = position;
+                if source.get(position) == Some(&b'>')
+                    && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
+                {
+                    name_end -= 1;
+                }
+                if name_start == name_end {
+                    from = search.find_tag_end(source, position).max(start + 1);
+                    continue;
+                }
+
+                Some(TagEvent::Open(OpenTagStart {
+                    start,
+                    name: name_start..name_end,
+                    attributes_start: position,
+                    end_hint: None,
+                }))
+            }
+        };
     }
 }
 
@@ -1435,6 +1449,20 @@ mod tests {
             }
             assert_eq!(actual, expected, "source={source:?}");
         }
+    }
+
+    #[test]
+    fn fused_full_index_skips_large_empty_candidate_once() {
+        let source = format!("{}><p>", "<".repeat(16_384));
+        let bytes = source.as_bytes();
+        let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
+        packed.prepare(bytes);
+
+        let TagEvent::Open(open) = packed.next(bytes, 0).unwrap() else {
+            panic!("expected opening tag after malformed delimiter run");
+        };
+        assert_eq!(open.start, source.len() - 3);
+        assert_eq!(open.name(bytes), "p");
     }
 
     #[test]
