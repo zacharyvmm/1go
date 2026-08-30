@@ -32,6 +32,8 @@ jobs:
         run: cargo test --workspace --exclude scah-benches --exclude scah-cursor-benches
       - name: Test cursor instrumentation
         run: cargo test -p scah --features bench-internals
+      - name: Test optimized implied-close preflight
+        run: cargo test -p scah --release implied_close_preflight_matches_reactivated_attribute_cursor
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
       - name: Check cursor-dominance benchmark
@@ -40,6 +42,17 @@ jobs:
         run: cargo bench -p scah-benches --bench speed_bench_element_tape -- --test
       - name: Run cursor stats report
         run: cargo run -p scah-cursor-benches --release --bin cursor_stats_report
+
+  rust-aarch64:
+    name: Rust AArch64 SIMD Checks
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test SIMD indexer in release mode
+        run: "cargo test -p scah --release html::"
+      - name: Check SIMD benchmark targets
+        run: cargo bench -p scah-benches --bench speed_bench_element_tape -- --test
 
   python:
     name: Python Binding Tests

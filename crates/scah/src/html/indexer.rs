@@ -1,5 +1,11 @@
 use std::ops::Range;
 
+use super::simd_classifier::{BlockClassifier, ClassMasks};
+
+/// Pay SIMD classification only after a scalar probe shows that the current
+/// delimiter span is not one of HTML's common short spans.
+const SCALAR_SEARCH_PREFIX: usize = 32;
+
 /// The kind of completed structural span discovered by a [`TagIndexer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TagKind {
@@ -72,11 +78,200 @@ pub(crate) enum TagEvent {
 /// the backend without changing parser or query-executor semantics.
 pub(crate) trait TagIndexer {
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent>;
+
+    fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
+        open.finish(source)
+    }
+
+    fn find_raw_text_close(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        close_tag: &str,
+    ) -> Option<usize> {
+        find_raw_text_close_scalar(source, from, close_tag.as_bytes())
+    }
 }
 
 /// Scalar reference backend for [`TagIndexer`].
 #[derive(Debug, Default)]
 pub(crate) struct ScalarTagIndexer;
+
+trait StructuralSearch {
+    fn find_byte(&mut self, source: &[u8], from: usize, needle: u8) -> Option<usize>;
+
+    fn find_tag_end(&mut self, source: &[u8], from: usize) -> usize;
+
+    fn find_comment_end(&mut self, source: &[u8], content_start: usize) -> usize {
+        if source.get(content_start) == Some(&b'>') {
+            return content_start + 1;
+        }
+        if source.get(content_start..content_start + 2) == Some(b"->") {
+            return content_start + 2;
+        }
+
+        let mut position = content_start;
+        while let Some(gt) = self.find_byte(source, position, b'>') {
+            let prefix = &source[..gt];
+            if prefix.ends_with(b"--") || prefix.ends_with(b"--!") {
+                return gt + 1;
+            }
+            position = gt + 1;
+        }
+        source.len()
+    }
+}
+
+impl StructuralSearch for ScalarTagIndexer {
+    #[inline]
+    fn find_byte(&mut self, source: &[u8], from: usize, needle: u8) -> Option<usize> {
+        source[from..]
+            .iter()
+            .position(|byte| *byte == needle)
+            .map(|offset| from + offset)
+    }
+
+    fn find_tag_end(&mut self, source: &[u8], from: usize) -> usize {
+        find_unquoted_tag_end(source, from)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PackedTagIndexer {
+    classifier: BlockClassifier,
+    cached_source: usize,
+    cached_len: usize,
+    cached_base: usize,
+    cached_masks: ClassMasks,
+    cache_valid: bool,
+}
+
+impl PackedTagIndexer {
+    fn masks(&mut self, source: &[u8], base: usize) -> ClassMasks {
+        let source_pointer = source.as_ptr() as usize;
+        if self.cache_valid
+            && self.cached_source == source_pointer
+            && self.cached_len == source.len()
+            && self.cached_base == base
+        {
+            return self.cached_masks;
+        }
+
+        let masks = self.classifier.classify(source, base);
+        self.cached_source = source_pointer;
+        self.cached_len = source.len();
+        self.cached_base = base;
+        self.cached_masks = masks;
+        self.cache_valid = true;
+        masks
+    }
+
+    fn find_structural_matching(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        mut predicate: impl FnMut(u8) -> bool,
+    ) -> Option<usize> {
+        let mut position = from;
+        let scalar_end = source
+            .len()
+            .min(position.saturating_add(SCALAR_SEARCH_PREFIX));
+        if let Some(offset) = source[position..scalar_end]
+            .iter()
+            .position(|byte| predicate(*byte))
+        {
+            return Some(position + offset);
+        }
+        position = scalar_end;
+
+        while position < source.len() {
+            let base = position & !15;
+            if base + 16 > source.len() {
+                return source[position..]
+                    .iter()
+                    .position(|byte| predicate(*byte))
+                    .map(|offset| position + offset);
+            }
+
+            let offset = position - base;
+            let mut mask = self.masks(source, base).structural & (u16::MAX << offset);
+            while mask != 0 {
+                let lane = mask.trailing_zeros() as usize;
+                let candidate = base + lane;
+                if predicate(source[candidate]) {
+                    return Some(candidate);
+                }
+                mask &= mask - 1;
+            }
+            position = base + 16;
+        }
+        None
+    }
+}
+
+impl StructuralSearch for PackedTagIndexer {
+    fn find_byte(&mut self, source: &[u8], from: usize, needle: u8) -> Option<usize> {
+        debug_assert!(matches!(needle, b'<' | b'>' | b'\'' | b'"'));
+        if needle == b'<' {
+            self.classifier.find_less_than(source, from)
+        } else {
+            self.find_structural_matching(source, from, |byte| byte == needle)
+        }
+    }
+
+    fn find_tag_end(&mut self, source: &[u8], from: usize) -> usize {
+        let mut position = from;
+        let mut quote = None;
+
+        while let Some(candidate) = self
+            .find_structural_matching(source, position, |byte| matches!(byte, b'\'' | b'"' | b'>'))
+        {
+            let byte = source[candidate];
+            match quote {
+                Some(delimiter) if byte == delimiter => {
+                    let mut backslashes = 0;
+                    let mut scan = candidate;
+                    while scan > 0 && source[scan - 1] == b'\\' {
+                        backslashes += 1;
+                        scan -= 1;
+                    }
+                    if backslashes % 2 == 0 {
+                        quote = None;
+                    }
+                }
+                Some(_) => {}
+                None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+                None => return candidate + 1,
+            }
+            position = candidate + 1;
+        }
+
+        source.len()
+    }
+}
+
+#[derive(Debug)]
+enum AutoBackend {
+    Scalar(ScalarTagIndexer),
+    Packed(PackedTagIndexer),
+}
+
+#[derive(Debug)]
+pub(crate) struct AutoTagIndexer {
+    backend: AutoBackend,
+}
+
+impl Default for AutoTagIndexer {
+    fn default() -> Self {
+        let packed = PackedTagIndexer::default();
+        let backend = if packed.classifier.is_accelerated() {
+            AutoBackend::Packed(packed)
+        } else {
+            AutoBackend::Scalar(ScalarTagIndexer)
+        };
+        Self { backend }
+    }
+}
 
 #[inline]
 fn is_html_whitespace(byte: u8) -> bool {
@@ -119,117 +314,187 @@ fn find_unquoted_tag_end(source: &[u8], mut position: usize) -> usize {
     source.len()
 }
 
-fn find_comment_end(source: &[u8], content_start: usize) -> usize {
-    // Preserve the abrupt-close forms handled by the existing parser.
-    if source.get(content_start) == Some(&b'>') {
-        return content_start + 1;
-    }
-    if source.get(content_start..content_start + 2) == Some(b"->") {
-        return content_start + 2;
-    }
+#[inline]
+fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
+    matches!(
+        byte,
+        None | Some(b' ' | b'\t' | b'\n' | 0x0C | b'\r' | b'/' | b'>')
+    )
+}
 
-    let mut position = content_start;
-    while let Some(offset) = source[position..].iter().position(|&byte| byte == b'>') {
-        let gt = position + offset;
-        let prefix = &source[..gt];
-        if prefix.ends_with(b"--") || prefix.ends_with(b"--!") {
-            return gt + 1;
+fn raw_text_candidate_matches(source: &[u8], start: usize, close_tag: &[u8]) -> bool {
+    let end = start + close_tag.len();
+    source
+        .get(start..end)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(close_tag))
+        && is_raw_text_end_terminator(source.get(end).copied())
+}
+
+fn find_raw_text_close_scalar(source: &[u8], from: usize, close_tag: &[u8]) -> Option<usize> {
+    let mut position = from;
+    while let Some(offset) = source[position..].iter().position(|byte| *byte == b'<') {
+        let candidate = position + offset;
+        if raw_text_candidate_matches(source, candidate, close_tag) {
+            return Some(candidate);
         }
-        position = gt + 1;
+        position = candidate + 1;
     }
-    source.len()
+    None
+}
+
+fn find_raw_text_close_packed(
+    search: &mut impl StructuralSearch,
+    source: &[u8],
+    from: usize,
+    close_tag: &[u8],
+) -> Option<usize> {
+    let mut position = from;
+    while let Some(candidate) = search.find_byte(source, position, b'<') {
+        if raw_text_candidate_matches(source, candidate, close_tag) {
+            return Some(candidate);
+        }
+        position = candidate + 1;
+    }
+    None
+}
+
+fn next_event(search: &mut impl StructuralSearch, source: &[u8], from: usize) -> Option<TagEvent> {
+    let mut from = from;
+    loop {
+        let start = search.find_byte(source, from, b'<')?;
+        let mut position = start + 1;
+
+        // Match the legacy parser's tolerance for whitespace and repeated
+        // `<` bytes before a tag name.
+        while source
+            .get(position)
+            .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
+        {
+            position += 1;
+        }
+
+        return match source.get(position).copied() {
+            Some(b'/') => {
+                let content_start = position + 1;
+                let gt = search
+                    .find_byte(source, content_start, b'>')
+                    .unwrap_or(source.len());
+                let mut name_start = content_start;
+                let mut name_end = gt;
+                while name_start < name_end && is_html_whitespace(source[name_start]) {
+                    name_start += 1;
+                }
+                while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
+                    name_end -= 1;
+                }
+                Some(TagEvent::Complete(TagSpan {
+                    start,
+                    end: if gt < source.len() { gt + 1 } else { gt },
+                    kind: TagKind::Close,
+                    name: name_start..name_end,
+                }))
+            }
+            Some(b'!') => {
+                let after_bang = position + 1;
+                let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
+                    search.find_comment_end(source, after_bang + 2)
+                } else {
+                    search
+                        .find_byte(source, after_bang, b'>')
+                        .map_or(source.len(), |position| position + 1)
+                };
+                Some(TagEvent::Complete(TagSpan {
+                    start,
+                    end,
+                    kind: TagKind::Ignored,
+                    name: position..position,
+                }))
+            }
+            // A bare or repeated `<` at EOF is incomplete markup, not an opening
+            // element. Returning an empty name would violate the element-builder
+            // contract when an attribute query reaches preflight.
+            None => None,
+            Some(_) => {
+                let name_start = position;
+                while source
+                    .get(position)
+                    .is_some_and(|&byte| !is_name_boundary(byte))
+                {
+                    position += 1;
+                }
+
+                let mut name_end = position;
+                if source.get(position) == Some(&b'>')
+                    && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
+                {
+                    name_end -= 1;
+                }
+                if name_start == name_end {
+                    from = search.find_tag_end(source, position).max(start + 1);
+                    continue;
+                }
+
+                Some(TagEvent::Open(OpenTagStart {
+                    start,
+                    name: name_start..name_end,
+                    attributes_start: position,
+                    end_hint: None,
+                }))
+            }
+        };
+    }
 }
 
 impl TagIndexer for ScalarTagIndexer {
     fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
-        let mut from = from;
-        loop {
-            let relative_start = source.get(from..)?.iter().position(|&byte| byte == b'<')?;
-            let start = from + relative_start;
-            let mut position = start + 1;
+        next_event(self, source, from)
+    }
+}
 
-            // Match the legacy parser's tolerance for whitespace and repeated
-            // `<` bytes before a tag name.
-            while source
-                .get(position)
-                .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'<')
-            {
-                position += 1;
-            }
+impl TagIndexer for PackedTagIndexer {
+    fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
+        next_event(self, source, from)
+    }
 
-            let event = match source.get(position).copied() {
-                Some(b'/') => {
-                    let content_start = position + 1;
-                    let gt = source[content_start..]
-                        .iter()
-                        .position(|&byte| byte == b'>')
-                        .map_or(source.len(), |offset| content_start + offset);
-                    let mut name_start = content_start;
-                    let mut name_end = gt;
-                    while name_start < name_end && is_html_whitespace(source[name_start]) {
-                        name_start += 1;
-                    }
-                    while name_end > name_start && is_html_whitespace(source[name_end - 1]) {
-                        name_end -= 1;
-                    }
-                    TagEvent::Complete(TagSpan {
-                        start,
-                        end: if gt < source.len() { gt + 1 } else { gt },
-                        kind: TagKind::Close,
-                        name: name_start..name_end,
-                    })
-                }
-                Some(b'!') => {
-                    let after_bang = position + 1;
-                    let end = if source.get(after_bang..after_bang + 2) == Some(b"--") {
-                        find_comment_end(source, after_bang + 2)
-                    } else {
-                        source[after_bang..]
-                            .iter()
-                            .position(|&byte| byte == b'>')
-                            .map_or(source.len(), |offset| after_bang + offset + 1)
-                    };
-                    TagEvent::Complete(TagSpan {
-                        start,
-                        end,
-                        kind: TagKind::Ignored,
-                        name: position..position,
-                    })
-                }
-                // A bare or repeated `<` at EOF is incomplete markup, not an
-                // opening element. Returning an empty name would violate the
-                // parser's element-builder contract when a wildcard query asks
-                // for attributes.
-                None => return None,
-                Some(_) => {
-                    let name_start = position;
-                    while source
-                        .get(position)
-                        .is_some_and(|&byte| !is_name_boundary(byte))
-                    {
-                        position += 1;
-                    }
+    fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
+        open.end_hint
+            .unwrap_or_else(|| self.find_tag_end(source, open.attributes_start))
+    }
 
-                    let mut name_end = position;
-                    if source.get(position) == Some(&b'>')
-                        && source.get(name_end.wrapping_sub(1)) == Some(&b'/')
-                    {
-                        name_end -= 1;
-                    }
-                    if name_start == name_end {
-                        from = find_unquoted_tag_end(source, position).max(start + 1);
-                        continue;
-                    }
+    fn find_raw_text_close(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        close_tag: &str,
+    ) -> Option<usize> {
+        find_raw_text_close_packed(self, source, from, close_tag.as_bytes())
+    }
+}
 
-                    TagEvent::Open(OpenTagStart {
-                        start,
-                        name: name_start..name_end,
-                        attributes_start: position,
-                        end_hint: None,
-                    })
-                }
-            };
-            return Some(event);
+impl TagIndexer for AutoTagIndexer {
+    fn next(&mut self, source: &[u8], from: usize) -> Option<TagEvent> {
+        match &mut self.backend {
+            AutoBackend::Scalar(indexer) => indexer.next(source, from),
+            AutoBackend::Packed(indexer) => indexer.next(source, from),
+        }
+    }
+
+    fn finish_open(&mut self, source: &[u8], open: &OpenTagStart) -> usize {
+        match &mut self.backend {
+            AutoBackend::Scalar(indexer) => indexer.finish_open(source, open),
+            AutoBackend::Packed(indexer) => indexer.finish_open(source, open),
+        }
+    }
+
+    fn find_raw_text_close(
+        &mut self,
+        source: &[u8],
+        from: usize,
+        close_tag: &str,
+    ) -> Option<usize> {
+        match &mut self.backend {
+            AutoBackend::Scalar(indexer) => indexer.find_raw_text_close(source, from, close_tag),
+            AutoBackend::Packed(indexer) => indexer.find_raw_text_close(source, from, close_tag),
         }
     }
 }
@@ -240,6 +505,27 @@ mod tests {
 
     fn next(source: &str, from: usize) -> TagEvent {
         ScalarTagIndexer.next(source.as_bytes(), from).unwrap()
+    }
+
+    fn assert_packed_matches_scalar(source: &str) {
+        let bytes = source.as_bytes();
+        for from in 0..=bytes.len() {
+            let mut scalar = ScalarTagIndexer;
+            let mut packed = PackedTagIndexer::default();
+            let scalar_event = scalar.next(bytes, from);
+            let packed_event = packed.next(bytes, from);
+            assert_eq!(packed_event, scalar_event, "source={source:?}, from={from}");
+
+            if let (Some(TagEvent::Open(scalar_open)), Some(TagEvent::Open(packed_open))) =
+                (&scalar_event, &packed_event)
+            {
+                assert_eq!(
+                    packed.finish_open(bytes, packed_open),
+                    scalar.finish_open(bytes, scalar_open),
+                    "open end differs for source={source:?}, from={from}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -311,13 +597,88 @@ mod tests {
             };
             assert_eq!(open.start, source.rfind('<').unwrap());
             assert_eq!(open.name(source.as_bytes()), "p");
-        }
+    }
 
+    #[test]
+    fn packed_backend_matches_scalar_across_structural_edge_cases() {
+        for source in [
+            "",
+            "plain text without markup",
+            "0123456789abcde<a x='y'>body</a>",
+            r#"prefix <a title=\"a > b\" data-x='c \\' > d'>body</a> suffix"#,
+            "before<!-- a > b --!><p>after",
+            "<!doctype html><main><img src=x/><br></main>",
+            "<<<  div class=x><span>nested</span></div>",
+            "unterminated <tag attr='value",
+            "close </  div  > after",
+            "multibyte é☃ <article data-name='é'>text</article>",
+        ] {
+            assert_packed_matches_scalar(source);
+        }
+    }
+
+    #[test]
+    fn packed_scanner_skips_large_empty_candidate_once() {
         let source = format!("{}><p>", "<".repeat(16_384));
-        let TagEvent::Open(open) = ScalarTagIndexer.next(source.as_bytes(), 0).unwrap() else {
+        let mut packed = PackedTagIndexer::default();
+        let TagEvent::Open(open) = packed.next(source.as_bytes(), 0).unwrap() else {
             panic!("expected opening tag after malformed delimiter run");
         };
         assert_eq!(open.start, source.len() - 3);
         assert_eq!(open.name(source.as_bytes()), "p");
+    }
+
+    #[test]
+    fn raw_text_search_skips_near_misses_and_matches_case_insensitively() {
+        let html = "x </scripts> <fake> y </ScRiPt >tail";
+        let expected = html.find("</ScRiPt").unwrap();
+        let mut scalar = ScalarTagIndexer;
+        let mut packed = PackedTagIndexer::default();
+
+        assert_eq!(
+            scalar.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            Some(expected)
+        );
+        assert_eq!(
+            packed.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn raw_text_search_handles_long_content_without_a_close() {
+        let html = format!("{}<scripted>", "x < y ".repeat(1_024));
+        let mut scalar = ScalarTagIndexer;
+        let mut packed = PackedTagIndexer::default();
+
+        assert_eq!(
+            scalar.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            None
+        );
+        assert_eq!(
+            packed.find_raw_text_close(html.as_bytes(), 0, "</script"),
+            None
+        );
+    }
+
+    #[test]
+    fn ordinary_tag_search_does_not_materialize_rolling_masks() {
+        let mut packed = PackedTagIndexer::default();
+        let short = "short text<a>";
+        assert!(matches!(
+            packed.next(short.as_bytes(), 0),
+            Some(TagEvent::Open(_))
+        ));
+        assert!(!packed.cache_valid, "short search should remain scalar");
+
+        let long = format!("{}<a>", "x".repeat(SCALAR_SEARCH_PREFIX + 32));
+        assert!(matches!(
+            packed.next(long.as_bytes(), 0),
+            Some(TagEvent::Open(_))
+        ));
+        assert!(
+            !packed.cache_valid,
+            "ordinary tag search should use the direct less-than classifier"
+        );
     }
 }

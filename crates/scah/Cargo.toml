@@ -25,6 +25,7 @@ tracing = { version = "0.1", optional = true }
 [features]
 default = []
 bench-internals = []
+simd-bench-internals = []
 otel = ["dep:tracing"]
 
 [dev-dependencies]

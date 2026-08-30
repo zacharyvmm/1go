@@ -20,6 +20,7 @@
 //! open-element stack, runs query cursors, stores matches, and handles recovery.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use scah::bench_internals::LessThanScanner;
 use scah::{Query, Save, parse};
 use std::hint::black_box;
 use std::time::Duration;
@@ -1184,5 +1185,36 @@ fn bench_production_query_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_element_tape, bench_production_query_scaling);
+fn bench_less_than_distance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("less_than_distance");
+    group.sample_size(100);
+    let scanner = LessThanScanner::default();
+
+    for distance in [8, 16, 24, 32, 48, 64] {
+        let mut source = vec![b'x'; distance + 16];
+        source[distance] = b'<';
+
+        group.bench_with_input(
+            BenchmarkId::new("production_simd", distance),
+            &source,
+            |b, source| b.iter(|| black_box(scanner.find(black_box(source), 0))),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("scalar", distance),
+            &source,
+            |b, source| {
+                b.iter(|| black_box(black_box(source).iter().position(|&byte| byte == b'<')))
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_element_tape,
+    bench_production_query_scaling,
+    bench_less_than_distance
+);
 criterion_main!(benches);

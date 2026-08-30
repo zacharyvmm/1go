@@ -1,5 +1,5 @@
 use super::element::builder::XHtmlTag;
-use super::indexer::{ScalarTagIndexer, TagEvent, TagIndexer, TagKind};
+use super::indexer::{AutoTagIndexer, TagEvent, TagIndexer, TagKind};
 use super::open_elements::{OpenElement, OpenElementStack};
 use super::tag::TagFlags;
 use crate::ParseError;
@@ -10,14 +10,15 @@ use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
 use crate::engine::MAX_ELEMENT_DEPTH;
-use crate::engine::multiplexer::{DocumentPosition, QueryMultiplexer, SaveHit};
+use crate::engine::multiplexer::{DocumentPosition, ElementPreflight, QueryMultiplexer, SaveHit};
 use crate::store::Store;
 
 #[derive(Default)]
-struct ParserTempState<'html> {
+struct ParserTempState<'html, 'query> {
     closing_elements: Vec<OpenElement<'html>>,
     implied_closes: Vec<OpenElement<'html>>,
     save_hits: Vec<SaveHit>,
+    preflight: ElementPreflight<'query>,
 }
 
 pub struct XHtmlParser<'html, 'query, Q> {
@@ -26,25 +27,14 @@ pub struct XHtmlParser<'html, 'query, Q> {
     store: Store<'html, 'query>,
     element: crate::XHtmlElement<'html>,
     open_elements: OpenElementStack<'html>,
-    temp_state: ParserTempState<'html>,
+    temp_state: ParserTempState<'html, 'query>,
     capture_text_content: bool,
     raw_text_close: Option<&'static str>,
     eof_drained: bool,
     parse_error: Option<ParseError>,
-    indexer: ScalarTagIndexer,
+    indexer: AutoTagIndexer,
     #[cfg(test)]
     attribute_parse_count: usize,
-}
-
-/// A raw-text end tag is only "appropriate" when the tag name is immediately
-/// followed by HTML whitespace, a `/`, or `>` (or end of input). This prevents
-/// a longer name such as `</styles>` from prematurely closing `<style>`.
-#[inline]
-fn is_raw_text_end_terminator(byte: Option<u8>) -> bool {
-    matches!(
-        byte,
-        None | Some(b' ' | b'\t' | b'\n' | 0x0C | b'\r' | b'/' | b'>')
-    )
 }
 
 impl<'html, 'query: 'html, Q> XHtmlParser<'html, 'query, Q>
@@ -68,7 +58,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: ScalarTagIndexer,
+            indexer: AutoTagIndexer::default(),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::default(),
@@ -92,7 +82,7 @@ where
             raw_text_close: None,
             eof_drained: false,
             parse_error: None,
-            indexer: ScalarTagIndexer,
+            indexer: AutoTagIndexer::default(),
             #[cfg(test)]
             attribute_parse_count: 0,
             store: Store::with_capacity_options(
@@ -110,51 +100,45 @@ where
             return false;
         }
         if let Some(close_tag) = self.raw_text_close {
-            loop {
-                reader.next_until(b'<');
-                if reader.peek().is_none() {
-                    self.drain_open_elements(reader);
-                    return false;
-                }
+            let source = reader.source();
+            let Some(close_position) =
+                self.indexer
+                    .find_raw_text_close(source, reader.get_position(), close_tag)
+            else {
+                reader.advance_to(source.len());
+                self.drain_open_elements(reader);
+                return false;
+            };
+            reader.advance_to(close_position);
 
-                // `close_tag` is the `</name` prefix. It is only the real end
-                // tag when the name is followed by an appropriate terminator
-                // (HTML whitespace, `/`, or `>`), so `</styles>` does not close
-                // `<style>` and `</style >` does. Consume an appropriate raw
-                // end tag here instead of delegating to `XHtmlTag::from`: that
-                // parser intentionally keeps text after `/` as part of the
-                // closing tag name, which would leave `<style>` open for a
-                // tolerated form such as `</style ignored>`.
-                if reader.match_ignore_case(close_tag)
-                    && is_raw_text_end_terminator(reader.peek_at(close_tag.len()))
-                {
-                    if self.capture_text_content
-                        && self.store.text_content.text_start.is_some()
-                        && let Some(position) =
-                            self.store.text_content.push(reader, reader.get_position())
-                    {
-                        self.position.text_content_position = position;
-                    }
-                    self.raw_text_close = None;
-
-                    self.position.reader_position = reader.get_position();
-                    reader.next_until(b'>');
-                    reader.skip();
-
-                    if self.capture_text_content {
-                        self.store.text_content.set_start(reader.get_position());
-                    }
-
-                    let closing_tag = &close_tag[2..];
-                    let early_exit = self.handle_close_tag(closing_tag, reader);
-                    return !early_exit && !reader.eof();
-                } else {
-                    reader.skip();
-                }
+            // Consume an appropriate raw end tag here instead of delegating
+            // to `XHtmlTag::from`: that parser intentionally keeps text after
+            // `/` as part of the closing tag name, which would leave the raw
+            // element open for a tolerated form such as `</style ignored>`.
+            if self.capture_text_content
+                && self.store.text_content.text_start.is_some()
+                && let Some(position) = self.store.text_content.push(reader, reader.get_position())
+            {
+                self.position.text_content_position = position;
             }
+            self.raw_text_close = None;
+
+            self.position.reader_position = reader.get_position();
+            reader.next_until(b'>');
+            reader.skip();
+
+            if self.capture_text_content {
+                self.store.text_content.set_start(reader.get_position());
+            }
+
+            let closing_tag = &close_tag[2..];
+            let early_exit = self.handle_close_tag(closing_tag, reader);
+            return !early_exit && !reader.eof();
         }
 
         let source = reader.source();
+        let mut early_exit = false;
+        let mut open_tag_flags = None;
         let tag = loop {
             let Some(span) = self.indexer.next(source, reader.get_position()) else {
                 reader.advance_to(source.len());
@@ -184,8 +168,29 @@ where
                     let name = open.name(source);
                     self.element.set_name(name);
 
-                    let attribute_interest = self.selectors.attribute_interest_for(name);
-                    let end = if !attribute_interest.is_empty() {
+                    let tag_flags = TagFlags::classify(name);
+                    if tag_flags.can_trigger_implied_close() {
+                        self.open_elements
+                            .prepare_for_open_into(tag_flags, &mut self.temp_state.implied_closes);
+                        if !self.temp_state.implied_closes.is_empty() {
+                            if self.capture_text_content
+                                && self.store.text_content.text_start.is_some()
+                                && let Some(position) =
+                                    self.store.text_content.push(reader, open.start)
+                            {
+                                self.position.text_content_position = position;
+                            }
+                            early_exit = self.drain_implied_closes(
+                                reader,
+                                Some(ImpliedCloseReason::OpenTagRule),
+                                None,
+                            ) || early_exit;
+                        }
+                    }
+
+                    self.selectors
+                        .prepare_element(name, &mut self.temp_state.preflight);
+                    let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {
                             self.attribute_parse_count += 1;
@@ -194,13 +199,14 @@ where
                         self.element.parse_attributes(
                             &mut attributes,
                             &mut self.store.attributes,
-                            &attribute_interest,
+                            &self.temp_state.preflight.attribute_interest,
                         );
                         open.attributes_start + attributes.get_position()
                     } else {
-                        open.finish(source)
+                        self.indexer.finish_open(source, &open)
                     };
                     reader.advance_to(end);
+                    open_tag_flags = Some(tag_flags);
                     break XHtmlTag::Open;
                 }
                 TagEvent::Complete(span) => {
@@ -230,20 +236,15 @@ where
 
         // TODO: register the start
         //reader.next_while(|c| c.is_whitespace());
-        let mut early_exit = false;
-
         match tag {
             XHtmlTag::Open => {
-                let tag = TagFlags::classify(self.element.name);
+                let tag = open_tag_flags.expect("opening tags are classified before preflight");
 
                 if let Some(close_tag) = tag.raw_text_close_tag() {
                     self.raw_text_close = Some(close_tag);
                 }
 
                 self.position.reader_position = tag_start_position;
-                self.open_elements
-                    .prepare_for_open_into(tag, &mut self.temp_state.implied_closes);
-                self.drain_implied_closes(reader, Some(ImpliedCloseReason::OpenTagRule), None);
                 self.position.reader_position = reader.get_position();
 
                 let is_self_closing = tag.is_void();
@@ -273,11 +274,12 @@ where
                     }
                 );
 
-                self.selectors.next_into(
+                self.selectors.next_prepared_into(
                     &self.element,
                     &self.position,
                     &mut self.store,
                     &mut self.temp_state.save_hits,
+                    &self.temp_state.preflight,
                 );
                 if is_self_closing {
                     early_exit = self.selectors.back(
@@ -1164,6 +1166,15 @@ mod tests {
         assert_eq!(items[0].inner_html, Some("One"));
         assert_eq!(items[1].text_content(&store), Some("Two"));
         assert_eq!(items[1].inner_html, Some("Two"));
+    }
+
+    #[test]
+    fn implied_close_preflight_matches_reactivated_attribute_cursor() {
+        let html = "<ul><li data-x='one'>One<li data-x='two'>Two</ul>";
+        let queries = &[Query::all("li[data-x]", Save::name_only()).unwrap().build()];
+
+        let store = parse(html, queries).unwrap();
+        assert_eq!(store.get("li[data-x]").unwrap().count(), 2);
     }
 
     #[test]

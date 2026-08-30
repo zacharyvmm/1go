@@ -6,7 +6,206 @@ use scah_query_ir::{
     SelectionKind, Transition,
 };
 use syn::parse::{Parse, ParseStream};
-use syn::{Expr, LitStr, Result, Token, braced, parenthesized};
+use syn::{Expr, LitByte, LitStr, Result, Token, braced, bracketed, parenthesized};
+
+/// Generate exact two-nibble SIMD classification tables at compile time.
+///
+/// The expansion is `([u8; 16], [u8; 16], class_0_bits, class_1_bits, ...)`.
+#[proc_macro]
+pub fn simd_nibble_tables(input: TokenStream) -> TokenStream {
+    let parsed = syn::parse_macro_input!(input as SimdTableInput);
+    match generate_simd_mapping(&parsed.classes) {
+        Some(mapping) => {
+            let tlo = mapping.tlo;
+            let thi = mapping.thi;
+            let class_bits = mapping.class_bits;
+            quote! {
+                ([#(#tlo),*], [#(#thi),*], #(#class_bits),*)
+            }
+            .into()
+        }
+        None => syn::Error::new(
+            Span::call_site(),
+            "SIMD nibble classifier is unsatisfiable for these byte domains",
+        )
+        .to_compile_error()
+        .into(),
+    }
+}
+
+struct SimdTableInput {
+    classes: Vec<SimdClassInput>,
+}
+
+struct SimdClassInput {
+    name: syn::Ident,
+    bytes: Vec<u8>,
+}
+
+impl Parse for SimdTableInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut classes = Vec::new();
+        while !input.is_empty() {
+            let name: syn::Ident = input.parse()?;
+            if classes
+                .iter()
+                .any(|class: &SimdClassInput| class.name == name)
+            {
+                return Err(syn::Error::new(name.span(), "duplicate SIMD class name"));
+            }
+            input.parse::<Token![:]>()?;
+            let bytes = parse_byte_array(input)?;
+            if bytes.is_empty() {
+                return Err(syn::Error::new(name.span(), "SIMD class cannot be empty"));
+            }
+            classes.push(SimdClassInput { name, bytes });
+            if input.is_empty() {
+                break;
+            }
+            input.parse::<Token![,]>()?;
+        }
+
+        if classes.is_empty() {
+            return Err(input.error("expected at least one SIMD class"));
+        }
+        if classes.len() > 8 {
+            return Err(input.error("two-nibble SIMD mappings support at most eight classes"));
+        }
+
+        Ok(Self { classes })
+    }
+}
+
+fn parse_byte_array(input: ParseStream<'_>) -> Result<Vec<u8>> {
+    let content;
+    bracketed!(content in input);
+    let values = content.parse_terminated(LitByte::parse, Token![,])?;
+    Ok(values.into_iter().map(|value| value.value()).collect())
+}
+
+struct SimdMapping {
+    tlo: [u8; 16],
+    thi: [u8; 16],
+    class_bits: Vec<u8>,
+}
+
+fn generate_simd_mapping(classes: &[SimdClassInput]) -> Option<SimdMapping> {
+    let target_count = classes.iter().map(|class| class.bytes.len()).sum();
+    let mut targets = Vec::with_capacity(target_count);
+    let mut target_classes = Vec::with_capacity(target_count);
+    for (class_index, class) in classes.iter().enumerate() {
+        for &byte in &class.bytes {
+            if targets.contains(&byte) {
+                return None;
+            }
+            targets.push(byte);
+            target_classes.push(class_index);
+        }
+    }
+
+    let mut assigned = vec![0; targets.len()];
+    let mut tlo = [0; 16];
+    let mut thi = [0; 16];
+    let mut class_bits = vec![0; classes.len()];
+    if !solve_simd_mapping(
+        0,
+        &targets,
+        &target_classes,
+        &mut assigned,
+        &mut tlo,
+        &mut thi,
+        &mut class_bits,
+    ) {
+        return None;
+    }
+
+    Some(SimdMapping {
+        tlo,
+        thi,
+        class_bits,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_simd_mapping(
+    index: usize,
+    targets: &[u8],
+    target_classes: &[usize],
+    assigned: &mut [u8],
+    tlo: &mut [u8; 16],
+    thi: &mut [u8; 16],
+    class_bits: &mut [u8],
+) -> bool {
+    if index == targets.len() {
+        return true;
+    }
+
+    let byte = targets[index];
+    let lo = (byte & 0x0f) as usize;
+    let hi = (byte >> 4) as usize;
+    let class_index = target_classes[index];
+
+    for shift in 0..8 {
+        let mask = 1 << shift;
+        if class_bits
+            .iter()
+            .enumerate()
+            .any(|(index, bits)| index != class_index && bits & mask != 0)
+        {
+            continue;
+        }
+
+        let old_lo = tlo[lo];
+        let old_hi = thi[hi];
+        tlo[lo] |= mask;
+        thi[hi] |= mask;
+        assigned[index] = mask;
+        let old_class_bits = class_bits[class_index];
+        class_bits[class_index] |= mask;
+
+        let mut valid = true;
+        for candidate in u8::MIN..=u8::MAX {
+            let value = tlo[(candidate & 0x0f) as usize] & thi[(candidate >> 4) as usize];
+            if value == 0 {
+                continue;
+            }
+
+            if let Some(target_index) = targets.iter().position(|target| *target == candidate) {
+                if target_index <= index {
+                    valid &= value == assigned[target_index];
+                } else {
+                    valid &= value.is_power_of_two();
+                }
+            } else {
+                valid = false;
+            }
+
+            if !valid {
+                break;
+            }
+        }
+
+        if valid
+            && solve_simd_mapping(
+                index + 1,
+                targets,
+                target_classes,
+                assigned,
+                tlo,
+                thi,
+                class_bits,
+            )
+        {
+            return true;
+        }
+
+        tlo[lo] = old_lo;
+        thi[hi] = old_hi;
+        class_bits[class_index] = old_class_bits;
+    }
+
+    false
+}
 
 #[proc_macro]
 pub fn query(input: TokenStream) -> TokenStream {

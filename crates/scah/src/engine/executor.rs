@@ -18,17 +18,53 @@ enum SpawnOutcome {
     Dominated,
 }
 
+#[inline]
+pub(super) fn ascii_case_insensitive_hash(value: &str) -> u64 {
+    value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+#[derive(Debug)]
+struct PredicateMetadata<'query> {
+    name: Option<&'query str>,
+    name_hash: u64,
+    attribute_interest: AttributeInterest<'query>,
+}
+
+impl<'query> PredicateMetadata<'query> {
+    fn compile(predicate: &crate::ElementPredicate<'query>) -> Self {
+        let mut attribute_interest = AttributeInterest::default();
+        attribute_interest.add_predicate(predicate);
+        Self {
+            name: predicate.name,
+            name_hash: predicate.name.map_or(0, ascii_case_insensitive_hash),
+            attribute_interest,
+        }
+    }
+
+    #[inline]
+    fn matches_name(&self, name: &str, name_hash: u64) -> bool {
+        self.name.is_none_or(|expected| {
+            expected.len() == name.len()
+                && self.name_hash == name_hash
+                && expected.eq_ignore_ascii_case(name)
+        })
+    }
+}
+
 /// NFA execution engine for streaming StAX events.
 ///
 /// Cursor 0 is the sentinel root. It is never depth-pruned; query progress is
 /// represented by spawned moving cursors, while anchored cursors keep
 /// descendant searches alive within their scope.
-pub struct QueryExecutor<'a, Q> {
+pub struct QueryExecutor<'a, 'query, Q> {
     pub(crate) query: &'a Q,
     pub(crate) cursors: Vec<ScopedCursor>,
+    predicate_metadata: Vec<PredicateMetadata<'query>>,
 }
 
-impl<'a, 'html, 'query: 'html, Q> QueryExecutor<'a, Q>
+impl<'a, 'html, 'query: 'html, Q> QueryExecutor<'a, 'query, Q>
 where
     Q: QuerySpec<'query>,
 {
@@ -43,6 +79,11 @@ where
         Self {
             query,
             cursors: vec![root],
+            predicate_metadata: query
+                .states()
+                .iter()
+                .map(|transition| PredicateMetadata::compile(&transition.predicate))
+                .collect(),
         }
     }
 
@@ -142,27 +183,67 @@ where
     pub(crate) fn extend_attribute_interest_for(
         &self,
         name: &str,
+        name_hash: u64,
         interest: &mut AttributeInterest<'query>,
-    ) {
+    ) -> bool {
+        let mut viable = false;
         for cursor in &self.cursors {
             if !cursor.is_active() {
                 continue;
             }
 
             let position = cursor.position;
-            let predicate = &self.query.get_transition(position.state).predicate;
-            if !predicate.matches_name(name) {
+            let metadata = &self.predicate_metadata[position.state.index()];
+            if !metadata.matches_name(name, name_hash) {
                 continue;
             }
+            viable = true;
 
             if self.query.is_save_point(&position)
                 && self.query.get_selection(position.selection).save.attributes
             {
                 interest.require_all();
-                return;
+                return true;
             }
 
-            interest.add_predicate(predicate);
+            interest.merge(&metadata.attribute_interest);
+        }
+        viable
+    }
+
+    #[cfg(any(debug_assertions, test))]
+    pub(crate) fn trace_name_rejections(
+        &self,
+        runner_index: usize,
+        element: &XHtmlElement<'html>,
+        depth: super::DepthSize,
+        store: &mut Store<'html, 'query>,
+    ) {
+        let name_hash = ascii_case_insensitive_hash(element.name);
+        for (cursor_index, cursor) in self.cursors.iter().enumerate() {
+            if !cursor.is_active() {
+                continue;
+            }
+
+            let position = cursor.position;
+            let metadata = &self.predicate_metadata[position.state.index()];
+            if metadata.matches_name(element.name, name_hash) {
+                continue;
+            }
+
+            crate::scah_trace!(
+                store,
+                TraceEvent::TransitionRejected {
+                    runner_index,
+                    cursor: self.trace_kind(cursor_index),
+                    selector: self.query.get_selection(position.selection).source,
+                    element: element.name,
+                    depth,
+                    selection: position.selection,
+                    state: position.state,
+                    reason: TransitionRejectReason::PredicateFailed,
+                }
+            );
         }
     }
 
@@ -799,8 +880,20 @@ mod tests {
         TransitionId(section.range.end.index() - 1)
     }
 
+    #[test]
+    fn compiled_name_hash_is_ascii_case_insensitive() {
+        assert_eq!(
+            ascii_case_insensitive_hash("ARTICLE"),
+            ascii_case_insensitive_hash("article")
+        );
+        assert_ne!(
+            ascii_case_insensitive_hash("article"),
+            ascii_case_insensitive_hash("aside")
+        );
+    }
+
     fn live_moving_cursors_at(
-        selection: &QueryExecutor<'_, Query>,
+        selection: &QueryExecutor<'_, '_, Query>,
         state: TransitionId,
         parent: ElementId,
     ) -> usize {
