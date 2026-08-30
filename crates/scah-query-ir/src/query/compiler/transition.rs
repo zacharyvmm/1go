@@ -450,12 +450,8 @@ mod tests {
                 kind: AttributeSelectionKind::Presence,
             }]),
         };
-        let metadata = PredicateMetadata::new_const(
-            Some("a"),
-            false,
-            false,
-            AttributeNames::from_static(&[]),
-        );
+        let metadata =
+            PredicateMetadata::new_const(Some("a"), false, false, AttributeNames::from_static(&[]));
 
         let _ = Transition::new_const(Combinator::Descendant, predicate, metadata);
     }
