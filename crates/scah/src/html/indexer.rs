@@ -1050,14 +1050,11 @@ fn resolve_unknown_sample_start(source: &[u8], start: usize) -> (SampleLexicalSt
         // A `>` in ordinary text is common. Tail probing handles a quoted
         // tag end separately, where the preceding quote is useful evidence.
         b'>' => SampleLexicalState::Normal,
-        b'<' if matches!(
-            source.get(boundary + 1),
-            Some(b'/') | Some(b'!') | Some(b'?')
-        ) =>
-        {
-            SampleLexicalState::Normal
-        }
-        b'<' => SampleLexicalState::OversizedTag,
+        // Reaching any `<` first means the sample began in a text run. The
+        // bounded parser above handles a tag whose opening delimiter is close
+        // enough to establish; an ordinary next tag is not evidence that the
+        // preceding text belonged to an oversized tag.
+        b'<' => SampleLexicalState::Normal,
         _ => unreachable!(),
     };
     (state, boundary)
@@ -1065,7 +1062,7 @@ fn resolve_unknown_sample_start(source: &[u8], start: usize) -> (SampleLexicalSt
 
 fn has_quoted_tag_end(source: &[u8], boundary: usize) -> bool {
     let mut position = boundary;
-    for _ in 0..=16 {
+    for _ in 0..16 {
         let Some(&byte) = position.checked_sub(1).and_then(|index| source.get(index)) else {
             return false;
         };
@@ -1181,9 +1178,12 @@ fn sample_full_index_windows(
                 current.lexical_state == SampleLexicalState::OversizedTag;
             sample.decisive_oversized_tag |= current.decisive_oversized_tag;
             if current.lexical_state == SampleLexicalState::Unknown {
-                let (state, _) = resolve_unknown_sample_start(source, start);
+                let (state, boundary) = resolve_unknown_sample_start(source, start);
                 current.lexical_state = state;
-                sample.decisive_oversized_tag |= state == SampleLexicalState::OversizedTag;
+                current.decisive_oversized_tag = state == SampleLexicalState::OversizedTag
+                    || (state == SampleLexicalState::Normal
+                        && has_quoted_tag_end(source, boundary));
+                sample.decisive_oversized_tag |= current.decisive_oversized_tag;
             }
         }
     }
@@ -1910,6 +1910,38 @@ mod tests {
 
         assert_eq!(state, SampleLexicalState::Unknown);
         assert_eq!(boundary, start + FULL_INDEX_MAX_UNKNOWN_PROBE_BYTES);
+    }
+
+    #[test]
+    fn unknown_sample_before_an_ordinary_tag_is_a_text_run() {
+        let start = 128;
+        let source = format!("{}<div data-x>text</div>", "x".repeat(start + 256));
+
+        let (state, boundary) = resolve_unknown_sample_start(source.as_bytes(), start);
+
+        assert_eq!(state, SampleLexicalState::Normal);
+        assert_eq!(boundary, source.find('<').unwrap());
+    }
+
+    #[test]
+    fn adaptive_policy_does_not_mistake_repeated_text_gaps_for_oversized_tags() {
+        let unit = format!("<p data-x='1'>a</p>{}", "y".repeat(400));
+        let source = unit.repeat(512);
+        let classifier = BlockClassifier::default();
+        let sample = sample_full_index_windows(
+            source.as_bytes(),
+            classifier,
+            FULL_INDEX_MARKUP_WINDOW_BYTES,
+            true,
+        );
+
+        assert!(!sample.decisive_oversized_tag);
+
+        let mut indexer = AutoTagIndexer::new(IndexingMode::FullDocument, true);
+        indexer.prepare(source.as_bytes());
+        if classifier.is_accelerated() {
+            assert!(indexer.uses_full_index());
+        }
     }
 
     #[test]

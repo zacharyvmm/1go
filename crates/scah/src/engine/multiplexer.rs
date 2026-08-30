@@ -33,6 +33,7 @@ pub(crate) struct SaveHit {
 pub(crate) struct ElementPreflight<'query> {
     pub attribute_interest: AttributeInterest<'query>,
     runner_indices: SmallVec<[usize; 8]>,
+    runner_len: usize,
 }
 
 type Runner<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
@@ -156,6 +157,7 @@ where
     pub(crate) fn prepare_element(&self, name: &str, preflight: &mut ElementPreflight<'query>) {
         preflight.attribute_interest.clear();
         preflight.runner_indices.clear();
+        preflight.runner_len = self.runners.len();
         let name_hash = ascii_case_insensitive_hash(name);
         for (runner_index, runner) in self.runners.iter().enumerate() {
             if runner.extend_attribute_interest_for(
@@ -176,6 +178,7 @@ where
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
     ) {
+        debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
         for &runner_index in &preflight.runner_indices {
             self.runners[runner_index].next(
