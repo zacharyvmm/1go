@@ -489,9 +489,9 @@ fn parse_attributes(
 ) -> ParsedAttributes {
     let bytes = html.as_bytes();
     let mut cursor = range.start;
-    let end = range
-        .end
-        .saturating_sub(usize::from(bytes.get(range.end - 1) == Some(&b'>')));
+    let end = range.end.saturating_sub(usize::from(
+        range.end.checked_sub(1).and_then(|index| bytes.get(index)) == Some(&b'>'),
+    ));
     let mut result = ParsedAttributes::default();
 
     while cursor < end {
