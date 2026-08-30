@@ -1382,6 +1382,18 @@ mod tests {
     }
 
     #[test]
+    fn full_index_trailing_bare_delimiter_still_drains_open_elements() {
+        let unit = format!("{}<span></span>", "x".repeat(900));
+        let html = format!("<div>{}<", unit.repeat(200));
+        let queries = &[Query::all("div", Save::all()).unwrap().build()];
+
+        let store = parse(&html, queries).unwrap();
+        let div = store.get("div").unwrap().next().unwrap();
+
+        assert_eq!(div.inner_html, Some(&html["<div>".len()..]));
+    }
+
+    #[test]
     fn test_text_before_first_tag_does_not_break_text_content() {
         let html = "intro<div>Hello</div>";
         let mut reader = Reader::new(html);

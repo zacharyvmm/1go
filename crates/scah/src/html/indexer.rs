@@ -387,14 +387,10 @@ impl<'source> FusedMaskStream<'source> {
                     kind: IndexedKind::Ignored,
                 }
             }
-            None => IndexedEvent {
-                start: start as u32,
-                end: self.source.len() as u32,
-                name_start: self.source.len() as u32,
-                name_end: self.source.len() as u32,
-                attributes_start: self.source.len() as u32,
-                kind: IndexedKind::Open,
-            },
+            // Match the scalar indexer: a bare or repeated `<` at EOF is
+            // incomplete markup, not an opening element. In particular, an
+            // empty name violates the element-builder preflight contract.
+            None => return None,
             Some(_) => {
                 let name_start = position;
                 while self
@@ -1150,6 +1146,10 @@ mod tests {
     fn incomplete_open_delimiters_at_eof_are_not_events() {
         for html in ["<", "hello <", "<<<", "hello < <<"] {
             assert_eq!(ScalarTagIndexer.next(html.as_bytes(), 0), None, "{html:?}");
+
+            let mut packed = PackedTagIndexer::new(IndexingMode::FullDocument);
+            packed.prepare(html.as_bytes());
+            assert_eq!(packed.next(html.as_bytes(), 0), None, "{html:?}");
         }
     }
 
@@ -1182,6 +1182,8 @@ mod tests {
             "<!doctype html><main><img src=x/><br></main>",
             "<<<  div class=x><span>nested</span></div>",
             "unterminated <tag attr='value",
+            "text ending in a bare <",
+            "text ending in repeated <<<",
             "close </  div  > after",
             "multibyte é☃ <article data-name='é'>text</article>",
         ] {
@@ -1344,6 +1346,8 @@ mod tests {
             r#"<div data="escaped\" > quote"></div>"#,
             "<<<  div class=x><span>nested</span></div>",
             "unterminated <tag attr='value",
+            "text ending in a bare <",
+            "text ending in repeated <<<",
             "close </  div  > after",
             "multibyte é☃ <article data-name='é'>text</article>",
         ] {
