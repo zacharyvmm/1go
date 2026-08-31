@@ -93,7 +93,7 @@ harness = false
 [[bench]]
 name = "speed_bench_element_tape"
 path = "element_tape/speed_bench.rs"
- harness = false
+harness = false
 
 [[bench]]
 name = "speed_bench_sibling"
