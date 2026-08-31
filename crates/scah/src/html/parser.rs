@@ -26,11 +26,30 @@ struct ParserTempState<'html, 'query> {
     save_hits: Vec<SaveHit>,
     preflight: ElementPreflight<'query>,
 
+    sibling: Option<Box<SiblingParserState>>,
+}
+
+#[derive(Default)]
+struct SiblingParserState {
     // Reused scratch output from the current open-tag query dispatch.
-    pending_sibling_callbacks: Vec<SiblingCallback>,
+    pending: Vec<SiblingCallback>,
 
     // Persistent storage for callbacks belonging to currently open elements.
-    sibling_callback_arena: Vec<SiblingCallback>,
+    arena: Vec<SiblingCallback>,
+}
+
+impl<'html, 'query> ParserTempState<'html, 'query> {
+    fn sibling(&self) -> &SiblingParserState {
+        self.sibling
+            .as_deref()
+            .expect("sibling parser state requires sibling queries")
+    }
+
+    fn sibling_mut(&mut self) -> &mut SiblingParserState {
+        self.sibling
+            .as_deref_mut()
+            .expect("sibling parser state requires sibling queries")
+    }
 }
 
 pub struct XHtmlParser<'html, 'query, Q> {
@@ -71,6 +90,7 @@ where
         let capture_text_content = selectors.requires_text_content();
         let persist_attributes = selectors.requires_attribute_storage();
         let parse_attributes = selectors.requires_attribute_parsing();
+        let has_sibling_queries = selectors.features().has_sibling_queries;
         let store = capacity.map_or_else(Store::default, |capacity| {
             Store::with_capacity_requirements(
                 capacity,
@@ -92,7 +112,10 @@ where
             selectors,
             element: XHtmlElement::default(),
             open_elements: OpenElementStack::default(),
-            temp_state: ParserTempState::default(),
+            temp_state: ParserTempState {
+                sibling: has_sibling_queries.then(Box::default),
+                ..ParserTempState::default()
+            },
             capture_text_content,
             persist_attributes,
             raw_text_close: None,
@@ -142,7 +165,7 @@ where
                     .find_raw_text_close(source, reader.get_position(), close_tag)
             else {
                 reader.advance_to(source.len());
-                self.drain_open_elements(reader);
+                self.drain_open_elements::<SIBLINGS>(reader);
                 return false;
             };
             reader.advance_to(close_position);
@@ -168,7 +191,7 @@ where
             }
 
             let closing_tag = &close_tag[2..];
-            let early_exit = self.handle_close_tag(closing_tag, reader);
+            let early_exit = self.handle_close_tag::<SIBLINGS>(closing_tag, reader);
             return !early_exit && !reader.eof();
         }
 
@@ -178,7 +201,7 @@ where
         let tag = loop {
             let Some(span) = self.indexer.next(source, reader.get_position()) else {
                 reader.advance_to(source.len());
-                self.drain_open_elements(reader);
+                self.drain_open_elements::<SIBLINGS>(reader);
                 return false;
             };
 
@@ -217,7 +240,7 @@ where
                             {
                                 self.position.text_content_position = position;
                             }
-                            early_exit = self.drain_implied_closes(
+                            early_exit = self.drain_implied_closes::<SIBLINGS>(
                                 reader,
                                 Some(ImpliedCloseReason::OpenTagRule),
                                 None,
@@ -307,7 +330,11 @@ where
                     self.element.name,
                     tag,
                     self.temp_state.saved_elements.len(),
-                    self.temp_state.sibling_callback_arena.len(),
+                    if SIBLINGS {
+                        self.temp_state.sibling().arena.len()
+                    } else {
+                        0
+                    },
                 ) {
                     self.record_parse_error(err);
                     return false;
@@ -326,13 +353,22 @@ where
                 );
 
                 if SIBLINGS {
+                    let ParserTempState {
+                        save_hits,
+                        preflight,
+                        sibling,
+                        ..
+                    } = &mut self.temp_state;
+                    let sibling = sibling
+                        .as_deref_mut()
+                        .expect("sibling parser state requires sibling queries");
                     self.selectors.next_with_siblings_into(
                         &self.element,
                         &self.position,
                         &mut self.store,
-                        &mut self.temp_state.save_hits,
-                        &self.temp_state.preflight,
-                        &mut self.temp_state.pending_sibling_callbacks,
+                        save_hits,
+                        preflight,
+                        &mut sibling.pending,
                     );
                 } else {
                     self.selectors.next_plain_into(
@@ -358,12 +394,13 @@ where
                 if is_self_closing {
                     let source_depth = self.position.element_depth;
                     if SIBLINGS {
+                        let sibling = self.temp_state.sibling_mut();
                         self.selectors.activate_sibling_callbacks(
-                            &self.temp_state.pending_sibling_callbacks,
+                            &sibling.pending,
                             source_depth,
                             &mut self.store,
                         );
-                        self.temp_state.pending_sibling_callbacks.clear();
+                        sibling.pending.clear();
                     }
                     early_exit = self.selectors.back(
                         self.element.name,
@@ -388,17 +425,16 @@ where
                         }
                     }
                     if SIBLINGS {
-                        self.open_elements.attach_sibling_callbacks(
-                            &mut self.temp_state.pending_sibling_callbacks,
-                            &mut self.temp_state.sibling_callback_arena,
-                        );
+                        let sibling = self.temp_state.sibling_mut();
+                        self.open_elements
+                            .attach_sibling_callbacks(&mut sibling.pending, &mut sibling.arena);
                     }
                 }
 
                 self.element.clear();
             }
             XHtmlTag::Close(closing_tag) => {
-                early_exit = self.handle_close_tag(closing_tag, reader) || early_exit;
+                early_exit = self.handle_close_tag::<SIBLINGS>(closing_tag, reader) || early_exit;
             }
         }
 
@@ -448,7 +484,7 @@ where
         self.store
     }
 
-    fn pop_open_element(
+    fn pop_open_element<const SIBLINGS: bool>(
         &mut self,
         open_element: OpenElement<'html>,
         close_depth: crate::engine::DepthSize,
@@ -464,43 +500,41 @@ where
             self.selectors
                 .back(open_element.name, &self.position, reader, &mut self.store);
 
-        self.finish_sibling_callback_range(
-            Some(OpenElementStack::sibling_callback_start(&open_element)),
-            close_depth,
-            activate_sibling_callbacks,
-        );
+        if SIBLINGS {
+            self.finish_sibling_callback_range(
+                OpenElementStack::sibling_callback_start(&open_element),
+                close_depth,
+                activate_sibling_callbacks,
+            );
+        }
 
         early_exit
     }
 
     fn finish_sibling_callback_range(
         &mut self,
-        callback_start: Option<usize>,
+        start: usize,
         source_depth: crate::engine::DepthSize,
         activate: bool,
     ) {
-        let Some(start) = callback_start else {
-            return;
-        };
-
-        let end = self.temp_state.sibling_callback_arena.len();
+        let end = self.temp_state.sibling().arena.len();
 
         debug_assert!(start <= end, "invalid sibling callback arena range");
 
         if activate {
             for index in start..end {
-                let callback = self.temp_state.sibling_callback_arena[index];
+                let callback = self.temp_state.sibling().arena[index];
                 self.selectors
                     .activate_sibling_callback(callback, source_depth, &mut self.store);
             }
         }
 
-        self.temp_state.sibling_callback_arena.truncate(start);
+        self.temp_state.sibling_mut().arena.truncate(start);
     }
 
     /// Drain the implied-closes vector, finalizing each element, and restore
     /// the vector's capacity for reuse. Returns `true` on early exit.
-    fn drain_implied_closes(
+    fn drain_implied_closes<const SIBLINGS: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -530,9 +564,12 @@ where
             }
             // Only the final pop in a batch can have later siblings under its parent.
             let parent_survives_batch = activate_sibling_callbacks && index + 1 == total;
-            early_exit =
-                self.pop_open_element(open_element, close_depth, reader, parent_survives_batch)
-                    || early_exit;
+            early_exit = self.pop_open_element::<SIBLINGS>(
+                open_element,
+                close_depth,
+                reader,
+                parent_survives_batch,
+            ) || early_exit;
         }
 
         self.temp_state.implied_closes = elems;
@@ -541,7 +578,11 @@ where
 
     /// Apply a close tag: trace, pop from the open-element stack, and run
     /// the close-element path. Returns `true` on early exit.
-    fn handle_close_tag(&mut self, closing_tag: &'html str, reader: &Reader<'html>) -> bool {
+    fn handle_close_tag<const SIBLINGS: bool>(
+        &mut self,
+        closing_tag: &'html str,
+        reader: &Reader<'html>,
+    ) -> bool {
         crate::scah_trace!(
             self.store,
             TraceEvent::CloseTag {
@@ -559,19 +600,19 @@ where
         // and derives the same `close_depth` for a single popped element.
         if let Some(open_element) = self.open_elements.pop_matching_top(closing_tag) {
             let close_depth = self.open_elements.depth().saturating_add(1);
-            return self.pop_open_element(open_element, close_depth, reader, true);
+            return self.pop_open_element::<SIBLINGS>(open_element, close_depth, reader, true);
         }
 
         self.open_elements
             .close_by_end_tag_into(closing_tag, &mut self.temp_state.closing_elements);
-        self.pop_closing_elements(
+        self.pop_closing_elements::<SIBLINGS>(
             reader,
             Some(ImpliedCloseReason::MismatchedEndTag),
             Some(closing_tag),
         )
     }
 
-    fn pop_closing_elements(
+    fn pop_closing_elements<const SIBLINGS: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -599,9 +640,12 @@ where
                 );
             }
             let parent_survives_batch = index + 1 == total;
-            early_exit =
-                self.pop_open_element(open_element, close_depth, reader, parent_survives_batch)
-                    || early_exit;
+            early_exit = self.pop_open_element::<SIBLINGS>(
+                open_element,
+                close_depth,
+                reader,
+                parent_survives_batch,
+            ) || early_exit;
         }
 
         self.temp_state.closing_elements = closing_elements;
@@ -636,7 +680,7 @@ where
         }
     }
 
-    fn drain_open_elements(&mut self, reader: &Reader<'html>) {
+    fn drain_open_elements<const SIBLINGS: bool>(&mut self, reader: &Reader<'html>) {
         if self.eof_drained {
             return;
         }
@@ -650,11 +694,18 @@ where
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
-        self.drain_implied_closes(reader, Some(ImpliedCloseReason::EofDrain), None, false);
-        debug_assert!(
-            self.temp_state.sibling_callback_arena.is_empty(),
-            "sibling callback arena leaked callbacks after EOF"
+        self.drain_implied_closes::<SIBLINGS>(
+            reader,
+            Some(ImpliedCloseReason::EofDrain),
+            None,
+            false,
         );
+        if SIBLINGS {
+            debug_assert!(
+                self.temp_state.sibling().arena.is_empty(),
+                "sibling callback arena leaked callbacks after EOF"
+            );
+        }
         self.eof_drained = true;
     }
 }
@@ -677,6 +728,17 @@ mod tests {
             </p>
         </html>
         "#;
+
+    #[test]
+    fn sibling_state_is_allocated_only_for_sibling_queries() {
+        let plain_queries = &[Query::all("div", Save::none()).unwrap().build()];
+        let plain_parser = XHtmlParser::new(QueryMultiplexer::new(plain_queries));
+        assert!(plain_parser.temp_state.sibling.is_none());
+
+        let sibling_queries = &[Query::all("div + p", Save::none()).unwrap().build()];
+        let sibling_parser = XHtmlParser::new(QueryMultiplexer::new(sibling_queries));
+        assert!(sibling_parser.temp_state.sibling.is_some());
+    }
 
     #[test]
     fn test_basic_html() {
@@ -1884,10 +1946,10 @@ mod tests {
         while parser.next(&mut reader) {}
 
         assert!(
-            parser.temp_state.sibling_callback_arena.is_empty(),
+            parser.temp_state.sibling().arena.is_empty(),
             "EOF must truncate every callback range"
         );
-        assert!(parser.temp_state.pending_sibling_callbacks.is_empty());
+        assert!(parser.temp_state.sibling().pending.is_empty());
     }
 
     #[test]
@@ -1900,15 +1962,15 @@ mod tests {
 
         // Open <main>
         assert!(parser.next(&mut reader));
-        assert!(parser.temp_state.sibling_callback_arena.is_empty());
+        assert!(parser.temp_state.sibling().arena.is_empty());
 
         // Void <br>: callback activates immediately and must not enter the arena.
         assert!(parser.next(&mut reader));
         assert!(
-            parser.temp_state.sibling_callback_arena.is_empty(),
+            parser.temp_state.sibling().arena.is_empty(),
             "void sources must not append callbacks to the arena"
         );
-        assert!(parser.temp_state.pending_sibling_callbacks.is_empty());
+        assert!(parser.temp_state.sibling().pending.is_empty());
 
         while parser.next(&mut reader) {}
 
@@ -1934,10 +1996,10 @@ mod tests {
         while parser.next(&mut reader) {}
 
         assert!(
-            parser.temp_state.sibling_callback_arena.is_empty(),
+            parser.temp_state.sibling().arena.is_empty(),
             "chained void activation must leave the arena empty"
         );
-        assert!(parser.temp_state.pending_sibling_callbacks.is_empty());
+        assert!(parser.temp_state.sibling().pending.is_empty());
 
         let store = parser.matches();
         let hits: Vec<_> = store
@@ -1970,7 +2032,7 @@ mod tests {
         while parser.next(&mut reader) {}
 
         assert!(
-            parser.temp_state.sibling_callback_arena.is_empty(),
+            parser.temp_state.sibling().arena.is_empty(),
             "same-batch discards must still truncate arena ranges"
         );
         let store = parser.matches();
