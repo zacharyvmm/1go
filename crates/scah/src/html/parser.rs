@@ -141,22 +141,29 @@ where
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
-        if self.selectors.features().has_sibling_queries {
-            self.next_mode::<true>(reader)
-        } else {
-            self.next_mode::<false>(reader)
+        let features = self.selectors.features();
+        match (features.has_sibling_queries, features.has_retiring_runners) {
+            (false, false) => self.next_mode::<false, false>(reader),
+            (false, true) => self.next_mode::<false, true>(reader),
+            (true, false) => self.next_mode::<true, false>(reader),
+            (true, true) => self.next_mode::<true, true>(reader),
         }
     }
 
     pub(crate) fn run(&mut self, reader: &mut Reader<'html>) {
-        if self.selectors.features().has_sibling_queries {
-            while self.next_mode::<true>(reader) {}
-        } else {
-            while self.next_mode::<false>(reader) {}
+        let features = self.selectors.features();
+        match (features.has_sibling_queries, features.has_retiring_runners) {
+            (false, false) => while self.next_mode::<false, false>(reader) {},
+            (false, true) => while self.next_mode::<false, true>(reader) {},
+            (true, false) => while self.next_mode::<true, false>(reader) {},
+            (true, true) => while self.next_mode::<true, true>(reader) {},
         }
     }
 
-    fn next_mode<const SIBLINGS: bool>(&mut self, reader: &mut Reader<'html>) -> bool {
+    fn next_mode<const SIBLINGS: bool, const RETIREMENT: bool>(
+        &mut self,
+        reader: &mut Reader<'html>,
+    ) -> bool {
         if self.parse_error.is_some() {
             return false;
         }
@@ -168,7 +175,7 @@ where
                     .find_raw_text_close(source, reader.get_position(), close_tag)
             else {
                 reader.advance_to(source.len());
-                self.drain_open_elements::<SIBLINGS>(reader);
+                self.drain_open_elements::<SIBLINGS, RETIREMENT>(reader);
                 return false;
             };
             reader.advance_to(close_position);
@@ -194,7 +201,7 @@ where
             }
 
             let closing_tag = &close_tag[2..];
-            let early_exit = self.handle_close_tag::<SIBLINGS>(closing_tag, reader);
+            let early_exit = self.handle_close_tag::<SIBLINGS, RETIREMENT>(closing_tag, reader);
             return !early_exit && !reader.eof();
         }
 
@@ -204,7 +211,7 @@ where
         let tag = loop {
             let Some(span) = self.indexer.next(source, reader.get_position()) else {
                 reader.advance_to(source.len());
-                self.drain_open_elements::<SIBLINGS>(reader);
+                self.drain_open_elements::<SIBLINGS, RETIREMENT>(reader);
                 return false;
             };
 
@@ -243,7 +250,7 @@ where
                             {
                                 self.position.text_content_position = position;
                             }
-                            early_exit = self.drain_implied_closes::<SIBLINGS>(
+                            early_exit = self.drain_implied_closes::<SIBLINGS, RETIREMENT>(
                                 reader,
                                 Some(ImpliedCloseReason::OpenTagRule),
                                 None,
@@ -252,8 +259,10 @@ where
                         }
                     }
 
-                    self.selectors
-                        .prepare_element::<SIBLINGS>(name, &mut self.temp_state.preflight);
+                    self.selectors.prepare_element::<SIBLINGS, RETIREMENT>(
+                        name,
+                        &mut self.temp_state.preflight,
+                    );
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {
@@ -404,7 +413,7 @@ where
                         );
                         sibling.pending.clear();
                     }
-                    early_exit = self.selectors.back(
+                    early_exit = self.selectors.back::<RETIREMENT>(
                         self.element.name,
                         &self.position,
                         reader,
@@ -436,7 +445,8 @@ where
                 self.element.clear();
             }
             XHtmlTag::Close(closing_tag) => {
-                early_exit = self.handle_close_tag::<SIBLINGS>(closing_tag, reader) || early_exit;
+                early_exit = self.handle_close_tag::<SIBLINGS, RETIREMENT>(closing_tag, reader)
+                    || early_exit;
             }
         }
 
@@ -486,7 +496,7 @@ where
         self.store
     }
 
-    fn pop_open_element<const SIBLINGS: bool>(
+    fn pop_open_element<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         open_element: OpenElement<'html>,
         close_depth: crate::engine::DepthSize,
@@ -498,9 +508,12 @@ where
         self.finalize_open_element(&open_element, reader);
         self.temp_state.saved_elements.truncate(saved_range.start);
         self.position.element_depth = close_depth;
-        let early_exit =
-            self.selectors
-                .back(open_element.name, &self.position, reader, &mut self.store);
+        let early_exit = self.selectors.back::<RETIREMENT>(
+            open_element.name,
+            &self.position,
+            reader,
+            &mut self.store,
+        );
 
         if SIBLINGS {
             let callback_start = self
@@ -542,7 +555,7 @@ where
 
     /// Drain the implied-closes vector, finalizing each element, and restore
     /// the vector's capacity for reuse. Returns `true` on early exit.
-    fn drain_implied_closes<const SIBLINGS: bool>(
+    fn drain_implied_closes<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -572,7 +585,7 @@ where
             }
             // Only the final pop in a batch can have later siblings under its parent.
             let parent_survives_batch = activate_sibling_callbacks && index + 1 == total;
-            early_exit = self.pop_open_element::<SIBLINGS>(
+            early_exit = self.pop_open_element::<SIBLINGS, RETIREMENT>(
                 open_element,
                 close_depth,
                 reader,
@@ -586,7 +599,7 @@ where
 
     /// Apply a close tag: trace, pop from the open-element stack, and run
     /// the close-element path. Returns `true` on early exit.
-    fn handle_close_tag<const SIBLINGS: bool>(
+    fn handle_close_tag<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         closing_tag: &'html str,
         reader: &Reader<'html>,
@@ -608,19 +621,24 @@ where
         // and derives the same `close_depth` for a single popped element.
         if let Some(open_element) = self.open_elements.pop_matching_top(closing_tag) {
             let close_depth = self.open_elements.depth().saturating_add(1);
-            return self.pop_open_element::<SIBLINGS>(open_element, close_depth, reader, true);
+            return self.pop_open_element::<SIBLINGS, RETIREMENT>(
+                open_element,
+                close_depth,
+                reader,
+                true,
+            );
         }
 
         self.open_elements
             .close_by_end_tag_into(closing_tag, &mut self.temp_state.closing_elements);
-        self.pop_closing_elements::<SIBLINGS>(
+        self.pop_closing_elements::<SIBLINGS, RETIREMENT>(
             reader,
             Some(ImpliedCloseReason::MismatchedEndTag),
             Some(closing_tag),
         )
     }
 
-    fn pop_closing_elements<const SIBLINGS: bool>(
+    fn pop_closing_elements<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -648,7 +666,7 @@ where
                 );
             }
             let parent_survives_batch = index + 1 == total;
-            early_exit = self.pop_open_element::<SIBLINGS>(
+            early_exit = self.pop_open_element::<SIBLINGS, RETIREMENT>(
                 open_element,
                 close_depth,
                 reader,
@@ -688,7 +706,10 @@ where
         }
     }
 
-    fn drain_open_elements<const SIBLINGS: bool>(&mut self, reader: &Reader<'html>) {
+    fn drain_open_elements<const SIBLINGS: bool, const RETIREMENT: bool>(
+        &mut self,
+        reader: &Reader<'html>,
+    ) {
         if self.eof_drained {
             return;
         }
@@ -702,7 +723,7 @@ where
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
-        self.drain_implied_closes::<SIBLINGS>(
+        self.drain_implied_closes::<SIBLINGS, RETIREMENT>(
             reader,
             Some(ImpliedCloseReason::EofDrain),
             None,

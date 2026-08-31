@@ -212,7 +212,7 @@ where
 
     /// Whether an active runner may inspect or save attributes for this name.
     #[inline]
-    pub(crate) fn prepare_element<const SIBLINGS: bool>(
+    pub(crate) fn prepare_element<const SIBLINGS: bool, const RETIREMENT: bool>(
         &self,
         name: &str,
         preflight: &mut ElementPreflight<'query>,
@@ -222,29 +222,28 @@ where
         preflight.runner_len = self.runners.len();
         let name_hash = ascii_case_insensitive_hash(name);
 
-        match &self.active {
-            None => {
-                for (runner_index, runner) in self.runners.iter().enumerate() {
-                    if runner.extend_attribute_interest_for::<SIBLINGS>(
-                        name,
-                        name_hash,
-                        &mut preflight.attribute_interest,
-                    ) {
-                        preflight.runner_indices.push(runner_index);
-                    }
+        if RETIREMENT && let Some(ids) = &self.active {
+            for runner_id in ids.iter().copied() {
+                let runner_index = runner_id.index();
+                if self.runners[runner_index].extend_attribute_interest_for::<SIBLINGS>(
+                    name,
+                    name_hash,
+                    &mut preflight.attribute_interest,
+                ) {
+                    preflight.runner_indices.push(runner_index);
                 }
             }
-            Some(ids) => {
-                for runner_id in ids.iter().copied() {
-                    let runner_index = runner_id.index();
-                    if self.runners[runner_index].extend_attribute_interest_for::<SIBLINGS>(
-                        name,
-                        name_hash,
-                        &mut preflight.attribute_interest,
-                    ) {
-                        preflight.runner_indices.push(runner_index);
-                    }
-                }
+            return;
+        }
+
+        debug_assert!(RETIREMENT || self.active.is_none());
+        for (runner_index, runner) in self.runners.iter().enumerate() {
+            if runner.extend_attribute_interest_for::<SIBLINGS>(
+                name,
+                name_hash,
+                &mut preflight.attribute_interest,
+            ) {
+                preflight.runner_indices.push(runner_index);
             }
         }
     }
@@ -378,14 +377,14 @@ where
         });
     }
 
-    pub(crate) fn back(
+    pub(crate) fn back<const RETIREMENT: bool>(
         &mut self,
         xhtml_element: &'html str,
         position: &DocumentPosition,
         reader: &Reader<'html>,
         store: &mut Store<'html, 'query>,
     ) -> bool {
-        if !self.features.has_retiring_runners {
+        if !RETIREMENT {
             debug_assert!(self.active.is_none());
             for (index, session) in self.runners.iter_mut().enumerate() {
                 let _ = session.back(RunnerId(index), xhtml_element, position, store);
@@ -731,7 +730,7 @@ mod tests {
         let selectors = QueryMultiplexer::new(&queries);
         let mut preflight = ElementPreflight::default();
 
-        selectors.prepare_element::<false>("span", &mut preflight);
+        selectors.prepare_element::<false, false>("span", &mut preflight);
 
         assert_eq!(preflight.runner_indices.as_slice(), &[1, 2]);
         assert!(preflight.attribute_interest.includes_class());
