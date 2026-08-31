@@ -94,11 +94,11 @@ impl<'html> OpenElementStack<'html> {
         if callbacks.is_empty() {
             return;
         }
-        if self.entries.last_mut().is_some() {
-            deferred_callbacks.append(callbacks);
-        } else {
-            callbacks.clear();
-        }
+        debug_assert!(
+            self.entries.last().is_some(),
+            "sibling callbacks require an open source element"
+        );
+        deferred_callbacks.append(callbacks);
     }
 
     #[cfg(test)]
@@ -273,15 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn sibling_callbacks_attach_only_inside_an_open_scope() {
+    fn sibling_callbacks_attach_to_open_source() {
         let mut stack = OpenElementStack::default();
         let mut pending = Vec::new();
         let mut arena = Vec::new();
-
-        pending.push(sample_callback(0));
-        stack.attach_sibling_callbacks(&mut pending, &mut arena);
-        assert!(pending.is_empty());
-        assert!(arena.is_empty());
 
         stack
             .push_classified("parent", TagFlags::classify("parent"), 0)

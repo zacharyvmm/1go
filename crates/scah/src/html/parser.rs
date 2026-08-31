@@ -753,6 +753,34 @@ mod tests {
     }
 
     #[test]
+    fn sibling_executor_path_matches_plain_path_for_plain_queries() {
+        let html = r#"
+            <main>
+                <article><h1>one</h1><p class="hit">alpha</p></article>
+                <article><h1>two</h1><br><p class="hit">beta</p></article>
+                <section><p class="hit">malformed</section>
+            </main>
+        "#;
+        let queries = [
+            Query::all("article > p.hit", Save::all()).unwrap().build(),
+            Query::all("main p", Save::only_text_content())
+                .unwrap()
+                .build(),
+        ];
+
+        let mut plain = XHtmlParser::new(QueryMultiplexer::new(&queries));
+        let mut plain_reader = Reader::new(html);
+        plain.run(&mut plain_reader);
+
+        let mut forced_sibling = XHtmlParser::new(QueryMultiplexer::new(&queries));
+        forced_sibling.temp_state.sibling = Some(Box::default());
+        let mut sibling_reader = Reader::new(html);
+        while forced_sibling.next_mode::<true>(&mut sibling_reader) {}
+
+        assert_eq!(forced_sibling.finish(), plain.finish());
+    }
+
+    #[test]
     fn test_basic_html() {
         let mut reader = Reader::new(BASIC_HTML);
 

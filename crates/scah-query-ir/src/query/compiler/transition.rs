@@ -45,6 +45,7 @@ pub struct PredicateMetadata<'query> {
     name_hash: u64,
     needs_id: bool,
     needs_class: bool,
+    query_has_sibling: bool,
     attribute_names: AttributeNames<'query>,
 }
 
@@ -78,6 +79,7 @@ impl<'query> PredicateMetadata<'query> {
                     .as_slice()
                     .iter()
                     .any(|attribute| attribute.name.eq_ignore_ascii_case("class")),
+            query_has_sibling: false,
             attribute_names: AttributeNames::Owned(attribute_names.into_boxed_slice()),
         }
     }
@@ -97,6 +99,7 @@ impl<'query> PredicateMetadata<'query> {
             },
             needs_id,
             needs_class,
+            query_has_sibling: false,
             attribute_names,
         }
     }
@@ -223,9 +226,32 @@ impl<'query> Transition<'query> {
         &self.metadata
     }
 
+    #[doc(hidden)]
+    pub const fn query_has_sibling(&self) -> bool {
+        self.metadata.query_has_sibling
+    }
+
+    pub(crate) fn cache_query_features(states: &mut [Self]) {
+        let has_sibling = states.iter().any(|transition| {
+            matches!(
+                transition.guard,
+                Combinator::NextSibling | Combinator::SubsequentSibling
+            )
+        });
+        if let Some(first) = states.first_mut() {
+            first.metadata.query_has_sibling = has_sibling;
+        }
+    }
+
+    pub(crate) const fn set_query_has_sibling(&mut self, has_sibling: bool) {
+        self.metadata.query_has_sibling = has_sibling;
+    }
+
     /// Replace the predicate and atomically refresh its compiled metadata.
     pub fn set_predicate(&mut self, predicate: ElementPredicate<'query>) {
-        let metadata = PredicateMetadata::compile(&predicate);
+        let query_has_sibling = self.metadata.query_has_sibling;
+        let mut metadata = PredicateMetadata::compile(&predicate);
+        metadata.query_has_sibling = query_has_sibling;
         self.predicate = predicate;
         self.metadata = metadata;
     }
@@ -244,6 +270,8 @@ impl<'query> Transition<'query> {
         if states.is_empty() {
             return Err(SelectorParseError::new("empty selector", 0));
         }
+
+        Self::cache_query_features(&mut states);
 
         Ok(states)
     }
@@ -437,6 +465,21 @@ mod tests {
                 .matches_name("a", ascii_case_insensitive_hash("a"))
         );
         assert!(transition.metadata().needs_id());
+    }
+
+    #[test]
+    fn replacing_first_predicate_preserves_query_features() {
+        let mut transitions = Transition::generate_transitions_from_string("div + p").unwrap();
+        assert!(transitions[0].query_has_sibling());
+
+        transitions[0].set_predicate(ElementPredicate {
+            name: Some("main"),
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from_static(&[]),
+        });
+
+        assert!(transitions[0].query_has_sibling());
     }
 
     #[test]

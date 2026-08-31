@@ -5,7 +5,7 @@ use crate::Position;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{Combinator, QuerySpec, Reader};
+use crate::{QuerySpec, Reader};
 use smallvec::SmallVec;
 
 pub(crate) struct DocumentPosition {
@@ -25,6 +25,11 @@ pub(crate) struct SaveHit {
     pub save_text_content: bool,
 }
 
+/// Query work selected while the parser still has only the opening tag name.
+///
+/// The parser reuses this allocation between elements. Besides deciding which
+/// attributes to tokenize, it carries the viable runner set into execution so
+/// the query frontier is not traversed twice for every opening tag.
 #[derive(Debug, Default)]
 pub(crate) struct ElementPreflight<'query> {
     pub attribute_interest: AttributeInterest<'query>,
@@ -61,30 +66,8 @@ pub(crate) struct SiblingCallback {
 type Runners<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct QueryFeatures {
-    pub(crate) has_sibling: bool,
-    pub(crate) has_adjacent: bool,
-}
-
-fn query_features<'query, Q: QuerySpec<'query>>(query: &Q) -> QueryFeatures {
-    let mut features = QueryFeatures::default();
-    for transition in query.states() {
-        match transition.guard {
-            Combinator::NextSibling => {
-                features.has_sibling = true;
-                features.has_adjacent = true;
-            }
-            Combinator::SubsequentSibling => features.has_sibling = true,
-            _ => {}
-        }
-    }
-    features
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MultiplexerFeatures {
     pub(crate) has_sibling_queries: bool,
-    pub(crate) has_adjacent_queries: bool,
     pub(crate) has_retiring_runners: bool,
 }
 
@@ -130,9 +113,7 @@ where
         queries
             .iter()
             .fold(MultiplexerFeatures::default(), |mut aggregate, query| {
-                let features = query_features(query);
-                aggregate.has_sibling_queries |= features.has_sibling;
-                aggregate.has_adjacent_queries |= features.has_adjacent;
+                aggregate.has_sibling_queries |= query.has_sibling_combinator();
                 aggregate.has_retiring_runners |= query.exit_at_section_end().is_some();
                 aggregate
             })
@@ -171,7 +152,7 @@ where
         self.cursor_stats.is_some()
     }
 
-    /// Update peak cursor counts from currently live executors only.
+    /// Update peak cursor counts from all resident executor storage.
     #[cfg(feature = "bench-internals")]
     #[inline]
     fn track_cursor_stats(&mut self) {
@@ -179,31 +160,13 @@ where
             return;
         };
 
-        let mut resident = 0;
-        let mut active = 0;
-        match &self.active {
-            None => {
-                for session in &self.runners {
-                    resident += session.cursors.len();
-                    active += session
-                        .cursors
-                        .iter()
-                        .filter(|cursor| cursor.is_active())
-                        .count();
-                }
-            }
-            Some(ids) => {
-                for runner in ids.iter() {
-                    let session = &self.runners[runner.index()];
-                    resident += session.cursors.len();
-                    active += session
-                        .cursors
-                        .iter()
-                        .filter(|cursor| cursor.is_active())
-                        .count();
-                }
-            }
-        }
+        let resident = self.runners.iter().map(|runner| runner.cursors.len()).sum();
+        let active = self
+            .runners
+            .iter()
+            .flat_map(|runner| runner.cursors.iter())
+            .filter(|cursor| cursor.is_active())
+            .count();
 
         stats.peak_resident_cursor_slots = stats.peak_resident_cursor_slots.max(resident);
         stats.peak_active_obligations = stats.peak_active_obligations.max(active);
@@ -247,6 +210,7 @@ where
             .all(|runner| runner.query().exit_at_section_end().is_some())
     }
 
+    /// Whether an active runner may inspect or save attributes for this name.
     #[inline]
     pub(crate) fn prepare_element<const SIBLINGS: bool>(
         &self,
@@ -406,7 +370,11 @@ where
         active_ids.retain(|runner| {
             let session = &mut runners[runner.index()];
             let significant_close = session.back(*runner, xhtml_element, position, store);
-            !(significant_close && session.early_exit())
+            let retire = significant_close && session.early_exit();
+            if retire {
+                session.release_cursor_storage();
+            }
+            !retire
         });
     }
 
@@ -426,19 +394,24 @@ where
                 store,
             );
         } else {
-            let mut any_retired = false;
+            let runner_count = self.runners.len();
+            let mut remaining = None;
             for (index, session) in self.runners.iter_mut().enumerate() {
                 let significant_close =
                     session.back(RunnerId(index), xhtml_element, position, store);
-                any_retired |= significant_close && session.early_exit();
+                let retire = significant_close && session.early_exit();
+                if retire {
+                    session.release_cursor_storage();
+                    if remaining.is_none() {
+                        let mut ids = Vec::with_capacity(runner_count.saturating_sub(1));
+                        ids.extend((0..index).map(RunnerId));
+                        remaining = Some(ids);
+                    }
+                } else if let Some(ids) = remaining.as_mut() {
+                    ids.push(RunnerId(index));
+                }
             }
-            if any_retired {
-                let remaining = self
-                    .runners
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, runner)| (!runner.early_exit()).then_some(RunnerId(index)))
-                    .collect();
+            if let Some(remaining) = remaining {
                 self.active = Some(Box::new(remaining));
             }
         }
@@ -474,7 +447,13 @@ where
     }
 
     #[cfg(test)]
+    pub(crate) fn runner_cursor_capacity(&self, runner: RunnerId) -> usize {
+        self.runners[runner.index()].cursors.capacity()
+    }
+
+    #[cfg(test)]
     pub(crate) fn retire_runner_for_test(&mut self, runner: RunnerId) {
+        self.runners[runner.index()].release_cursor_storage();
         let mut ids: Vec<_> = match &self.active {
             None => (0..self.runners.len()).map(RunnerId).collect(),
             Some(ids) => ids.as_ref().clone(),
@@ -511,18 +490,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ActiveRunnerSet, ElementPreflight, QueryFeatures, QueryMultiplexer, RunnerId,
-        SiblingCallback, query_features,
-    };
+    use super::{ActiveRunnerSet, ElementPreflight, QueryMultiplexer, RunnerId, SiblingCallback};
     use crate::Position;
     use crate::store::{ElementId, Store};
     use crate::{Query, Reader, Save, XHtmlParser};
-
-    fn features(selector: &str) -> QueryFeatures {
-        let query = Query::all(selector, Save::none()).unwrap().build();
-        query_features(&query)
-    }
 
     #[cfg(target_pointer_width = "64")]
     #[test]
@@ -535,26 +506,6 @@ mod tests {
     }
 
     #[test]
-    fn query_features_distinguish_plain_and_sibling_combinators() {
-        assert_eq!(features("article"), QueryFeatures::default());
-        assert_eq!(features("main article > p"), QueryFeatures::default());
-        assert_eq!(
-            features("h1 + p"),
-            QueryFeatures {
-                has_sibling: true,
-                has_adjacent: true,
-            }
-        );
-        assert_eq!(
-            features("h1 ~ p"),
-            QueryFeatures {
-                has_sibling: true,
-                has_adjacent: false,
-            }
-        );
-    }
-
-    #[test]
     fn multiplexer_features_aggregate_mixed_query_slice() {
         let queries = [
             Query::all("main > article", Save::none()).unwrap().build(),
@@ -563,7 +514,6 @@ mod tests {
         let mux = QueryMultiplexer::new(&queries);
 
         assert!(mux.features().has_sibling_queries);
-        assert!(!mux.features().has_adjacent_queries);
         assert!(!mux.features().has_retiring_runners);
     }
 
@@ -610,6 +560,7 @@ mod tests {
         assert_eq!(mux.runner_query_source(RunnerId(2)), Some("aside + footer"));
 
         mux.retire_runner_for_test(RunnerId(0));
+        assert_eq!(mux.runner_cursor_capacity(RunnerId(0)), 0);
 
         assert_eq!(mux.runner_slot_count(), 3);
         assert!(!mux.runner_slot_occupied(RunnerId(0)));
@@ -668,6 +619,8 @@ mod tests {
             parser.selectors.runner_query_source(RunnerId(3)),
             Some("footer")
         );
+        assert_eq!(parser.selectors.runner_cursor_capacity(RunnerId(0)), 0);
+        assert_eq!(parser.selectors.runner_cursor_capacity(RunnerId(2)), 0);
     }
 
     #[test]

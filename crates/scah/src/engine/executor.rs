@@ -136,6 +136,11 @@ where
         self.query
     }
 
+    /// Drop cursor storage once this runner can no longer receive events.
+    pub(crate) fn release_cursor_storage(&mut self) {
+        self.cursors = Vec::new();
+    }
+
     /// Extend attribute interest for `name` and return whether this runner
     /// must receive the element step.
     ///
@@ -571,7 +576,8 @@ where
                 self.finish_push_cursor(candidate, runner, store, create_reason)
             }
             Combinator::NextSibling | Combinator::SubsequentSibling => {
-                unreachable!("plain executor received a sibling transition")
+                debug_assert!(false, "plain executor received a sibling transition");
+                SpawnOutcome::Dominated
             }
         }
     }
@@ -747,6 +753,8 @@ where
 
             match &self.cursors[i].mode {
                 super::cursor::CursorMode::Moving { .. } => {
+                    // `save_element` advances the parent for children; restore it
+                    // afterward so this cursor can still match later siblings.
                     let output_parent = self.cursors[i].parent;
                     let needs_anchor = self.query.needs_descendant_anchor(position);
                     let anchor_candidate =
@@ -788,6 +796,8 @@ where
                         (output_parent, None)
                     };
 
+                    // Update lifecycle before admitting the anchor so the
+                    // matched source does not dominate it.
                     if !terminal_all {
                         if terminal_first {
                             debug_assert!(
@@ -820,6 +830,7 @@ where
                     }
                 }
                 super::cursor::CursorMode::Anchored { .. } => {
+                    // Anchors never advance to terminal First positions.
                     debug_assert!(
                         !(is_save_point && is_first),
                         "terminal First must be represented by a moving cursor"

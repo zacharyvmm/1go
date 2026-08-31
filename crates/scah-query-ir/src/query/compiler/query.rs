@@ -54,6 +54,16 @@ pub trait QuerySpec<'query> {
     fn queries(&self) -> &[QuerySection<'query>];
     fn exit_at_section_end(&self) -> Option<QuerySectionId>;
 
+    /// Whether any compiled transition uses `+` or `~`.
+    fn has_sibling_combinator(&self) -> bool {
+        self.states().iter().any(|transition| {
+            matches!(
+                transition.guard,
+                Combinator::NextSibling | Combinator::SubsequentSibling
+            )
+        })
+    }
+
     fn requires_text_content(&self) -> bool {
         self.queries()
             .iter()
@@ -285,6 +295,12 @@ impl<'query> QuerySpec<'query> for Query<'query> {
     fn exit_at_section_end(&self) -> Option<QuerySectionId> {
         self.exit_at_section_end
     }
+
+    fn has_sibling_combinator(&self) -> bool {
+        self.states
+            .first()
+            .is_some_and(Transition::query_has_sibling)
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -298,10 +314,24 @@ impl<'query, const N_STATES: usize, const N_SECTIONS: usize>
     StaticQuery<'query, N_STATES, N_SECTIONS>
 {
     pub const fn new(
-        states: [Transition<'query>; N_STATES],
+        mut states: [Transition<'query>; N_STATES],
         queries: [QuerySection<'query>; N_SECTIONS],
         exit_at_section_end: Option<QuerySectionId>,
     ) -> Self {
+        let mut index = 0;
+        let mut has_sibling = false;
+        while index < N_STATES {
+            if matches!(
+                states[index].guard,
+                Combinator::NextSibling | Combinator::SubsequentSibling
+            ) {
+                has_sibling = true;
+            }
+            index += 1;
+        }
+        if N_STATES > 0 {
+            states[0].set_query_has_sibling(has_sibling);
+        }
         Self {
             states,
             queries,
@@ -323,6 +353,12 @@ impl<'query, const N_STATES: usize, const N_SECTIONS: usize> QuerySpec<'query>
 
     fn exit_at_section_end(&self) -> Option<QuerySectionId> {
         self.exit_at_section_end
+    }
+
+    fn has_sibling_combinator(&self) -> bool {
+        self.states
+            .first()
+            .is_some_and(Transition::query_has_sibling)
     }
 }
 
