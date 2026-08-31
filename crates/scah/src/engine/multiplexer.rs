@@ -211,7 +211,7 @@ where
     }
 
     /// Whether an active runner may inspect or save attributes for this name.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn prepare_element<const SIBLINGS: bool, const RETIREMENT: bool>(
         &self,
         name: &str,

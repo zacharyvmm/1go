@@ -148,6 +148,7 @@ where
     /// is safe, while skipping attributes needed by a viable transition is
     /// not. Save points always need the complete element because attributes
     /// are part of the stored result even when the selector itself is tag-only.
+    #[inline(always)]
     pub(crate) fn extend_attribute_interest_for<const SIBLINGS: bool>(
         &self,
         name: &str,
