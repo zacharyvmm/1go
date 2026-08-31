@@ -14,8 +14,7 @@ pub(crate) struct SavedElement {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
-    saved_start: u32,
-    sibling_callback_start: u32,
+    saved_start: usize,
     tag: TagFlags,
     saved_count: u32,
 }
@@ -49,19 +48,13 @@ impl<'html> OpenElementStack<'html> {
         name: &'html str,
         tag: TagFlags,
         saved_start: usize,
-        sibling_callback_start: usize,
     ) -> Result<(), ParseError> {
         if Self::would_exceed_max_depth(self.entries.len()) {
             return Err(ParseError::MaximumDepthExceeded);
         }
         self.entries.push(OpenElement {
             name,
-            saved_start: saved_start
-                .try_into()
-                .expect("too many saved query hits for the open-element stack"),
-            sibling_callback_start: sibling_callback_start
-                .try_into()
-                .expect("too many sibling callbacks for the open-element stack"),
+            saved_start,
             tag,
             saved_count: 0,
         });
@@ -70,7 +63,7 @@ impl<'html> OpenElementStack<'html> {
 
     #[cfg(test)]
     pub fn push(&mut self, name: &'html str) -> Result<(), ParseError> {
-        self.push_classified(name, TagFlags::classify(name), 0, 0)
+        self.push_classified(name, TagFlags::classify(name), 0)
     }
 
     pub fn attach_saved(&mut self, saved_index: usize) {
@@ -79,7 +72,7 @@ impl<'html> OpenElementStack<'html> {
             .last_mut()
             .expect("saved query hit requires an open element");
         debug_assert_eq!(
-            open_element.saved_start as usize + open_element.saved_count as usize,
+            open_element.saved_start + open_element.saved_count as usize,
             saved_index
         );
         open_element.saved_count = open_element
@@ -89,7 +82,7 @@ impl<'html> OpenElementStack<'html> {
     }
 
     pub fn saved_range(open_element: &OpenElement<'html>) -> std::ops::Range<usize> {
-        let start = open_element.saved_start as usize;
+        let start = open_element.saved_start;
         start..start + open_element.saved_count as usize
     }
 
@@ -101,19 +94,11 @@ impl<'html> OpenElementStack<'html> {
         if callbacks.is_empty() {
             return;
         }
-        if let Some(open_element) = self.entries.last_mut() {
-            debug_assert_eq!(
-                open_element.sibling_callback_start as usize,
-                deferred_callbacks.len()
-            );
+        if self.entries.last_mut().is_some() {
             deferred_callbacks.append(callbacks);
         } else {
             callbacks.clear();
         }
-    }
-
-    pub(crate) fn sibling_callback_start(open_element: &OpenElement<'html>) -> usize {
-        open_element.sibling_callback_start as usize
     }
 
     #[cfg(test)]
@@ -288,41 +273,26 @@ mod tests {
     }
 
     #[test]
-    fn sibling_callback_arena_nested_range_discipline() {
+    fn sibling_callbacks_attach_only_inside_an_open_scope() {
         let mut stack = OpenElementStack::default();
         let mut pending = Vec::new();
         let mut arena = Vec::new();
 
+        pending.push(sample_callback(0));
+        stack.attach_sibling_callbacks(&mut pending, &mut arena);
+        assert!(pending.is_empty());
+        assert!(arena.is_empty());
+
         stack
-            .push_classified("parent", TagFlags::classify("parent"), 0, arena.len())
+            .push_classified("parent", TagFlags::classify("parent"), 0)
             .unwrap();
         pending.push(sample_callback(1));
         pending.push(sample_callback(2));
         stack.attach_sibling_callbacks(&mut pending, &mut arena);
         assert!(pending.is_empty());
         assert_eq!(arena.len(), 2);
-        assert_eq!(
-            OpenElementStack::sibling_callback_start(&stack.entries[0]),
-            0
-        );
-
-        stack
-            .push_classified("child", TagFlags::classify("child"), 0, arena.len())
-            .unwrap();
-        pending.push(sample_callback(3));
-        stack.attach_sibling_callbacks(&mut pending, &mut arena);
-        assert_eq!(arena.len(), 3);
-        let child_start = OpenElementStack::sibling_callback_start(stack.entries.last().unwrap());
-        assert_eq!(child_start, 2);
-
-        arena.truncate(child_start);
-        assert_eq!(arena.len(), 2);
         assert_eq!(arena[0].runner, RunnerId(1));
         assert_eq!(arena[1].runner, RunnerId(2));
-
-        let parent_start = OpenElementStack::sibling_callback_start(&stack.entries[0]);
-        arena.truncate(parent_start);
-        assert!(arena.is_empty());
     }
 
     #[test]

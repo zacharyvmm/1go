@@ -36,6 +36,9 @@ struct SiblingParserState {
 
     // Persistent storage for callbacks belonging to currently open elements.
     arena: Vec<SiblingCallback>,
+
+    // Callback arena starts aligned with the open-element stack.
+    callback_starts: Vec<usize>,
 }
 
 impl<'html, 'query> ParserTempState<'html, 'query> {
@@ -330,15 +333,14 @@ where
                     self.element.name,
                     tag,
                     self.temp_state.saved_elements.len(),
-                    if SIBLINGS {
-                        self.temp_state.sibling().arena.len()
-                    } else {
-                        0
-                    },
                 ) {
                     self.record_parse_error(err);
                     return false;
                 } else {
+                    if SIBLINGS {
+                        let sibling = self.temp_state.sibling_mut();
+                        sibling.callback_starts.push(sibling.arena.len());
+                    }
                     self.position.element_depth = self.open_elements.depth();
                 }
 
@@ -501,8 +503,14 @@ where
                 .back(open_element.name, &self.position, reader, &mut self.store);
 
         if SIBLINGS {
+            let callback_start = self
+                .temp_state
+                .sibling_mut()
+                .callback_starts
+                .pop()
+                .expect("open sibling scope requires a callback range");
             self.finish_sibling_callback_range(
-                OpenElementStack::sibling_callback_start(&open_element),
+                callback_start,
                 close_depth,
                 activate_sibling_callbacks,
             );
@@ -704,6 +712,10 @@ where
             debug_assert!(
                 self.temp_state.sibling().arena.is_empty(),
                 "sibling callback arena leaked callbacks after EOF"
+            );
+            debug_assert!(
+                self.temp_state.sibling().callback_starts.is_empty(),
+                "sibling callback range stack leaked entries after EOF"
             );
         }
         self.eof_drained = true;
