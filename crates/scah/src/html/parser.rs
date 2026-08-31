@@ -160,6 +160,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn next_mode<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         reader: &mut Reader<'html>,
