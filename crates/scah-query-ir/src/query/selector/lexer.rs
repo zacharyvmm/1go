@@ -117,7 +117,7 @@ impl Lexer {
             Some(b'+') => {
                 if !seen_selector {
                     return Err(SelectorParseError::new(
-                        "unsupported combinator '+'",
+                        "combinator '+' requires a preceding selector",
                         reader.get_position(),
                     ));
                 }
@@ -128,7 +128,7 @@ impl Lexer {
             Some(b'~') => {
                 if !seen_selector {
                     return Err(SelectorParseError::new(
-                        "unsupported combinator '~'",
+                        "combinator '~' requires a preceding selector",
                         reader.get_position(),
                     ));
                 }
@@ -205,11 +205,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_combinator_leading_selector() {
+    fn test_leading_subsequent_sibling_requires_selector() {
         let mut reader = Reader::new("~ element#id.class > other#other_id.other_class");
         let error = Lexer::try_next(&mut reader, false).unwrap_err();
 
-        assert_eq!(error.message(), "unsupported combinator '~'");
+        assert_eq!(
+            error.message(),
+            "combinator '~' requires a preceding selector"
+        );
     }
 
     #[test]
@@ -238,11 +241,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_leading_adjacent_sibling_combinator() {
+    fn test_leading_adjacent_sibling_requires_selector() {
         let mut reader = Reader::new("+ a");
         let error = Lexer::try_next(&mut reader, false).unwrap_err();
 
-        assert_eq!(error.message(), "unsupported combinator '+'");
+        assert_eq!(
+            error.message(),
+            "combinator '+' requires a preceding selector"
+        );
     }
 
     #[test]

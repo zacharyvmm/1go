@@ -586,7 +586,10 @@ mod tests {
             })
             .unwrap_err();
 
-        assert_eq!(error.message(), "unsupported combinator '+'");
+        assert_eq!(
+            error.message(),
+            "combinator '+' requires a preceding selector"
+        );
     }
 
     #[test]
@@ -654,6 +657,9 @@ mod tests {
 
         assert!(builder.is_err());
         let error = builder.unwrap_err();
-        assert_eq!(error.message(), "unsupported combinator '+'");
+        assert_eq!(
+            error.message(),
+            "combinator '+' requires a preceding selector"
+        );
     }
 }
