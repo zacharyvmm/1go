@@ -71,6 +71,7 @@ done
 python3 - "$repo_root/target/criterion/ordinary_parser_gate" <<'PY'
 import json
 import pathlib
+import statistics
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -80,19 +81,19 @@ failed = False
 for workload in ("no_match", "match"):
     case = root / workload / "10000"
 
-    def best(prefix: str) -> float:
-        samples = []
-        for round_number in (1, 2, 3):
-            estimates = case / f"{prefix}-{round_number}" / "estimates.json"
-            with estimates.open(encoding="utf-8") as handle:
-                samples.append(json.load(handle)["slope"]["point_estimate"])
-        return min(samples)
+    def estimate(prefix: str, round_number: int) -> float:
+        estimates = case / f"{prefix}-{round_number}" / "estimates.json"
+        with estimates.open(encoding="utf-8") as handle:
+            return json.load(handle)["slope"]["point_estimate"]
 
-    baseline = best("sibling-main")
-    candidate = best("sibling-candidate")
-    ratio = candidate / baseline
+    ratios = [
+        estimate("sibling-candidate", round_number)
+        / estimate("sibling-main", round_number)
+        for round_number in (1, 2, 3)
+    ]
+    ratio = statistics.median(ratios)
     delta = (ratio - 1.0) * 100.0
-    print(f"{workload}: {delta:+.2f}% vs target branch")
+    print(f"{workload}: {delta:+.2f}% vs main")
     failed |= ratio > limit
 
 if failed:
