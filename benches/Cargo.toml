@@ -27,6 +27,11 @@ linux-memory-benches = ["dep:gungraun"]
 gungraun = { version = "0.17", features = ["cachegrind"], optional = true }
 
 [[bench]]
+name = "speed_bench_ordinary_gate"
+path = "ordinary_gate/speed_bench.rs"
+harness = false
+
+[[bench]]
 name = "memory_bench_simple_all"
 path = "simple/all/memory_bench.rs"
 harness = false

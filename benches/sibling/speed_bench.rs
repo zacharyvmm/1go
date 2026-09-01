@@ -22,6 +22,12 @@ fn build_nonmatching_queries(runner_count: usize) -> Vec<Query<'static>> {
         .collect()
 }
 
+fn build_matching_query() -> Query<'static> {
+    Query::all("div", Save::none())
+        .expect("matching selector")
+        .build()
+}
+
 fn generate_nested_div_html(depth: usize) -> String {
     let mut html = String::with_capacity(depth * 11 + 16);
     html.push_str("<main>");
@@ -221,6 +227,7 @@ fn bench_ordinary_hot_path(c: &mut Criterion) {
     for size in [1_000usize, 10_000] {
         let html = generate_flat_nonmatching_html(size);
         let queries = build_nonmatching_queries(1);
+        let matching_query = [build_matching_query()];
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(
             BenchmarkId::new("no_match_one_runner", size),
@@ -229,6 +236,16 @@ fn bench_ordinary_hot_path(c: &mut Criterion) {
                 b.iter(|| {
                     let store = parse(black_box(html), black_box(&queries)).unwrap();
                     black_box(store);
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("match_one_runner", size),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store = parse(black_box(html), black_box(&matching_query)).unwrap();
+                    black_box(store.get("div").map(|iter| iter.count()));
                 })
             },
         );

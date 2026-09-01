@@ -141,26 +141,75 @@ where
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
-        if self.selectors.features().has_sibling_queries {
-            self.next_mode::<true>(reader)
-        } else {
-            self.next_mode::<false>(reader)
-        }
-    }
-
-    pub(crate) fn run(&mut self, reader: &mut Reader<'html>) {
-        if self.selectors.features().has_sibling_queries {
-            while self.next_mode::<true>(reader) {}
-        } else {
-            while self.next_mode::<false>(reader) {}
-        }
-    }
-
-    fn next_mode<const SIBLINGS: bool>(&mut self, reader: &mut Reader<'html>) -> bool {
         if self.parse_error.is_some() {
             return false;
         }
         self.indexer.prepare(reader.source());
+        let features = self.selectors.features();
+        match (features.has_sibling_queries, features.has_retiring_runners) {
+            (false, false) => self.next_mode::<false, false>(reader),
+            (false, true) => self.next_retiring(reader),
+            (true, false) => self.next_with_siblings(reader),
+            (true, true) => self.next_with_siblings_retiring(reader),
+        }
+    }
+
+    pub(crate) fn run(&mut self, reader: &mut Reader<'html>) {
+        if self.parse_error.is_some() {
+            return;
+        }
+        // A full run keeps one Reader source, so the index policy only needs
+        // preparation once. `next` prepares per call because its caller owns
+        // the Reader and may step a different source between calls.
+        self.indexer.prepare(reader.source());
+        let features = self.selectors.features();
+        match (features.has_sibling_queries, features.has_retiring_runners) {
+            (false, false) => while self.next_mode::<false, false>(reader) {},
+            (false, true) => self.run_retiring(reader),
+            (true, false) => self.run_with_siblings(reader),
+            (true, true) => self.run_with_siblings_retiring(reader),
+        }
+    }
+
+    #[inline(never)]
+    fn next_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
+        self.next_mode::<false, true>(reader)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn next_with_siblings(&mut self, reader: &mut Reader<'html>) -> bool {
+        self.next_mode::<true, false>(reader)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn next_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
+        self.next_mode::<true, true>(reader)
+    }
+
+    #[inline(never)]
+    fn run_retiring(&mut self, reader: &mut Reader<'html>) {
+        while self.next_mode::<false, true>(reader) {}
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn run_with_siblings(&mut self, reader: &mut Reader<'html>) {
+        while self.next_mode::<true, false>(reader) {}
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn run_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) {
+        while self.next_mode::<true, true>(reader) {}
+    }
+
+    #[inline(always)]
+    fn next_mode<const SIBLINGS: bool, const RETIREMENT: bool>(
+        &mut self,
+        reader: &mut Reader<'html>,
+    ) -> bool {
         if let Some(close_tag) = self.raw_text_close {
             let source = reader.source();
             let Some(close_position) =
@@ -168,7 +217,7 @@ where
                     .find_raw_text_close(source, reader.get_position(), close_tag)
             else {
                 reader.advance_to(source.len());
-                self.drain_open_elements::<SIBLINGS>(reader);
+                self.drain_open_elements::<SIBLINGS, RETIREMENT>(reader);
                 return false;
             };
             reader.advance_to(close_position);
@@ -194,7 +243,7 @@ where
             }
 
             let closing_tag = &close_tag[2..];
-            let early_exit = self.handle_close_tag::<SIBLINGS>(closing_tag, reader);
+            let early_exit = self.handle_close_tag::<SIBLINGS, RETIREMENT>(closing_tag, reader);
             return !early_exit && !reader.eof();
         }
 
@@ -204,7 +253,7 @@ where
         let tag = loop {
             let Some(span) = self.indexer.next(source, reader.get_position()) else {
                 reader.advance_to(source.len());
-                self.drain_open_elements::<SIBLINGS>(reader);
+                self.drain_open_elements::<SIBLINGS, RETIREMENT>(reader);
                 return false;
             };
 
@@ -243,7 +292,7 @@ where
                             {
                                 self.position.text_content_position = position;
                             }
-                            early_exit = self.drain_implied_closes::<SIBLINGS>(
+                            early_exit = self.drain_implied_closes::<SIBLINGS, RETIREMENT>(
                                 reader,
                                 Some(ImpliedCloseReason::OpenTagRule),
                                 None,
@@ -252,8 +301,10 @@ where
                         }
                     }
 
-                    self.selectors
-                        .prepare_element::<SIBLINGS>(name, &mut self.temp_state.preflight);
+                    self.selectors.prepare_element::<SIBLINGS, RETIREMENT>(
+                        name,
+                        &mut self.temp_state.preflight,
+                    );
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {
@@ -404,7 +455,7 @@ where
                         );
                         sibling.pending.clear();
                     }
-                    early_exit = self.selectors.back(
+                    early_exit = self.selectors.back::<RETIREMENT>(
                         self.element.name,
                         &self.position,
                         reader,
@@ -436,7 +487,8 @@ where
                 self.element.clear();
             }
             XHtmlTag::Close(closing_tag) => {
-                early_exit = self.handle_close_tag::<SIBLINGS>(closing_tag, reader) || early_exit;
+                early_exit = self.handle_close_tag::<SIBLINGS, RETIREMENT>(closing_tag, reader)
+                    || early_exit;
             }
         }
 
@@ -486,7 +538,7 @@ where
         self.store
     }
 
-    fn pop_open_element<const SIBLINGS: bool>(
+    fn pop_open_element<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         open_element: OpenElement<'html>,
         close_depth: crate::engine::DepthSize,
@@ -498,9 +550,12 @@ where
         self.finalize_open_element(&open_element, reader);
         self.temp_state.saved_elements.truncate(saved_range.start);
         self.position.element_depth = close_depth;
-        let early_exit =
-            self.selectors
-                .back(open_element.name, &self.position, reader, &mut self.store);
+        let early_exit = self.selectors.back::<RETIREMENT>(
+            open_element.name,
+            &self.position,
+            reader,
+            &mut self.store,
+        );
 
         if SIBLINGS {
             let callback_start = self
@@ -542,7 +597,7 @@ where
 
     /// Drain the implied-closes vector, finalizing each element, and restore
     /// the vector's capacity for reuse. Returns `true` on early exit.
-    fn drain_implied_closes<const SIBLINGS: bool>(
+    fn drain_implied_closes<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -572,7 +627,7 @@ where
             }
             // Only the final pop in a batch can have later siblings under its parent.
             let parent_survives_batch = activate_sibling_callbacks && index + 1 == total;
-            early_exit = self.pop_open_element::<SIBLINGS>(
+            early_exit = self.pop_open_element::<SIBLINGS, RETIREMENT>(
                 open_element,
                 close_depth,
                 reader,
@@ -586,7 +641,7 @@ where
 
     /// Apply a close tag: trace, pop from the open-element stack, and run
     /// the close-element path. Returns `true` on early exit.
-    fn handle_close_tag<const SIBLINGS: bool>(
+    fn handle_close_tag<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         closing_tag: &'html str,
         reader: &Reader<'html>,
@@ -608,19 +663,24 @@ where
         // and derives the same `close_depth` for a single popped element.
         if let Some(open_element) = self.open_elements.pop_matching_top(closing_tag) {
             let close_depth = self.open_elements.depth().saturating_add(1);
-            return self.pop_open_element::<SIBLINGS>(open_element, close_depth, reader, true);
+            return self.pop_open_element::<SIBLINGS, RETIREMENT>(
+                open_element,
+                close_depth,
+                reader,
+                true,
+            );
         }
 
         self.open_elements
             .close_by_end_tag_into(closing_tag, &mut self.temp_state.closing_elements);
-        self.pop_closing_elements::<SIBLINGS>(
+        self.pop_closing_elements::<SIBLINGS, RETIREMENT>(
             reader,
             Some(ImpliedCloseReason::MismatchedEndTag),
             Some(closing_tag),
         )
     }
 
-    fn pop_closing_elements<const SIBLINGS: bool>(
+    fn pop_closing_elements<const SIBLINGS: bool, const RETIREMENT: bool>(
         &mut self,
         reader: &Reader<'html>,
         implied_close_reason: Option<ImpliedCloseReason>,
@@ -648,7 +708,7 @@ where
                 );
             }
             let parent_survives_batch = index + 1 == total;
-            early_exit = self.pop_open_element::<SIBLINGS>(
+            early_exit = self.pop_open_element::<SIBLINGS, RETIREMENT>(
                 open_element,
                 close_depth,
                 reader,
@@ -688,7 +748,10 @@ where
         }
     }
 
-    fn drain_open_elements<const SIBLINGS: bool>(&mut self, reader: &Reader<'html>) {
+    fn drain_open_elements<const SIBLINGS: bool, const RETIREMENT: bool>(
+        &mut self,
+        reader: &Reader<'html>,
+    ) {
         if self.eof_drained {
             return;
         }
@@ -702,7 +765,7 @@ where
         self.position.reader_position = reader.get_position();
         self.open_elements
             .close_all_at_eof_into(&mut self.temp_state.implied_closes);
-        self.drain_implied_closes::<SIBLINGS>(
+        self.drain_implied_closes::<SIBLINGS, RETIREMENT>(
             reader,
             Some(ImpliedCloseReason::EofDrain),
             None,
@@ -775,9 +838,49 @@ mod tests {
         let mut forced_sibling = XHtmlParser::new(QueryMultiplexer::new(&queries));
         forced_sibling.temp_state.sibling = Some(Box::default());
         let mut sibling_reader = Reader::new(html);
-        while forced_sibling.next_mode::<true>(&mut sibling_reader) {}
+        while forced_sibling.next_mode::<true, false>(&mut sibling_reader) {}
 
         assert_eq!(forced_sibling.finish(), plain.finish());
+    }
+
+    #[test]
+    fn specialized_sibling_modes_match_parse_results_across_retirement() {
+        let html = "<main><h1></h1><p id='one'></p><p id='two'></p></main>";
+
+        let all_queries = &[Query::all("h1 ~ p", Save::none()).unwrap().build()];
+        assert!(
+            !QueryMultiplexer::new(all_queries)
+                .features()
+                .has_retiring_runners
+        );
+        let expected_all = parse(html, all_queries).unwrap();
+        let mut all_parser = XHtmlParser::new(QueryMultiplexer::new(all_queries));
+        let mut all_reader = Reader::new(html);
+        while all_parser.next(&mut all_reader) {}
+        assert!(all_parser.selectors.active_set_is_dense());
+        let actual_all = all_parser.matches();
+        assert_eq!(actual_all.get("h1 ~ p").unwrap().count(), 2);
+        assert_eq!(
+            actual_all.get("h1 ~ p").unwrap().count(),
+            expected_all.get("h1 ~ p").unwrap().count()
+        );
+
+        let first_queries = &[Query::first("h1 ~ p", Save::none()).unwrap().build()];
+        assert!(
+            QueryMultiplexer::new(first_queries)
+                .features()
+                .has_retiring_runners
+        );
+        let expected_first = parse(html, first_queries).unwrap();
+        let mut first_parser = XHtmlParser::new(QueryMultiplexer::new(first_queries));
+        let mut first_reader = Reader::new(html);
+        while first_parser.next(&mut first_reader) {}
+        let actual_first = first_parser.matches();
+        assert_eq!(actual_first.get("h1 ~ p").unwrap().count(), 1);
+        assert_eq!(
+            actual_first.get("h1 ~ p").unwrap().count(),
+            expected_first.get("h1 ~ p").unwrap().count()
+        );
     }
 
     #[test]
