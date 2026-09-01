@@ -4,6 +4,7 @@ members = [
     "crates/scah-query-ir",
     "crates/scah-macros",
     "crates/scah",
+    "crates/scah-ffi",
     "crates/bindings/scah-python",
     "crates/bindings/scah-node",
     "benches",

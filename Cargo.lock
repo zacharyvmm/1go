@@ -1663,6 +1663,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scah-ffi"
+version = "0.0.21"
+dependencies = [
+ "pretty_assertions",
+ "scah",
+]
+
+[[package]]
 name = "scah-macros"
 version = "0.0.21"
 dependencies = [
