@@ -254,7 +254,23 @@ impl<'html> OpenElementStack<'html> {
 #[cfg(test)]
 mod tests {
     use super::{OpenElement, OpenElementStack};
+    use crate::Position;
     use crate::engine::MAX_ELEMENT_DEPTH;
+    use crate::engine::multiplexer::{RunnerId, SiblingCallback};
+    use crate::html::tag::TagFlags;
+    use crate::store::ElementId;
+    use crate::{QuerySectionId, TransitionId};
+
+    fn sample_callback(runner: usize) -> SiblingCallback {
+        SiblingCallback {
+            runner: RunnerId(runner),
+            output_parent: ElementId::default(),
+            continuation: Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+        }
+    }
 
     #[test]
     fn would_exceed_max_depth_at_boundary() {
@@ -269,6 +285,44 @@ mod tests {
     #[test]
     fn open_element_keeps_hot_stack_entries_compact() {
         assert!(std::mem::size_of::<OpenElement<'_>>() <= 32);
+    }
+
+    #[test]
+    fn sibling_callback_arena_nested_range_discipline() {
+        let mut stack = OpenElementStack::default();
+        let mut pending = Vec::new();
+        let mut arena = Vec::new();
+
+        stack
+            .push_classified("parent", TagFlags::classify("parent"), 0, arena.len())
+            .unwrap();
+        pending.push(sample_callback(1));
+        pending.push(sample_callback(2));
+        stack.attach_sibling_callbacks(&mut pending, &mut arena);
+        assert!(pending.is_empty());
+        assert_eq!(arena.len(), 2);
+        assert_eq!(
+            OpenElementStack::sibling_callback_start(&stack.entries[0]),
+            0
+        );
+
+        stack
+            .push_classified("child", TagFlags::classify("child"), 0, arena.len())
+            .unwrap();
+        pending.push(sample_callback(3));
+        stack.attach_sibling_callbacks(&mut pending, &mut arena);
+        assert_eq!(arena.len(), 3);
+        let child_start = OpenElementStack::sibling_callback_start(stack.entries.last().unwrap());
+        assert_eq!(child_start, 2);
+
+        arena.truncate(child_start);
+        assert_eq!(arena.len(), 2);
+        assert_eq!(arena[0].runner, RunnerId(1));
+        assert_eq!(arena[1].runner, RunnerId(2));
+
+        let parent_start = OpenElementStack::sibling_callback_start(&stack.entries[0]);
+        arena.truncate(parent_start);
+        assert!(arena.is_empty());
     }
 
     #[test]

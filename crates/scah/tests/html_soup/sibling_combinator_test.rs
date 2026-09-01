@@ -312,7 +312,92 @@ fn sibling_callback_not_activated_at_eof() {
 }
 
 #[test]
+fn adjacent_sibling_can_chain_into_adjacent_sibling() {
+    let store = parse_all(
+        r#"
+        <main>
+          <div></div>
+          <p></p>
+          <span id="hit"></span>
+        </main>
+        "#,
+        &["div + p + span"],
+    );
+    assert_eq!(ids(&store, "div + p + span"), [Some("hit")]);
+}
+
+#[test]
+fn adjacent_sibling_chain_consumes_each_next_element() {
+    let store = parse_all(
+        r#"
+        <main>
+          <div></div>
+          <p></p>
+          <section></section>
+          <span id="miss"></span>
+        </main>
+        "#,
+        &["div + p + span"],
+    );
+    assert!(elements(&store, "div + p + span").is_empty());
+}
+
+#[test]
+fn subsequent_sibling_matches_can_spawn_adjacent_sibling_callbacks() {
+    let store = parse_all(
+        r#"
+        <main>
+          <div></div>
+
+          <p></p>
+          <span id="a"></span>
+
+          <section></section>
+
+          <p></p>
+          <span id="b"></span>
+        </main>
+        "#,
+        &["div ~ p + span"],
+    );
+    assert_eq!(ids(&store, "div ~ p + span"), [Some("a"), Some("b")]);
+}
+
+#[test]
+fn chained_adjacent_sibling_through_void_element() {
+    let store = parse_all(
+        r#"
+        <main>
+          <div></div>
+          <br>
+          <p id="hit"></p>
+        </main>
+        "#,
+        &["div + br + p"],
+    );
+    assert_eq!(ids(&store, "div + br + p"), [Some("hit")]);
+}
+
+#[test]
+fn chained_sibling_callback_does_not_cross_parent_boundary() {
+    let store = parse_all(
+        r#"
+        <main>
+          <div></div>
+          <p></p>
+        </main>
+        <span id="outside-miss"></span>
+        "#,
+        &["div + p + span"],
+    );
+    assert!(elements(&store, "div + p + span").is_empty());
+}
+
+#[test]
 fn sibling_callbacks_keep_stable_runner_identity_after_earlier_runner_exits() {
+    // Registers callbacks on runners 1 and 2 before an earlier First runner
+    // retires. Compacting runner storage would shift indices and mis-activate
+    // or drop those deferred callbacks.
     let html = r#"
         <main>
           <section>
@@ -332,11 +417,13 @@ fn sibling_callbacks_keep_stable_runner_identity_after_earlier_runner_exits() {
     ];
 
     let store = parse(html, &queries).expect("parse succeeds");
+
     let p_ids: Vec<_> = store
         .get("section + p")
         .unwrap()
         .map(|element| element.id)
         .collect();
+
     let footer_ids: Vec<_> = store
         .get("aside + footer")
         .unwrap()
