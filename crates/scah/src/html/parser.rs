@@ -141,6 +141,10 @@ where
     }
 
     pub fn next(&mut self, reader: &mut Reader<'html>) -> bool {
+        if self.parse_error.is_some() {
+            return false;
+        }
+        self.indexer.prepare(reader.source());
         let features = self.selectors.features();
         match (features.has_sibling_queries, features.has_retiring_runners) {
             (false, false) => self.next_mode::<false, false>(reader),
@@ -151,6 +155,13 @@ where
     }
 
     pub(crate) fn run(&mut self, reader: &mut Reader<'html>) {
+        if self.parse_error.is_some() {
+            return;
+        }
+        // A full run keeps one Reader source, so the index policy only needs
+        // preparation once. `next` prepares per call because its caller owns
+        // the Reader and may step a different source between calls.
+        self.indexer.prepare(reader.source());
         let features = self.selectors.features();
         match (features.has_sibling_queries, features.has_retiring_runners) {
             (false, false) => while self.next_mode::<false, false>(reader) {},
@@ -199,10 +210,6 @@ where
         &mut self,
         reader: &mut Reader<'html>,
     ) -> bool {
-        if self.parse_error.is_some() {
-            return false;
-        }
-        self.indexer.prepare(reader.source());
         if let Some(close_tag) = self.raw_text_close {
             let source = reader.source();
             let Some(close_position) =

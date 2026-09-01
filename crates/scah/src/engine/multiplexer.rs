@@ -253,6 +253,9 @@ where
         self.features
     }
 
+    // Preserve the ordinary executor's inlining across this thin dispatch
+    // layer; otherwise x86-64 keeps the wrapper in the parser hot loop.
+    #[inline(always)]
     pub(crate) fn next_plain_into(
         &mut self,
         xhtml_element: &XHtmlElement<'html>,
