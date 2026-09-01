@@ -54,6 +54,16 @@ pub trait QuerySpec<'query> {
     fn queries(&self) -> &[QuerySection<'query>];
     fn exit_at_section_end(&self) -> Option<QuerySectionId>;
 
+    /// Whether any compiled transition uses `+` or `~`.
+    fn has_sibling_combinator(&self) -> bool {
+        self.states().iter().any(|transition| {
+            matches!(
+                transition.guard,
+                Combinator::NextSibling | Combinator::SubsequentSibling
+            )
+        })
+    }
+
     fn requires_text_content(&self) -> bool {
         self.queries()
             .iter()
@@ -372,7 +382,19 @@ mod tests {
     use crate::query::selector::ClassSelections;
     use crate::query::selector::Combinator;
     use crate::query::selector::ElementPredicate;
-    use crate::{Query, QuerySection, QuerySectionId, Save, SelectionKind, TransitionId};
+    use crate::{
+        Query, QuerySection, QuerySectionId, QuerySpec, Save, SelectionKind, TransitionId,
+    };
+
+    #[test]
+    fn sibling_feature_scan_tracks_public_guard_mutation() {
+        let mut query = Query::all("div p", Save::none()).unwrap().build();
+        assert!(!query.has_sibling_combinator());
+
+        query.states[1].guard = Combinator::NextSibling;
+
+        assert!(query.has_sibling_combinator());
+    }
 
     #[test]
     fn test_query_builder_one_selection() {

@@ -42,6 +42,8 @@ jobs:
         run: cargo bench -p scah-benches --bench speed_bench_cursor_dominance -- --test
       - name: Check element-tape benchmark
         run: cargo bench -p scah-benches --bench speed_bench_element_tape -- --test
+      - name: Check sibling benchmark
+        run: cargo bench -p scah-benches --bench speed_bench_sibling -- --test
       - name: Run cursor stats report
         run: cargo run -p scah-cursor-benches --release --bin cursor_stats_report
 

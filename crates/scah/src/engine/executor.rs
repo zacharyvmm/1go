@@ -11,6 +11,7 @@ use crate::store::Store;
 use crate::{
     Combinator, Position, QuerySectionId, QuerySpec, SelectionKind, TransitionId, XHtmlElement,
 };
+#[cfg(any(debug_assertions, test))]
 use smallvec::SmallVec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +136,11 @@ where
         self.query
     }
 
+    /// Drop cursor storage once this runner can no longer receive events.
+    pub(crate) fn release_cursor_storage(&mut self) {
+        self.cursors = Vec::new();
+    }
+
     /// Extend attribute interest for `name` and return whether this runner
     /// must receive the element step.
     ///
@@ -142,7 +148,7 @@ where
     /// is safe, while skipping attributes needed by a viable transition is
     /// not. Save points always need the complete element because attributes
     /// are part of the stored result even when the selector itself is tag-only.
-    pub(crate) fn extend_attribute_interest_for(
+    pub(crate) fn extend_attribute_interest_for<const SIBLINGS: bool>(
         &self,
         name: &str,
         name_hash: u64,
@@ -155,8 +161,10 @@ where
                 continue;
             }
 
-            consumes_adjacent_sibling |=
-                matches!(cursor.lifetime(), CursorLifetime::AdjacentSibling);
+            if SIBLINGS {
+                consumes_adjacent_sibling |=
+                    matches!(cursor.lifetime(), CursorLifetime::AdjacentSibling);
+            }
 
             let position = cursor.position;
             let metadata = self.query.get_transition(position.state).metadata();
@@ -526,8 +534,56 @@ where
         }
     }
 
+    /// Admit a cursor for a query set whose cached features contain no sibling
+    /// combinators. Keeping this dispatch physically separate prevents the
+    /// sibling-watcher admission scan from entering the ordinary spawn graph.
+    fn try_push_plain_cursor(
+        &mut self,
+        candidate: ScopedCursor,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner: RunnerId,
+        #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] store: &mut Store<
+            'html,
+            'query,
+        >,
+        create_reason: Option<ScopedCursorReason>,
+    ) -> SpawnOutcome {
+        if self.first_scope_is_claimed(&candidate) {
+            #[cfg(any(debug_assertions, test))]
+            {
+                if let Some(winner) = self.cursors.iter().rev().find(|cursor| {
+                    cursor.position.selection == candidate.position.selection
+                        && cursor.parent == candidate.parent
+                        && cursor.is_first_winner()
+                }) {
+                    Self::trace_cursor_suppressed(
+                        store,
+                        runner,
+                        &candidate,
+                        winner,
+                        CursorSuppressionReason::FirstScopeClaimed,
+                    );
+                }
+            }
+            return SpawnOutcome::Dominated;
+        }
+
+        match self.query.get_transition(candidate.position.state).guard {
+            Combinator::Descendant => {
+                self.try_push_descendant(candidate, runner, store, create_reason)
+            }
+            Combinator::Child => self.try_push_child(candidate, runner, store, create_reason),
+            Combinator::Namespace => {
+                self.finish_push_cursor(candidate, runner, store, create_reason)
+            }
+            Combinator::NextSibling | Combinator::SubsequentSibling => {
+                debug_assert!(false, "plain executor received a sibling transition");
+                SpawnOutcome::Dominated
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn dispatch_continuations(
+    fn dispatch_sibling_continuations(
         &mut self,
         runner: RunnerId,
         source_depth: super::DepthSize,
@@ -559,6 +615,18 @@ where
                     };
                 }
                 Combinator::NextSibling | Combinator::SubsequentSibling => {
+                    let equivalent_general_watcher = matches!(guard, Combinator::SubsequentSibling)
+                        && self.cursors.iter().any(|cursor| {
+                            cursor.is_active()
+                                && !cursor.is_adjacent_expiring()
+                                && cursor.parent == output_parent
+                                && cursor.position == *pos
+                                && cursor.scope_depth == source_depth.saturating_sub(1)
+                                && cursor.match_base_depth() == source_depth
+                        });
+                    if equivalent_general_watcher {
+                        continue;
+                    }
                     sibling_callbacks.push(SiblingCallback {
                         runner,
                         output_parent,
@@ -612,19 +680,17 @@ where
         self.try_push_cursor(candidate, runner, store, Some(reason))
     }
 
-    pub fn next(
+    #[inline(always)]
+    pub(crate) fn next_plain(
         &mut self,
         runner: RunnerId,
         element: &XHtmlElement<'html>,
         document_position: &DocumentPosition,
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
-        sibling_callbacks: &mut Vec<SiblingCallback>,
     ) {
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();
-        // Only allocate when an adjacent watcher actually expires.
-        let mut expired_indices: SmallVec<[usize; 2]> = SmallVec::new();
 
         #[cfg(any(debug_assertions, test))]
         let mut emitted_this_step: SmallVec<[(ElementId, QuerySectionId); 4]> = SmallVec::new();
@@ -633,9 +699,6 @@ where
             if self.cursors[i].end() {
                 continue;
             }
-
-            let expires_after = self.cursors[i].consume_sibling_at(depth)
-                == SiblingLifetimeResult::ExpiresAfterCurrentElement;
 
             let position = self.cursors[i].position;
             let matched = self.cursors[i].next(self.query, depth, element);
@@ -660,8 +723,251 @@ where
                         }
                     );
                 }
-                if expires_after {
-                    expired_indices.push(i);
+                continue;
+            }
+
+            crate::scah_trace!(
+                store,
+                TraceEvent::TransitionMatched {
+                    runner_index: runner.index(),
+                    cursor: self.trace_kind(i),
+                    selector: self.query.get_selection(position.selection).source,
+                    element: element.name,
+                    depth,
+                    selection: position.selection,
+                    state: position.state,
+                }
+            );
+
+            let is_descendant = self.query.is_descendant(position.state);
+            let is_save_point = self.query.is_save_point(&position);
+            let section_kind = self.query.get_section_selection_kind(position.selection);
+            let is_first = matches!(section_kind, SelectionKind::First);
+            let self_closing = document_position.self_closing;
+            let terminal_first = is_save_point && is_first;
+            let terminal_all = is_save_point
+                && matches!(section_kind, SelectionKind::All)
+                && position.next_child(self.query).is_none();
+
+            let spawned_positions;
+
+            match &self.cursors[i].mode {
+                super::cursor::CursorMode::Moving { .. } => {
+                    // `save_element` advances the parent for children; restore it
+                    // afterward so this cursor can still match later siblings.
+                    let output_parent = self.cursors[i].parent;
+                    let needs_anchor = self.query.needs_descendant_anchor(position);
+                    let anchor_candidate =
+                        needs_anchor.then(|| self.cursors[i].anchor_clone(depth));
+
+                    let (saved_parent, saved_element) = if is_save_point {
+                        #[cfg(any(debug_assertions, test))]
+                        {
+                            let save_parent = self.cursors[i].parent;
+                            debug_assert!(
+                                !emitted_this_step.iter().any(|(parent, section)| {
+                                    *parent == save_parent && *section == position.selection
+                                }),
+                                "duplicate cursor emission for one physical element: \
+                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                element.name,
+                                depth,
+                                save_parent,
+                                position.selection,
+                                position.state,
+                                i,
+                                self.cursors,
+                            );
+                            emitted_this_step.push((save_parent, position.selection));
+                        }
+                        let hit = Self::save_element(
+                            runner,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut self.cursors[i],
+                        );
+                        let sp = self.cursors[i].parent;
+                        self.cursors[i].parent = output_parent;
+                        let saved = hit.element_id;
+                        save_hits.push(hit);
+                        (sp, Some(saved))
+                    } else {
+                        (output_parent, None)
+                    };
+
+                    // Update lifecycle before admitting the anchor so the
+                    // matched source does not dominate it.
+                    if !terminal_all {
+                        if terminal_first {
+                            debug_assert!(
+                                saved_element.is_some(),
+                                "terminal First must have a saved element"
+                            );
+                            self.claim_first_scope(position.selection, output_parent, i, depth);
+                        } else if is_descendant || is_save_point {
+                            self.cursors[i].block_until_close(depth);
+                        }
+                    }
+
+                    if self_closing || terminal_all {
+                        continue;
+                    }
+
+                    if !terminal_first && let Some(anchor) = anchor_candidate {
+                        let _ = self.try_push_plain_cursor(
+                            anchor,
+                            runner,
+                            store,
+                            Some(ScopedCursorReason::DescendantFork),
+                        );
+                    }
+
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+                    for pos in &spawned_positions {
+                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
+                        let _ = self.try_push_plain_cursor(continuation, runner, store, None);
+                    }
+                }
+                super::cursor::CursorMode::Anchored { .. } => {
+                    // Anchors never advance to terminal First positions.
+                    debug_assert!(
+                        !(is_save_point && is_first),
+                        "terminal First must be represented by a moving cursor"
+                    );
+
+                    if self_closing {
+                        if is_save_point {
+                            let output_parent = self.cursors[i].parent;
+                            #[cfg(any(debug_assertions, test))]
+                            {
+                                debug_assert!(
+                                    !emitted_this_step.iter().any(|(parent, section)| {
+                                        *parent == output_parent && *section == position.selection
+                                    }),
+                                    "duplicate cursor emission for one physical element: \
+                                     element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                    element.name,
+                                    depth,
+                                    output_parent,
+                                    position.selection,
+                                    position.state,
+                                    i,
+                                    self.cursors,
+                                );
+                                emitted_this_step.push((output_parent, position.selection));
+                            }
+                            let mut base = ScopedCursor::new_moving(
+                                depth,
+                                output_parent,
+                                self.cursors[i].position,
+                            );
+                            let hit = Self::save_element(
+                                runner,
+                                self.query,
+                                store,
+                                element.clone(),
+                                &mut base,
+                            );
+                            save_hits.push(hit);
+                        }
+                        continue;
+                    }
+
+                    spawned_positions = self.cursors[i].next_positions(self.query);
+
+                    let saved_parent = if is_save_point {
+                        let save_parent = self.cursors[i].parent;
+                        #[cfg(any(debug_assertions, test))]
+                        {
+                            debug_assert!(
+                                !emitted_this_step.iter().any(|(parent, section)| {
+                                    *parent == save_parent && *section == position.selection
+                                }),
+                                "duplicate cursor emission for one physical element: \
+                                 element={:?} depth={} parent={:?} section={:?} state={:?} cursor={} cursors={:?}",
+                                element.name,
+                                depth,
+                                save_parent,
+                                position.selection,
+                                position.state,
+                                i,
+                                self.cursors,
+                            );
+                            emitted_this_step.push((save_parent, position.selection));
+                        }
+                        let mut base =
+                            ScopedCursor::new_moving(depth, save_parent, self.cursors[i].position);
+                        let hit = Self::save_element(
+                            runner,
+                            self.query,
+                            store,
+                            element.clone(),
+                            &mut base,
+                        );
+                        save_hits.push(hit);
+                        base.parent
+                    } else {
+                        self.cursors[i].parent
+                    };
+
+                    for pos in &spawned_positions {
+                        let continuation = ScopedCursor::new_moving(depth, saved_parent, *pos);
+                        let _ = self.try_push_plain_cursor(continuation, runner, store, None);
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_with_siblings(
+        &mut self,
+        runner: RunnerId,
+        element: &XHtmlElement<'html>,
+        document_position: &DocumentPosition,
+        store: &mut Store<'html, 'query>,
+        save_hits: &mut Vec<SaveHit>,
+        sibling_callbacks: &mut Vec<SiblingCallback>,
+    ) {
+        let depth = document_position.element_depth;
+        let snapshot_len = self.cursors.len();
+        let mut has_expired_adjacent = false;
+
+        #[cfg(any(debug_assertions, test))]
+        let mut emitted_this_step: SmallVec<[(ElementId, QuerySectionId); 4]> = SmallVec::new();
+
+        for i in 0..snapshot_len {
+            if self.cursors[i].end() {
+                continue;
+            }
+
+            let expires_after = self.cursors[i].consume_sibling_at(depth)
+                == SiblingLifetimeResult::ExpiresAfterCurrentElement;
+            has_expired_adjacent |= expires_after;
+
+            let position = self.cursors[i].position;
+            let matched = self.cursors[i].next(self.query, depth, element);
+
+            if !matched {
+                #[cfg(any(debug_assertions, test))]
+                {
+                    let last_depth = self.cursors[i].match_base_depth();
+                    crate::scah_trace!(
+                        store,
+                        TraceEvent::TransitionRejected {
+                            runner_index: runner.index(),
+                            cursor: self.trace_kind(i),
+                            selector: self.query.get_selection(position.selection).source,
+                            element: element.name,
+                            depth,
+                            selection: position.selection,
+                            state: position.state,
+                            reason: Self::transition_reject_reason(
+                                self.query, &position, depth, last_depth, element,
+                            ),
+                        }
+                    );
                 }
                 continue;
             }
@@ -760,9 +1066,6 @@ where
                     // Child/descendant continuations are skipped for void sources;
                     // sibling callbacks are still registered via dispatch.
                     if terminal_all && !self_closing {
-                        if expires_after {
-                            expired_indices.push(i);
-                        }
                         continue;
                     }
 
@@ -781,7 +1084,7 @@ where
 
                     if !terminal_all {
                         spawned_positions = self.cursors[i].next_positions(self.query);
-                        self.dispatch_continuations(
+                        self.dispatch_sibling_continuations(
                             runner,
                             depth,
                             self_closing,
@@ -793,7 +1096,7 @@ where
                     } else if self_closing {
                         // terminal_all on a void element: still allow sibling callbacks.
                         spawned_positions = self.cursors[i].next_positions(self.query);
-                        self.dispatch_continuations(
+                        self.dispatch_sibling_continuations(
                             runner,
                             depth,
                             true,
@@ -848,7 +1151,7 @@ where
                         }
                         // Void sources may still register sibling callbacks.
                         spawned_positions = self.cursors[i].next_positions(self.query);
-                        self.dispatch_continuations(
+                        self.dispatch_sibling_continuations(
                             runner,
                             depth,
                             true,
@@ -857,9 +1160,6 @@ where
                             sibling_callbacks,
                             store,
                         );
-                        if expires_after {
-                            expired_indices.push(i);
-                        }
                         continue;
                     }
 
@@ -900,7 +1200,7 @@ where
                         self.cursors[i].parent
                     };
 
-                    self.dispatch_continuations(
+                    self.dispatch_sibling_continuations(
                         runner,
                         depth,
                         false,
@@ -911,27 +1211,40 @@ where
                     );
                 }
             }
-
-            if expires_after {
-                expired_indices.push(i);
-            }
         }
 
         // Remove consumed adjacent watchers after the snapshot loop so indices
         // visited above stay stable.
-        if !expired_indices.is_empty() {
-            expired_indices.sort_unstable();
-            expired_indices.dedup();
-            for index in expired_indices.into_iter().rev() {
-                if index < self.cursors.len() {
-                    // First winners keep ownership until their unwind/scope closes.
-                    if self.cursors[index].is_first_winner() {
-                        continue;
-                    }
+        if has_expired_adjacent {
+            for index in (0..snapshot_len).rev() {
+                // First winners keep ownership until their unwind/scope closes.
+                if self.cursors[index].is_adjacent_expiring()
+                    && !self.cursors[index].is_first_winner()
+                {
                     self.cursors.swap_remove(index);
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn next(
+        &mut self,
+        runner: RunnerId,
+        element: &XHtmlElement<'html>,
+        document_position: &DocumentPosition,
+        store: &mut Store<'html, 'query>,
+        save_hits: &mut Vec<SaveHit>,
+        sibling_callbacks: &mut Vec<SiblingCallback>,
+    ) {
+        self.next_with_siblings(
+            runner,
+            element,
+            document_position,
+            store,
+            save_hits,
+            sibling_callbacks,
+        );
     }
 
     pub fn early_exit(&self) -> bool {
@@ -949,6 +1262,7 @@ where
         closed_winner && self.cursors.iter().all(|cursor| cursor.is_complete())
     }
 
+    #[inline(always)]
     pub fn back(
         &mut self,
         #[cfg_attr(not(any(debug_assertions, test)), allow(unused_variables))] runner: RunnerId,
@@ -4312,5 +4626,71 @@ mod tests {
         assert!(winner.is_moving());
         assert!(winner.is_complete());
         assert_eq!(winner.unwind_depth(), Some(1));
+    }
+
+    #[test]
+    fn adjacent_cleanup_removes_multiple_watchers_but_preserves_interleaved_plain_cursor() {
+        let query = Query::all("div + p + span", Save::none()).unwrap().build();
+        let sibling_states: Vec<_> = query
+            .states()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, transition)| {
+                matches!(transition.guard, Combinator::NextSibling).then_some(TransitionId(index))
+            })
+            .collect();
+        assert_eq!(sibling_states.len(), 2);
+
+        let mut selection = QueryExecutor::new(&query);
+        let mut store = Store::default();
+        for (state, parent) in sibling_states
+            .into_iter()
+            .zip([ElementId(10), ElementId(20)])
+        {
+            let callback = SiblingCallback {
+                runner: RunnerId(0),
+                output_parent: parent,
+                continuation: Position {
+                    selection: QuerySectionId(0),
+                    state,
+                },
+            };
+            let _ = selection.activate_sibling(RunnerId(0), callback, 1, &mut store);
+            if parent == ElementId(10) {
+                selection.cursors.push(ScopedCursor::new_moving(
+                    1,
+                    ElementId(99),
+                    Position {
+                        selection: QuerySectionId(0),
+                        state: TransitionId(0),
+                    },
+                ));
+            }
+        }
+        assert_eq!(selection.cursors.len(), 4);
+
+        selection.next_with_siblings(
+            RunnerId(0),
+            &elem("aside"),
+            &doc_pos(1),
+            &mut store,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+
+        assert_eq!(selection.cursors.len(), 2);
+        assert!(
+            selection
+                .cursors
+                .iter()
+                .any(|cursor| cursor.parent == ElementId(99)),
+            "cold adjacent cleanup must preserve an interleaved ordinary cursor"
+        );
+        assert!(
+            selection
+                .cursors
+                .iter()
+                .all(|cursor| !cursor.is_adjacent_expiring())
+        );
     }
 }
