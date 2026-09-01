@@ -295,12 +295,6 @@ impl<'query> QuerySpec<'query> for Query<'query> {
     fn exit_at_section_end(&self) -> Option<QuerySectionId> {
         self.exit_at_section_end
     }
-
-    fn has_sibling_combinator(&self) -> bool {
-        self.states
-            .first()
-            .is_some_and(Transition::query_has_sibling)
-    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -314,24 +308,10 @@ impl<'query, const N_STATES: usize, const N_SECTIONS: usize>
     StaticQuery<'query, N_STATES, N_SECTIONS>
 {
     pub const fn new(
-        mut states: [Transition<'query>; N_STATES],
+        states: [Transition<'query>; N_STATES],
         queries: [QuerySection<'query>; N_SECTIONS],
         exit_at_section_end: Option<QuerySectionId>,
     ) -> Self {
-        let mut index = 0;
-        let mut has_sibling = false;
-        while index < N_STATES {
-            if matches!(
-                states[index].guard,
-                Combinator::NextSibling | Combinator::SubsequentSibling
-            ) {
-                has_sibling = true;
-            }
-            index += 1;
-        }
-        if N_STATES > 0 {
-            states[0].set_query_has_sibling(has_sibling);
-        }
         Self {
             states,
             queries,
@@ -353,12 +333,6 @@ impl<'query, const N_STATES: usize, const N_SECTIONS: usize> QuerySpec<'query>
 
     fn exit_at_section_end(&self) -> Option<QuerySectionId> {
         self.exit_at_section_end
-    }
-
-    fn has_sibling_combinator(&self) -> bool {
-        self.states
-            .first()
-            .is_some_and(Transition::query_has_sibling)
     }
 }
 
@@ -408,7 +382,19 @@ mod tests {
     use crate::query::selector::ClassSelections;
     use crate::query::selector::Combinator;
     use crate::query::selector::ElementPredicate;
-    use crate::{Query, QuerySection, QuerySectionId, Save, SelectionKind, TransitionId};
+    use crate::{
+        Query, QuerySection, QuerySectionId, QuerySpec, Save, SelectionKind, TransitionId,
+    };
+
+    #[test]
+    fn sibling_feature_scan_tracks_public_guard_mutation() {
+        let mut query = Query::all("div p", Save::none()).unwrap().build();
+        assert!(!query.has_sibling_combinator());
+
+        query.states[1].guard = Combinator::NextSibling;
+
+        assert!(query.has_sibling_combinator());
+    }
 
     #[test]
     fn test_query_builder_one_selection() {

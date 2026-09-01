@@ -356,9 +356,8 @@ impl<'query> QueryBuilder<'query> {
     /// This computes early-exit optimisation metadata and converts the
     /// internal vectors into boxed slices. After calling `build`, pass
     /// the resulting `Query` to [`parse`](crate::parse).
-    pub fn build(mut self) -> Query<'query> {
+    pub fn build(self) -> Query<'query> {
         let exit_at_section_end = self.exit_at_section();
-        Transition::cache_query_features(&mut self.states);
         let states_box = self.states.into_boxed_slice();
         let query_box = self.selection.into_boxed_slice();
         Query {
