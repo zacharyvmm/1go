@@ -1,5 +1,5 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use scah::{Query, Save, parse};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use scah::{Query, QueryMultiplexer, Reader, Save, XHtmlParser, parse};
 use std::hint::black_box;
 
 fn generate_flat_nonmatching_html(count: usize) -> String {
@@ -84,6 +84,26 @@ fn generate_large_source_subtree(depth: usize) -> String {
     html
 }
 
+/// Deep nesting under a child obligation that can only match at one depth.
+///
+/// Shape: `main > article > section^{depth} > ...` with query
+/// `main > article > p.never-matches`. The `p` child cursor is eligible only at
+/// the article's direct-child depth and should skip all deeper subtree events.
+fn generate_child_obligation_deep_html(depth: usize) -> String {
+    let mut html = String::with_capacity(depth * 20 + 48);
+    html.push_str("<main><article>");
+    html.push_str(&"<section>".repeat(depth));
+    html.push_str(&"</section>".repeat(depth));
+    html.push_str("</article></main>");
+    html
+}
+
+fn build_child_obligation_query() -> Query<'static> {
+    Query::all("main > article > p.never-matches", Save::none())
+        .expect("child obligation selector")
+        .build()
+}
+
 fn generate_simultaneous_retirement_html() -> &'static str {
     "<main><h1 class=\"early\"></h1></main>"
 }
@@ -99,7 +119,7 @@ fn build_first_queries(first_count: usize) -> Vec<Query<'static>> {
 }
 
 /// One early element retires every `First` runner; the large unmatched div tail
-/// then exercises tombstone slot scans without O(n²) distinct-selector matching.
+/// then exercises sparse active-set dispatch without O(n²) distinct-selector matching.
 fn generate_retired_runner_html(tail_divs: usize) -> String {
     let mut html = String::with_capacity(tail_divs * 11 + 48);
     html.push_str("<main><h1 class=\"early\"></h1>");
@@ -112,8 +132,8 @@ fn generate_retired_runner_html(tail_divs: usize) -> String {
 
 fn build_retired_runner_queries(first_count: usize) -> (Vec<Query<'static>>, &'static str) {
     // Identical First selectors intentionally: each runner still occupies a
-    // stable slot, matches once on the shared early element, then becomes a
-    // tombstone for the remainder of the parse.
+    // stable slot, matches once on the shared early element, then retires for
+    // the remainder of the parse.
     let mut queries: Vec<Query<'static>> = (0..first_count)
         .map(|_| {
             Query::first(".early", Save::none())
@@ -288,22 +308,88 @@ fn bench_cursor_obligations(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_simultaneous_first_retirement(c: &mut Criterion) {
-    let mut group = c.benchmark_group("simultaneous_first_retirement");
+fn bench_child_obligation_hot_path(c: &mut Criterion) {
+    let mut group = c.benchmark_group("child_obligation_hot_path");
+    group.sample_size(10);
+    let query = build_child_obligation_query();
+
+    for depth in [64usize, 256, 1_024, 4_096] {
+        let html = generate_child_obligation_deep_html(depth);
+        group.throughput(Throughput::Bytes(html.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("deep_wrong_depth", depth),
+            &html,
+            |b, html| {
+                b.iter(|| {
+                    let store =
+                        parse(black_box(html), black_box(std::slice::from_ref(&query))).unwrap();
+                    black_box(store);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Full public `parse()` cost for many identical `First` runners.
+///
+/// Includes query executor construction, multiplexer/parser setup, tokenization,
+/// matching, retirement, and draining. Useful for user-visible total cost; not an
+/// isolated retirement microbenchmark.
+fn bench_many_first_queries_end_to_end(c: &mut Criterion) {
+    let mut group = c.benchmark_group("many_first_queries_end_to_end");
     group.sample_size(10);
     let html = generate_simultaneous_retirement_html();
     group.throughput(Throughput::Bytes(html.len() as u64));
 
     for first_count in [64usize, 256, 1_024] {
-        let queries = build_first_queries(first_count);
+        let queries = Box::leak(build_first_queries(first_count).into_boxed_slice());
         group.bench_with_input(
             BenchmarkId::from_parameter(first_count),
             &first_count,
             |b, _| {
                 b.iter(|| {
-                    let store = parse(black_box(html), black_box(&queries)).unwrap();
+                    let store = parse(black_box(html), black_box(queries as &[Query])).unwrap();
                     black_box(store);
                 })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Times only the close event that retires every prepared `First` runner.
+///
+/// Setup advances through `<main>` and `<h1 class="early">`; the measured
+/// iteration closes `h1` and performs the dense-to-sparse active-set transition.
+fn bench_isolated_first_retirement_close(c: &mut Criterion) {
+    let mut group = c.benchmark_group("isolated_first_retirement_close");
+    group.sample_size(20);
+    const HTML: &str = "<main><h1 class=\"early\"></h1></main>";
+
+    for first_count in [64usize, 256, 1_024] {
+        let queries = Box::leak(build_first_queries(first_count).into_boxed_slice());
+        group.bench_with_input(
+            BenchmarkId::from_parameter(first_count),
+            &first_count,
+            |b, _| {
+                b.iter_batched(
+                    || {
+                        let mut parser =
+                            XHtmlParser::new(QueryMultiplexer::new(queries as &[Query]));
+                        let mut reader = Reader::new(HTML);
+                        assert!(parser.next(&mut reader), "open <main>");
+                        assert!(parser.next(&mut reader), "open <h1>");
+                        (parser, reader)
+                    },
+                    |(mut parser, mut reader)| {
+                        black_box(parser.next(&mut reader)); // </h1> retires all First runners
+                        black_box(parser);
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
     }
@@ -402,8 +488,10 @@ criterion_group!(
     bench_sibling_selectors,
     bench_ordinary_hot_path,
     bench_cursor_obligations,
+    bench_child_obligation_hot_path,
     bench_many_retired_runners,
-    bench_simultaneous_first_retirement,
+    bench_many_first_queries_end_to_end,
+    bench_isolated_first_retirement_close,
     bench_redundant_general_sibling_sources,
     bench_large_source_subtree,
 );
