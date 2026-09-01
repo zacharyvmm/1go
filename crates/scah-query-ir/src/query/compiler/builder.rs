@@ -149,7 +149,15 @@ pub struct QueryBuilder<'query> {
 }
 
 impl<'query> QueryBuilder<'query> {
-    pub fn all(mut self, query: &'query str, save: Save) -> Result<Self, SelectorParseError> {
+    /// Append a child selector that matches **all** occurrences (mutable).
+    ///
+    /// The new selector is scoped to elements that already matched
+    /// the previous selector in the chain.
+    pub fn all_mut(
+        &mut self,
+        query: &'query str,
+        save: Save,
+    ) -> Result<&mut Self, SelectorParseError> {
         assert!(!self.selection.is_empty());
 
         let current_state_len = self.states.len();
@@ -174,8 +182,19 @@ impl<'query> QueryBuilder<'query> {
     ///
     /// The new selector is scoped to elements that already matched
     /// the previous selector in the chain.
+    pub fn all(mut self, query: &'query str, save: Save) -> Result<Self, SelectorParseError> {
+        self.all_mut(query, save)?;
+        Ok(self)
+    }
+
+    /// Append a child selector that matches only the **first** occurrence (mutable).
     ///
-    pub fn first(mut self, query: &'query str, save: Save) -> Result<Self, SelectorParseError> {
+    /// Enables early-exit optimisation for this branch of the query tree.
+    pub fn first_mut(
+        &mut self,
+        query: &'query str,
+        save: Save,
+    ) -> Result<&mut Self, SelectorParseError> {
         assert!(!self.selection.is_empty());
 
         let current_state_len = self.states.len();
@@ -199,7 +218,12 @@ impl<'query> QueryBuilder<'query> {
     /// Append a child selector that matches only the **first** occurrence.
     ///
     /// Enables early-exit optimisation for this branch of the query tree.
-    ///
+    pub fn first(mut self, query: &'query str, save: Save) -> Result<Self, SelectorParseError> {
+        self.first_mut(query, save)?;
+        Ok(self)
+    }
+
+    /// Append another builder's sections as children of `parent`.
     pub fn append(&mut self, parent: QuerySectionId, mut other: Self) {
         let state_length = self.states.len();
         let selection_length = self.selection.len();

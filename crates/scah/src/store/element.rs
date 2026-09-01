@@ -70,11 +70,24 @@ impl<'html> Element<'html> {
         dom: &'html Store,
         key: &str,
     ) -> Option<impl Iterator<Item = &'html Element<'html>>> {
-        let first_query_id = self.first_child_query;
-        first_query_id
-            .and_then(|id| dom.queries.iter_from(id).find(|q| q.query == key))
-            .map(|query_node| query_node.elements.start())
-            .map(|element_id| dom.elements.iter_from(element_id))
+        self.result_meta(dom, key)
+            .map(|(first, _)| dom.elements.iter_from(first))
+    }
+
+    /// Resolve nested match metadata for `key` without walking the result list.
+    pub fn result_meta(&self, dom: &Store, key: &str) -> Option<(id::ElementId, usize)> {
+        self.result_ids(dom, key).map(|ids| (ids[0], ids.len()))
+    }
+
+    /// Borrow contiguous nested match ids for `key`.
+    pub fn result_ids<'a>(&self, dom: &'a Store, key: &str) -> Option<&'a [id::ElementId]> {
+        self.first_child_query.and_then(|id| {
+            dom.queries
+                .iter_from(id)
+                .find(|q| q.query == key)
+                .map(|query_node| query_node.match_ids.as_slice())
+                .filter(|ids| !ids.is_empty())
+        })
     }
 
     /// Return all attributes of this element as a slice.
