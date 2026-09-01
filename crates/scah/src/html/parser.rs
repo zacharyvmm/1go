@@ -144,9 +144,9 @@ where
         let features = self.selectors.features();
         match (features.has_sibling_queries, features.has_retiring_runners) {
             (false, false) => self.next_mode::<false, false>(reader),
-            (false, true) => self.next_mode::<false, true>(reader),
-            (true, false) => self.next_mode::<true, false>(reader),
-            (true, true) => self.next_mode::<true, true>(reader),
+            (false, true) => self.next_retiring(reader),
+            (true, false) => self.next_with_siblings(reader),
+            (true, true) => self.next_with_siblings_retiring(reader),
         }
     }
 
@@ -154,10 +154,44 @@ where
         let features = self.selectors.features();
         match (features.has_sibling_queries, features.has_retiring_runners) {
             (false, false) => while self.next_mode::<false, false>(reader) {},
-            (false, true) => while self.next_mode::<false, true>(reader) {},
-            (true, false) => while self.next_mode::<true, false>(reader) {},
-            (true, true) => while self.next_mode::<true, true>(reader) {},
+            (false, true) => self.run_retiring(reader),
+            (true, false) => self.run_with_siblings(reader),
+            (true, true) => self.run_with_siblings_retiring(reader),
         }
+    }
+
+    #[inline(never)]
+    fn next_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
+        self.next_mode::<false, true>(reader)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn next_with_siblings(&mut self, reader: &mut Reader<'html>) -> bool {
+        self.next_mode::<true, false>(reader)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn next_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
+        self.next_mode::<true, true>(reader)
+    }
+
+    #[inline(never)]
+    fn run_retiring(&mut self, reader: &mut Reader<'html>) {
+        while self.next_mode::<false, true>(reader) {}
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn run_with_siblings(&mut self, reader: &mut Reader<'html>) {
+        while self.next_mode::<true, false>(reader) {}
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn run_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) {
+        while self.next_mode::<true, true>(reader) {}
     }
 
     #[inline(always)]
@@ -797,7 +831,7 @@ mod tests {
         let mut forced_sibling = XHtmlParser::new(QueryMultiplexer::new(&queries));
         forced_sibling.temp_state.sibling = Some(Box::default());
         let mut sibling_reader = Reader::new(html);
-        while forced_sibling.next_mode::<true>(&mut sibling_reader) {}
+        while forced_sibling.next_mode::<true, false>(&mut sibling_reader) {}
 
         assert_eq!(forced_sibling.finish(), plain.finish());
     }

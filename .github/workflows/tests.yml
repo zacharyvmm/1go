@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -44,6 +46,11 @@ jobs:
         run: cargo bench -p scah-benches --bench speed_bench_element_tape -- --test
       - name: Check sibling benchmark
         run: cargo bench -p scah-benches --bench speed_bench_sibling -- --test
+      - name: Check ordinary parser gate benchmark
+        run: cargo bench -p scah-benches --bench speed_bench_ordinary_gate -- --test
+      - name: Enforce ordinary parser performance gate
+        if: github.event_name == 'pull_request'
+        run: ./scripts/check-sibling-performance.sh "origin/${{ github.base_ref }}"
       - name: Run cursor stats report
         run: cargo run -p scah-cursor-benches --release --bin cursor_stats_report
 
