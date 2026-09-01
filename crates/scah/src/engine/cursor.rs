@@ -13,6 +13,33 @@ const FLAG_BLOCKED: u8 = 1 << 0;
 const FLAG_COMPLETE: u8 = 1 << 1;
 const FLAG_HAS_UNWIND: u8 = 1 << 2;
 const FLAG_FIRST_WINNER: u8 = 1 << 3;
+/// Adjacent-sibling (`+`) watcher: expire after the next same-depth element.
+///
+/// Packed into moving-cursor flags so ordinary `Scope` cursors stay 32 bytes.
+/// The adjacent-sibling watcher consumes the first future element opened at its
+/// sibling depth. A future `:nth-*` implementation may generalize this
+/// representation after its state and performance requirements are known.
+const FLAG_ADJACENT_REMAINING: u8 = 1 << 4;
+
+/// Bounds how long a cursor remains eligible to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CursorLifetime {
+    /// Lives until normal scope pruning or explicit lifecycle completion.
+    Scope,
+
+    /// Adjacent-sibling (`+`) watcher: consumes the first future element opened
+    /// at `match_base_depth`, then expires.
+    AdjacentSibling,
+}
+
+/// Result of attempting to consume an adjacent-sibling lifetime tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SiblingLifetimeResult {
+    NotApplicable,
+    /// The current same-depth element is the final candidate; process it, then
+    /// remove the watcher.
+    ExpiresAfterCurrentElement,
+}
 
 #[inline]
 const fn flags_is_active(flags: u8) -> bool {
@@ -118,6 +145,45 @@ impl ScopedCursor {
                 match_base_depth,
                 unwind_depth: 0,
                 flags: CursorActivity::Active.to_flags(),
+            },
+        }
+    }
+
+    /// Create a cursor that watches later element siblings under a shared parent.
+    ///
+    /// For a left-hand match at depth `D`:
+    /// - `parent_scope_depth` is `D - 1` (the common parent)
+    /// - `sibling_depth` is `D` (later siblings open at this depth)
+    ///
+    /// Lifetime is packed into moving-cursor flags: `Scope` for `~`, and
+    /// `AdjacentSibling` for `+`.
+    pub(crate) fn new_sibling(
+        parent_scope_depth: super::DepthSize,
+        sibling_depth: super::DepthSize,
+        parent: ElementId,
+        position: Position,
+        lifetime: CursorLifetime,
+    ) -> Self {
+        debug_assert!(
+            sibling_depth == parent_scope_depth.saturating_add(1)
+                || parent_scope_depth == SENTINEL_SCOPE,
+            "sibling cursor match_base_depth must be scope_depth + 1"
+        );
+        let mut flags = CursorActivity::Active.to_flags();
+        match lifetime {
+            CursorLifetime::Scope => {}
+            CursorLifetime::AdjacentSibling => {
+                flags |= FLAG_ADJACENT_REMAINING;
+            }
+        }
+        Self {
+            scope_depth: parent_scope_depth,
+            parent,
+            position,
+            mode: CursorMode::Moving {
+                match_base_depth: sibling_depth,
+                unwind_depth: 0,
+                flags,
             },
         }
     }
@@ -304,6 +370,41 @@ impl ScopedCursor {
                 flags: CursorActivity::Active.to_flags(),
             },
         }
+    }
+
+    /// Logical lifetime for sibling-stream watchers.
+    ///
+    /// Adjacent (`+`) state is packed into moving-cursor flags so ordinary
+    /// selectors keep a 32-byte [`ScopedCursor`].
+    #[inline]
+    pub(crate) fn lifetime(&self) -> CursorLifetime {
+        match &self.mode {
+            CursorMode::Moving { flags, .. } if *flags & FLAG_ADJACENT_REMAINING != 0 => {
+                CursorLifetime::AdjacentSibling
+            }
+            _ => CursorLifetime::Scope,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn consume_sibling_at(&mut self, depth: super::DepthSize) -> SiblingLifetimeResult {
+        let CursorMode::Moving {
+            flags,
+            match_base_depth,
+            ..
+        } = &mut self.mode
+        else {
+            return SiblingLifetimeResult::NotApplicable;
+        };
+        // Ordinary Scope cursors hit this bit-clear check only.
+        if *flags & FLAG_ADJACENT_REMAINING == 0 {
+            return SiblingLifetimeResult::NotApplicable;
+        }
+        if *match_base_depth != depth || !flags_is_active(*flags) {
+            return SiblingLifetimeResult::NotApplicable;
+        }
+        *flags &= !FLAG_ADJACENT_REMAINING;
+        SiblingLifetimeResult::ExpiresAfterCurrentElement
     }
 
     /// Pause matching until the element at `depth` closes.
@@ -914,6 +1015,32 @@ mod tests {
         assert!(cursor.end());
         assert_eq!(cursor.unwind_depth(), None);
         assert_eq!(cursor.match_base_depth(), 2);
+    }
+
+    #[test]
+    fn adjacent_sibling_lifetime_packs_and_expires_once() {
+        use super::{CursorLifetime, SiblingLifetimeResult};
+
+        let mut cursor = ScopedCursor::new_sibling(
+            1,
+            2,
+            NULL_PARENT,
+            Position {
+                selection: QuerySectionId(0),
+                state: TransitionId(0),
+            },
+            CursorLifetime::AdjacentSibling,
+        );
+        assert_eq!(cursor.lifetime(), CursorLifetime::AdjacentSibling);
+        assert_eq!(
+            cursor.consume_sibling_at(2),
+            SiblingLifetimeResult::ExpiresAfterCurrentElement
+        );
+        assert_eq!(cursor.lifetime(), CursorLifetime::Scope);
+        assert_eq!(
+            cursor.consume_sibling_at(2),
+            SiblingLifetimeResult::NotApplicable
+        );
     }
 
     #[test]

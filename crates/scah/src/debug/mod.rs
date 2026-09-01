@@ -164,6 +164,8 @@ pub enum ScopedCursorReason {
     DescendantFork,
     BranchSibling,
     ChildSelection,
+    AdjacentSiblingActivated,
+    SubsequentSiblingActivated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

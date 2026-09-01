@@ -235,8 +235,10 @@ impl<'query> Transition<'query> {
     ) -> Result<Vec<Self>, SelectorParseError> {
         let reader = &mut Reader::new(query);
         let mut states = Vec::new();
-        while let Some((combinator, element)) = Lexer::try_next(reader)? {
+        let mut seen_selector = false;
+        while let Some((combinator, element)) = Lexer::try_next(reader, seen_selector)? {
             states.push(Self::new(combinator, element));
+            seen_selector = true;
         }
 
         if states.is_empty() {
@@ -523,5 +525,53 @@ mod tests {
             4,
             1,
         ));
+    }
+
+    #[test]
+    fn test_fsm_next_sibling_same_depth() {
+        let adjacent = Transition::new(
+            Combinator::NextSibling,
+            ElementPredicate {
+                name: Some("p"),
+                id: None,
+                classes: ClassSelections::from_static(&[]),
+                attributes: AttributeSelections::from_static(&[]),
+            },
+        );
+        let subsequent = Transition::new(
+            Combinator::SubsequentSibling,
+            ElementPredicate {
+                name: Some("p"),
+                id: None,
+                classes: ClassSelections::from_static(&[]),
+                attributes: AttributeSelections::from_static(&[]),
+            },
+        );
+        let element = FakeElement {
+            name: "p",
+            id: None,
+            class: None,
+            attributes: &[],
+        };
+
+        assert!(adjacent.next(&element, 3, 3));
+        assert!(subsequent.next(&element, 3, 3));
+        assert!(!adjacent.next(&element, 4, 3));
+        assert!(!subsequent.next(&element, 4, 3));
+    }
+
+    #[test]
+    fn sibling_selectors_compile_to_expected_guards() {
+        let states = Transition::generate_transitions_from_string("main > div ~ p > span").unwrap();
+        let guards: Vec<_> = states.iter().map(|s| s.guard.clone()).collect();
+        assert_eq!(
+            guards,
+            [
+                Combinator::Descendant,
+                Combinator::Child,
+                Combinator::SubsequentSibling,
+                Combinator::Child,
+            ]
+        );
     }
 }

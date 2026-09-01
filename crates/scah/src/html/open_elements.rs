@@ -1,4 +1,5 @@
 use crate::ParseError;
+use crate::engine::multiplexer::SiblingCallback;
 use crate::engine::{DepthSize, MAX_ELEMENT_DEPTH};
 use crate::html::tag::{ScopeKind, TagFlags};
 use crate::store::ElementId;
@@ -13,7 +14,8 @@ pub(crate) struct SavedElement {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OpenElement<'html> {
     pub name: &'html str,
-    saved_start: usize,
+    saved_start: u32,
+    sibling_callback_start: u32,
     tag: TagFlags,
     saved_count: u32,
 }
@@ -47,13 +49,19 @@ impl<'html> OpenElementStack<'html> {
         name: &'html str,
         tag: TagFlags,
         saved_start: usize,
+        sibling_callback_start: usize,
     ) -> Result<(), ParseError> {
         if Self::would_exceed_max_depth(self.entries.len()) {
             return Err(ParseError::MaximumDepthExceeded);
         }
         self.entries.push(OpenElement {
             name,
-            saved_start,
+            saved_start: saved_start
+                .try_into()
+                .expect("too many saved query hits for the open-element stack"),
+            sibling_callback_start: sibling_callback_start
+                .try_into()
+                .expect("too many sibling callbacks for the open-element stack"),
             tag,
             saved_count: 0,
         });
@@ -62,7 +70,7 @@ impl<'html> OpenElementStack<'html> {
 
     #[cfg(test)]
     pub fn push(&mut self, name: &'html str) -> Result<(), ParseError> {
-        self.push_classified(name, TagFlags::classify(name), 0)
+        self.push_classified(name, TagFlags::classify(name), 0, 0)
     }
 
     pub fn attach_saved(&mut self, saved_index: usize) {
@@ -71,7 +79,7 @@ impl<'html> OpenElementStack<'html> {
             .last_mut()
             .expect("saved query hit requires an open element");
         debug_assert_eq!(
-            open_element.saved_start + open_element.saved_count as usize,
+            open_element.saved_start as usize + open_element.saved_count as usize,
             saved_index
         );
         open_element.saved_count = open_element
@@ -81,7 +89,31 @@ impl<'html> OpenElementStack<'html> {
     }
 
     pub fn saved_range(open_element: &OpenElement<'html>) -> std::ops::Range<usize> {
-        open_element.saved_start..open_element.saved_start + open_element.saved_count as usize
+        let start = open_element.saved_start as usize;
+        start..start + open_element.saved_count as usize
+    }
+
+    pub(crate) fn attach_sibling_callbacks(
+        &mut self,
+        callbacks: &mut Vec<SiblingCallback>,
+        deferred_callbacks: &mut Vec<SiblingCallback>,
+    ) {
+        if callbacks.is_empty() {
+            return;
+        }
+        if let Some(open_element) = self.entries.last_mut() {
+            debug_assert_eq!(
+                open_element.sibling_callback_start as usize,
+                deferred_callbacks.len()
+            );
+            deferred_callbacks.append(callbacks);
+        } else {
+            callbacks.clear();
+        }
+    }
+
+    pub(crate) fn sibling_callback_start(open_element: &OpenElement<'html>) -> usize {
+        open_element.sibling_callback_start as usize
     }
 
     #[cfg(test)]
