@@ -236,7 +236,7 @@ Normalized `text` specifically:
 - Decodes HTML character references (named, numeric, legacy semicolon-less forms in data state, C1 remapping, and U+FFFD replacement for invalid scalars).
 
 Because Scah does not evaluate CSS, "block" is a fixed structural HTML set:
-`address`, `article`, `aside`, `blockquote`, `body`, `caption`, `dd`, `details`,
+`address`, `article`, `aside`, `blockquote`, `body`, `caption`, `colgroup`, `dd`, `details`,
 `dialog`, `div`, `dl`, `dt`, `fieldset`, `figcaption`, `figure`, `footer`,
 `form`, `h1` through `h6`, `header`, `hgroup`, `legend`, `li`, `main`, `menu`,
 `nav`, `ol`, `p`, `pre`, `search`, `section`, `summary`, `table`, `tbody`,
@@ -250,7 +250,13 @@ respectively. Other elements use inline concatenation semantics.
 Node uses plain option objects (no runtime `Save` helpers):
 
 ```ts
-{ innerHtml?: boolean, rawText?: boolean, text?: boolean }
+{
+  innerHtml?: boolean
+  rawText?: boolean
+  text?: boolean
+  attributes?: boolean
+  textContent?: boolean // legacy alias for text
+}
 ```
 
 Rust and Python retain `Save::only_raw_text()` / `Save.only_raw_text()` style constructors.
@@ -270,4 +276,4 @@ Old `text_content` output was already a normalized join, so it maps conceptually
 
 `Save::all()` now captures both `raw_text` and normalized `text` (plus `inner_html`), which can perform more work than the old two-field `Save::all()`. Prefer `Save::only_text()` or `Save::only_raw_text()` when only one representation is needed.
 
-`Store::with_capacity` reserves capacity for both text representations by default. Query-aware `parse` construction reserves only the representations required by the supplied queries.
+`Store::with_capacity` reserves capacity for both text representations by default. Query-aware `parse` construction grows requested text buffers and range sidecars only after a query matches.
