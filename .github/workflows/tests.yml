@@ -38,6 +38,37 @@ jobs:
         run: cargo test -p scah --features bench-internals
       - name: Test optimized implied-close preflight
         run: cargo test -p scah --release implied_close_preflight_matches_reactivated_attribute_cursor
+      - name: Verify generated entity table and provenance
+        run: |
+          python3 crates/scah/scripts/generate_entities.py --self-test
+          python3 -m unittest crates/scah/scripts/test_generate_entities.py
+          python3 crates/scah/scripts/generate_entities.py
+          git diff --exit-code -- crates/scah/src/html/entities_table.rs
+      - name: Verify third-party license notices
+        run: |
+          test -f THIRD_PARTY_LICENSES/WHATWG-HTML.txt
+          test -f crates/scah/THIRD_PARTY_LICENSES/WHATWG-HTML.txt
+          cmp \
+            THIRD_PARTY_LICENSES/WHATWG-HTML.txt \
+            crates/scah/THIRD_PARTY_LICENSES/WHATWG-HTML.txt
+          grep -F "THIRD_PARTY_LICENSES/WHATWG-HTML.txt" \
+            crates/scah/src/html/entities_table.rs
+      - name: Verify scah package contents
+        run: |
+          cargo package -p scah --list > /tmp/scah-package-files.txt
+          cat /tmp/scah-package-files.txt
+
+          grep -Fx "THIRD_PARTY_LICENSES/WHATWG-HTML.txt" \
+            /tmp/scah-package-files.txt
+
+          if grep -E '^scripts/' /tmp/scah-package-files.txt; then
+            echo "Generator assets were included in the package"
+            exit 1
+          fi
+
+          # --no-verify: package verification rebuilds against crates.io path-dep
+          # versions; sibling workspace crates on this branch are not published yet.
+          cargo package -p scah --no-verify
       - name: Check escape scanner benchmark
         run: cargo bench -p scah-benches --bench speed_bench_escape_scanner -- --test
       - name: Check cursor-dominance benchmark
