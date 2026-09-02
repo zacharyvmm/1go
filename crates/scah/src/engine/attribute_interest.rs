@@ -33,6 +33,18 @@ impl<'query> AttributeInterest<'query> {
         self.keys.clear();
     }
 
+    #[inline]
+    pub fn require_attribute(&mut self, key: &'query str) {
+        if self.all || self.includes_attribute(key) {
+            return;
+        }
+        if self.keys.len() == INLINE_ATTRIBUTE_KEYS {
+            self.require_all();
+        } else {
+            self.keys.push(key);
+        }
+    }
+
     #[cfg(test)]
     pub fn add_predicate(&mut self, predicate: &ElementPredicate<'query>) {
         if self.all {
@@ -187,6 +199,17 @@ mod tests {
         assert!(interest.includes_class());
         assert!(interest.includes_attribute("anything"));
         assert!(interest.keys.is_empty());
+    }
+
+    #[test]
+    fn explicit_attribute_interest_preserves_selective_parsing() {
+        let mut interest = AttributeInterest::default();
+        interest.require_attribute("hidden");
+        interest.require_attribute("HIDDEN");
+
+        assert!(interest.includes_attribute("hidden"));
+        assert!(!interest.includes_attribute("data-unused"));
+        assert_eq!(interest.keys.as_slice(), &["hidden"]);
     }
 
     #[test]

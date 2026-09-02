@@ -3,14 +3,61 @@ use std::ops::{Deref, Range};
 use super::arena::{Arena, Node, id};
 use super::{Attribute, Store};
 
-/// Per-element raw/normalized text ranges stored beside the element arena.
+/// Lazily allocated, mode-specific text ranges indexed by element ID.
 ///
-/// Kept out of [`Element`] so inner-HTML-only and no-content matches do not
-/// pay for unused `Option<Range<usize>>` fields on every result record.
+/// The raw and normalized vectors grow independently. A query that requests
+/// only one representation never pays for range slots belonging to the other.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ElementTextRanges {
-    pub(crate) raw_text: Option<Range<usize>>,
-    pub(crate) text: Option<Range<usize>>,
+    raw_text: Option<Vec<Option<Range<usize>>>>,
+    text: Option<Vec<Option<Range<usize>>>>,
+}
+
+impl ElementTextRanges {
+    fn set_range(
+        ranges: &mut Option<Vec<Option<Range<usize>>>>,
+        element_id: id::ElementId,
+        range: Range<usize>,
+    ) {
+        let ranges = ranges.get_or_insert_default();
+        let required_len = element_id.index() + 1;
+        if ranges.len() < required_len {
+            ranges.resize_with(required_len, || None);
+        }
+        ranges[element_id.index()] = Some(range);
+    }
+
+    pub(crate) fn set_raw_text(&mut self, element_id: id::ElementId, range: Range<usize>) {
+        Self::set_range(&mut self.raw_text, element_id, range);
+    }
+
+    pub(crate) fn set_text(&mut self, element_id: id::ElementId, range: Range<usize>) {
+        Self::set_range(&mut self.text, element_id, range);
+    }
+
+    pub(crate) fn raw_text(&self, element_id: id::ElementId) -> Option<&Range<usize>> {
+        self.raw_text
+            .as_ref()
+            .and_then(|ranges| ranges.get(element_id.index()))
+            .and_then(Option::as_ref)
+    }
+
+    pub(crate) fn text(&self, element_id: id::ElementId) -> Option<&Range<usize>> {
+        self.text
+            .as_ref()
+            .and_then(|ranges| ranges.get(element_id.index()))
+            .and_then(Option::as_ref)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracks_raw_text(&self) -> bool {
+        self.raw_text.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracks_text(&self) -> bool {
+        self.text.is_some()
+    }
 }
 
 /// A matched HTML element stored in the [`Store`](crate::Store).
@@ -129,8 +176,7 @@ impl<'html> Element<'html> {
     /// Only populated when [`Save::raw_text`](crate::Save::raw_text) was `true`.
     pub fn raw_text(&self, dom: &'html Store) -> Option<&'html str> {
         let element_id = unsafe { dom.elements.index_of(self) };
-        dom.element_text_range(element_id)
-            .and_then(|ranges| ranges.raw_text.as_ref())
+        dom.raw_text_range(element_id)
             .map(|range| dom.text.raw_text.slice(range.clone()))
     }
 
@@ -140,8 +186,7 @@ impl<'html> Element<'html> {
     /// this element. Only populated when [`Save::text`](crate::Save::text) was `true`.
     pub fn text(&self, dom: &'html Store) -> Option<&'html str> {
         let element_id = unsafe { dom.elements.index_of(self) };
-        dom.element_text_range(element_id)
-            .and_then(|ranges| ranges.text.as_ref())
+        dom.text_range(element_id)
             .map(|range| dom.text.text.slice(range.clone()))
     }
 
@@ -151,8 +196,7 @@ impl<'html> Element<'html> {
     /// content (`true` with [`Element::raw_text`] returning `Some("")`).
     pub fn has_raw_text(&self, dom: &Store<'_, '_>) -> bool {
         let element_id = unsafe { dom.elements.index_of(self) };
-        dom.element_text_range(element_id)
-            .is_some_and(|ranges| ranges.raw_text.is_some())
+        dom.raw_text_range(element_id).is_some()
     }
 
     /// Returns whether this element captured a normalized-text range.
@@ -161,7 +205,6 @@ impl<'html> Element<'html> {
     /// content (`true` with [`Element::text`] returning `Some("")`).
     pub fn has_text(&self, dom: &Store<'_, '_>) -> bool {
         let element_id = unsafe { dom.elements.index_of(self) };
-        dom.element_text_range(element_id)
-            .is_some_and(|ranges| ranges.text.is_some())
+        dom.text_range(element_id).is_some()
     }
 }

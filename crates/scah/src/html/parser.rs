@@ -79,6 +79,8 @@ pub struct XHtmlParser<'html, 'query, Q> {
     indexer: AutoTagIndexer,
     #[cfg(test)]
     attribute_parse_count: usize,
+    #[cfg(test)]
+    selected_attribute_count: usize,
 }
 
 #[inline]
@@ -155,6 +157,7 @@ where
                     ..crate::CapacityOptions::default()
                 },
                 persist_attributes,
+                false,
             )
         });
 
@@ -183,6 +186,8 @@ where
             indexer: AutoTagIndexer::new(indexing_mode, parse_attributes),
             #[cfg(test)]
             attribute_parse_count: 0,
+            #[cfg(test)]
+            selected_attribute_count: 0,
             store,
         }
     }
@@ -444,7 +449,10 @@ where
                         &mut self.temp_state.preflight,
                     );
                     if CAPTURE && self.capture_mode.captures_text() {
-                        self.temp_state.preflight.attribute_interest.require_all();
+                        self.temp_state
+                            .preflight
+                            .attribute_interest
+                            .require_attribute("hidden");
                     }
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
@@ -465,6 +473,10 @@ where
                                 &mut self.temp_state.attributes,
                                 &self.temp_state.preflight.attribute_interest,
                             );
+                        }
+                        #[cfg(test)]
+                        {
+                            self.selected_attribute_count += self.element.attributes.len();
                         }
                         open.attributes_start + attributes.get_position()
                     } else {
@@ -2301,6 +2313,27 @@ mod tests {
 
         assert_eq!(parser.attribute_parse_count, 2);
         assert_eq!(parser.matches().get("div.hit").unwrap().count(), 1);
+    }
+
+    #[test]
+    fn normalized_text_requests_only_hidden_on_unmatched_tags() {
+        let html = concat!(
+            "<div data-a='1' data-b='2'></div>",
+            "<span hidden data-c='3' data-d='4'></span>"
+        );
+        let queries = &[
+            Query::all("article", Save::only_text().without_attributes())
+                .unwrap()
+                .build(),
+        ];
+        let mut reader = Reader::new(html);
+        let mut parser = XHtmlParser::new(QueryMultiplexer::new(queries));
+
+        while parser.next(&mut reader) {}
+
+        assert_eq!(parser.attribute_parse_count, 2);
+        assert_eq!(parser.selected_attribute_count, 1);
+        assert!(parser.matches().elements.is_empty());
     }
 
     #[test]
