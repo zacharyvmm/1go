@@ -232,7 +232,7 @@ Normalized `text` specifically:
 
 - Omits `script`, `style`, `template`, and elements with a `hidden` attribute (no text and no structural separators from those subtrees).
 - Inserts line breaks for blocks / `<br>` / `<hr>`, and tabs between table cells.
-- Preserves preformatted whitespace in `pre` and `textarea` after HTML's initial-newline rule (only a newline immediately after the start tag is removed).
+- Preserves preformatted whitespace in `pre` and `textarea`, including literal or decoded nonbreaking spaces, after HTML's initial-newline rule (only a newline immediately after the start tag is removed).
 - Decodes HTML character references (named, numeric, legacy semicolon-less forms in data state, C1 remapping, and U+FFFD replacement for invalid scalars).
 
 Because Scah does not evaluate CSS, "block" is a fixed structural HTML set:
@@ -268,6 +268,7 @@ Rust and Python retain `Save::only_raw_text()` / `Save.only_raw_text()` style co
 | `Save::only_text_content()` | `Save::only_text()` |
 | `Save { text_content: true, ... }` | `Save { text: true, ... }` |
 | `element.text_content(&store)` | `element.text(&store)` |
+| `CapacityOptions::reserve_text_content` | `CapacityOptions::reserve_text` |
 | Python `element.text_content` | Python `element.text` |
 | Node `element.textContent` | Node `element.text` |
 | No raw equivalent | `raw_text` / `rawText` |
