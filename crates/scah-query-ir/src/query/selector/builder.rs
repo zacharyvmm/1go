@@ -128,7 +128,7 @@ impl<'query> StructuralPredicates<'query> {
         Self::Static(predicates)
     }
 
-    pub const fn as_slice(&self) -> &[StructuralPredicate<'_>] {
+    pub const fn as_slice(&self) -> &[StructuralPredicate<'query>] {
         match self {
             Self::Static(predicates) => predicates,
             Self::Owned(predicates) => predicates,
@@ -331,22 +331,25 @@ impl<'query> AttributeSelection<'query> {
             match token {
                 SelectionAttributeToken::String(string_value)
                 | SelectionAttributeToken::QuotedString(string_value) => {
-                    if kv.value.is_none() && kv.name.is_some() && matches!(string_value, "i" | "s")
+                    if kv.value.is_none()
+                        && kv.name.is_some()
+                        && (string_value.eq_ignore_ascii_case("i")
+                            || string_value.eq_ignore_ascii_case("s"))
                     {
                         return Err(SelectorParseError::new(
                             "attribute value modifiers require a value comparison",
                             reader.get_position(),
                         ));
                     } else if kv.value.is_some() && !saw_modifier {
-                        case_sensitivity = match string_value {
-                            "i" => AttributeCaseSensitivity::AsciiInsensitive,
-                            "s" => AttributeCaseSensitivity::Sensitive,
-                            _ => {
-                                return Err(SelectorParseError::new(
-                                    "attribute value modifier must be 'i' or 's'",
-                                    reader.get_position(),
-                                ));
-                            }
+                        case_sensitivity = if string_value.eq_ignore_ascii_case("i") {
+                            AttributeCaseSensitivity::AsciiInsensitive
+                        } else if string_value.eq_ignore_ascii_case("s") {
+                            AttributeCaseSensitivity::Sensitive
+                        } else {
+                            return Err(SelectorParseError::new(
+                                "attribute value modifier must be 'i' or 's'",
+                                reader.get_position(),
+                            ));
                         };
                         saw_modifier = true;
                     } else if saw_modifier {
@@ -869,6 +872,12 @@ fn parse_local_selector_list<'query>(
                 reader.get_position(),
             ));
         }
+        if selector.requires_structural() {
+            return Err(SelectorParseError::new(
+                "structural pseudo-classes are not supported inside local selector lists",
+                0,
+            ));
+        }
         selectors.push(selector);
     }
     Ok(LocalSelectorList::Owned(selectors.into_boxed_slice()))
@@ -1189,5 +1198,37 @@ mod tests {
         let attr = &element.attributes.as_slice()[0];
         assert_eq!(attr.name, "data-x");
         assert_eq!(attr.value, Some("a   b"));
+    }
+
+    #[test]
+    fn uppercase_attribute_modifiers_are_accepted() {
+        for (selector, expected) in [
+            (
+                r#"[data-x="FOO" I]"#,
+                AttributeCaseSensitivity::AsciiInsensitive,
+            ),
+            (r#"[data-x="FOO" S]"#, AttributeCaseSensitivity::Sensitive),
+        ] {
+            let mut reader = Reader::new(selector);
+            let element = ElementPredicate::try_from(&mut reader).unwrap();
+            assert_eq!(element.attributes.as_slice()[0].case_sensitivity, expected);
+        }
+    }
+
+    #[test]
+    fn structural_pseudos_in_local_selector_lists_are_rejected() {
+        for selector in [
+            "li:is(:first-child)",
+            "li:not(:first-child)",
+            "li:where(:nth-child(2))",
+            "li:nth-child(2 of :first-child)",
+        ] {
+            let mut reader = Reader::new(selector);
+            let error = ElementPredicate::try_from(&mut reader).unwrap_err();
+            assert_eq!(
+                error.message(),
+                "structural pseudo-classes are not supported inside local selector lists"
+            );
+        }
     }
 }

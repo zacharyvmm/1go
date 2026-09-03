@@ -112,9 +112,7 @@ pub trait QuerySpec<'query> {
             for predicate in transition.predicate().structural.as_slice() {
                 if let crate::query::selector::StructuralPredicate::NthChildOf(_, filter) =
                     predicate
-                    && !filters
-                        .iter()
-                        .any(|seen| *seen == filter as *const _ as *const ())
+                    && !filters.contains(&(filter as *const _ as *const ()))
                 {
                     filters.push(filter as *const _ as *const ());
                 }
@@ -296,6 +294,8 @@ impl Position {
                 .expect("parent section must have a selector alternative")
                 .end
                 .index()
+                .checked_sub(1)
+                .expect("parent selector alternative must not be empty")
                 .into();
         }
     }
@@ -495,7 +495,7 @@ mod tests {
     use crate::query::selector::Combinator;
     use crate::query::selector::ElementPredicate;
     use crate::{
-        Query, QuerySection, QuerySectionId, QuerySpec, Save, SelectionKind, TransitionId,
+        Position, Query, QuerySection, QuerySectionId, QuerySpec, Save, SelectionKind, TransitionId,
     };
 
     #[test]
@@ -621,5 +621,23 @@ mod tests {
         assert_eq!(query.queries.len(), 3);
         assert_eq!(query.queries[1].next_sibling, Some(QuerySectionId(2)));
         assert_eq!(query.queries[2].next_sibling, None);
+    }
+
+    #[test]
+    fn position_back_uses_the_last_state_in_the_parent_alternative() {
+        let query = Query::all("article > p, div", Save::none())
+            .unwrap()
+            .all("span", Save::none())
+            .unwrap()
+            .build();
+        let mut position = query.child_positions(&Position {
+            selection: QuerySectionId(0),
+            state: TransitionId(1),
+        })[0];
+
+        position.back(&query);
+
+        assert_eq!(position.selection, QuerySectionId(0));
+        assert_eq!(position.state, TransitionId(1));
     }
 }

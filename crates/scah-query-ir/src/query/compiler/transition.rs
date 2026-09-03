@@ -166,6 +166,13 @@ fn collect_metadata<'query>(
             attribute_names.push(attribute.name);
         }
     }
+    for structural in predicate.structural.as_slice() {
+        if let crate::query::selector::StructuralPredicate::NthChildOf(_, filter) = structural {
+            for local in filter.as_slice() {
+                collect_metadata(local, attribute_names, needs_id, needs_class);
+            }
+        }
+    }
     for logical in predicate.logical.as_slice() {
         let lists = match logical {
             crate::query::selector::LocalLogicalPredicate::Not(list)
@@ -180,6 +187,23 @@ fn collect_metadata<'query>(
 const fn predicate_needs_id(predicate: &ElementPredicate<'_>) -> bool {
     if predicate.id.is_some() || has_attribute_named(predicate.attributes.as_slice(), "id") {
         return true;
+    }
+    let structural = predicate.structural.as_slice();
+    let mut structural_index = 0;
+    while structural_index < structural.len() {
+        if let crate::query::selector::StructuralPredicate::NthChildOf(_, filter) =
+            &structural[structural_index]
+        {
+            let filters = filter.as_slice();
+            let mut filter_index = 0;
+            while filter_index < filters.len() {
+                if predicate_needs_id(&filters[filter_index]) {
+                    return true;
+                }
+                filter_index += 1;
+            }
+        }
+        structural_index += 1;
     }
     let logical = predicate.logical.as_slice();
     let mut index = 0;
@@ -253,6 +277,27 @@ const fn metadata_matches_predicate(
         metadata_index,
     ) {
         return false;
+    }
+    let structural = predicate.structural.as_slice();
+    let mut structural_index = 0;
+    while structural_index < structural.len() {
+        if let crate::query::selector::StructuralPredicate::NthChildOf(_, filter) =
+            &structural[structural_index]
+        {
+            let filters = filter.as_slice();
+            let mut filter_index = 0;
+            while filter_index < filters.len() {
+                if !metadata_matches_predicate(
+                    &filters[filter_index],
+                    metadata_names,
+                    metadata_index,
+                ) {
+                    return false;
+                }
+                filter_index += 1;
+            }
+        }
+        structural_index += 1;
     }
     let logical = predicate.logical.as_slice();
     let mut index = 0;
@@ -406,20 +451,24 @@ impl<'query> Transition<'query> {
         // continues past it, the existing cursor parent already is the scope;
         // retaining a synthetic element transition would incorrectly require
         // the scope to appear again in the stream.
-        if states.len() > 1
-            && states[0]
-                .predicate
-                .structural
-                .as_slice()
-                .iter()
-                .all(|predicate| matches!(predicate, crate::StructuralPredicate::Scope))
+        let first_structural = states[0].predicate.structural.as_slice();
+        let pure_scope_anchor = first_structural.len() == 1
+            && matches!(first_structural[0], crate::StructuralPredicate::Scope)
             && states[0].predicate.name.is_none()
             && states[0].predicate.id.is_none()
             && states[0].predicate.classes.as_slice().is_empty()
             && states[0].predicate.attributes.as_slice().is_empty()
-            && states[0].predicate.logical.as_slice().is_empty()
-        {
+            && states[0].predicate.logical.as_slice().is_empty();
+        let has_scope = first_structural
+            .iter()
+            .any(|predicate| matches!(predicate, crate::StructuralPredicate::Scope));
+        if states.len() > 1 && pure_scope_anchor {
             states.remove(0);
+        } else if states.len() > 1 && has_scope {
+            return Err(SelectorParseError::new(
+                "compound :scope anchors are not supported",
+                0,
+            ));
         }
 
         Ok(states)
@@ -462,9 +511,7 @@ impl<'query> Transition<'query> {
     }
 }
 
-fn split_selector_list<'query>(
-    source: &'query str,
-) -> Result<Vec<&'query str>, SelectorParseError> {
+fn split_selector_list(source: &str) -> Result<Vec<&str>, SelectorParseError> {
     let mut parts = Vec::new();
     let bytes = source.as_bytes();
     let mut start = 0;
@@ -830,5 +877,39 @@ mod tests {
                 Combinator::Child,
             ]
         );
+    }
+
+    #[test]
+    fn universal_selector_is_not_removed_as_a_scope_anchor() {
+        let states = Transition::generate_transitions_from_string("* > a").unwrap();
+
+        assert_eq!(states.len(), 2);
+        assert!(states[0].predicate().structural.as_slice().is_empty());
+        assert_eq!(states[1].predicate().name, Some("a"));
+    }
+
+    #[test]
+    fn pure_scope_anchor_is_removed_but_compound_scope_is_rejected() {
+        let states = Transition::generate_transitions_from_string(":scope > a").unwrap();
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].predicate().name, Some("a"));
+
+        let error = Transition::generate_transitions_from_string(":scope.foo > a").unwrap_err();
+        assert_eq!(error.message(), "compound :scope anchors are not supported");
+    }
+
+    #[test]
+    fn filtered_ordinal_metadata_includes_filter_attributes() {
+        let transition = Transition::generate_transitions_from_string(
+            "li:nth-child(2 of .hit, #hero, [data-card])",
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+
+        assert!(transition.metadata().needs_id());
+        assert!(transition.metadata().needs_class());
+        assert_eq!(transition.metadata().attribute_names(), &["data-card"]);
     }
 }
