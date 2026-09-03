@@ -1023,3 +1023,129 @@ fn form_feed_descendant_combinator_matches() {
 
     assert_eq!(store.get(selector).unwrap().count(), 1);
 }
+
+#[test]
+fn universal_and_attribute_case_flags_match_without_lowercasing() {
+    let html =
+        r#"<main><div data-kind="FooBar" class="card"></div><div data-kind="other"></div></main>"#;
+    let selectors = [
+        "*",
+        "*.card",
+        r#"[data-kind="FOO" i]"#,
+        r#"[data-kind^="FOO" i]"#,
+        r#"[data-kind="FOO" s]"#,
+    ];
+    let queries: Vec<_> = selectors
+        .iter()
+        .map(|selector| Query::all(selector, Save::all()).unwrap().build())
+        .collect();
+    let store = parse(html, &queries).unwrap();
+
+    assert_eq!(store.get("*").unwrap().count(), 3);
+    assert_eq!(store.get("*.card").unwrap().count(), 1);
+    assert_eq!(
+        store
+            .get(r#"[data-kind="FOO" i]"#)
+            .map_or(0, |items| items.count()),
+        0
+    );
+    assert_eq!(store.get(r#"[data-kind^="FOO" i]"#).unwrap().count(), 1);
+    assert_eq!(
+        store
+            .get(r#"[data-kind="FOO" s]"#)
+            .map_or(0, |items| items.count()),
+        0
+    );
+}
+
+#[test]
+fn attribute_case_flags_have_macro_parity() {
+    let query = query! { all(r#"[data-kind="FOO" i]"#, Save::all()) };
+    let queries = [query];
+    let store = parse(r#"<div data-kind="foo"></div>"#, &queries).unwrap();
+    assert_eq!(store.get(r#"[data-kind="FOO" i]"#).unwrap().count(), 1);
+}
+
+#[test]
+fn local_logical_pseudos_match_runtime_and_nested_lists() {
+    let html = r#"<main><div class="ok"></div><div class="ad"></div><span hidden></span></main>"#;
+    let selectors = [
+        "div:not(.ad)",
+        "div:is(.ok, .missing)",
+        "div:where(.missing, .ad)",
+        "div:not(:is(.ad, [hidden]))",
+        "div:not([hidden])",
+    ];
+    let queries: Vec<_> = selectors
+        .iter()
+        .map(|selector| Query::all(selector, Save::all()).unwrap().build())
+        .collect();
+    let store = parse(html, &queries).unwrap();
+
+    assert_eq!(store.get(selectors[0]).unwrap().count(), 1);
+    assert_eq!(store.get(selectors[1]).unwrap().count(), 1);
+    assert_eq!(store.get(selectors[2]).unwrap().count(), 1);
+    assert_eq!(store.get(selectors[3]).unwrap().count(), 1);
+    assert_eq!(store.get(selectors[4]).unwrap().count(), 2);
+}
+
+#[test]
+fn local_logical_pseudos_have_macro_parity() {
+    let query = query! { all("div:not(.ad)", Save::all()) };
+    let queries = [query];
+    let store = parse(r#"<div class="ok"></div><div class="ad"></div>"#, &queries).unwrap();
+    assert_eq!(store.get("div:not(.ad)").unwrap().count(), 1);
+}
+
+#[test]
+fn selector_lists_match_in_document_order_and_deduplicate() {
+    let html =
+        r#"<main><h2>two</h2><h1>one</h1><div class="hit"></div><h1 class="hit">last</h1></main>"#;
+    let selector = "h1, h2";
+    let query = Query::all(selector, Save::only_text_content())
+        .unwrap()
+        .build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    let names: Vec<_> = store
+        .get(selector)
+        .unwrap()
+        .map(|element| element.name)
+        .collect();
+    assert_eq!(names, vec!["h2", "h1", "h1"]);
+
+    let complex = "main > h1, main > h2";
+    let query = Query::first(complex, Save::only_text_content())
+        .unwrap()
+        .build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    assert_eq!(store.get(complex).unwrap().next().unwrap().name, "h2");
+
+    let overlap = "div, .hit";
+    let query = Query::all(overlap, Save::none()).unwrap().build();
+    let queries = [query];
+    let store = parse(r#"<div class="hit"></div><p class="hit"></p>"#, &queries).unwrap();
+    assert_eq!(store.get(overlap).unwrap().count(), 2);
+}
+
+#[test]
+fn selector_list_has_macro_parity() {
+    let query = query! { all("h1, h2", Save::only_text_content()) };
+    let queries = [query];
+    let store = parse("<h2></h2><h1></h1>", &queries).unwrap();
+    assert_eq!(store.get("h1, h2").unwrap().count(), 2);
+}
+
+#[test]
+fn child_selector_lists_share_one_output_parent() {
+    let query = Query::all("main", Save::all())
+        .unwrap()
+        .then(|main| Ok([main.all("h1, h2", Save::all())?]))
+        .unwrap()
+        .build();
+    let queries = [query];
+    let store = parse("<main><h2></h2><h1></h1></main>", &queries).unwrap();
+    let main = store.get("main").unwrap().next().unwrap();
+    assert_eq!(main.get(&store, "h1, h2").unwrap().count(), 2);
+}
