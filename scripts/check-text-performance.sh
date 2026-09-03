@@ -111,18 +111,25 @@ for workload in workloads:
         for round_number in range(1, rounds + 1)
     ]
     ratio = statistics.median(ratios)
-    # Legacy main performs simple text accumulation and has no raw-text API. The
-    # new normalized-text contract also decodes entities and handles block,
-    # hidden, and preformatted content. Keep scoped compatibility budgets for
-    # those non-equivalent text cases. Once main has the raw-text API, every
-    # workload uses the strict limit.
+    # No-text workloads protect the specialization directly, so they use a
+    # tighter limit than text-producing workloads. Legacy main performs simple
+    # text accumulation and has no raw-text API. The wider limits below are
+    # compatibility smoke checks for non-equivalent text behavior, not strict
+    # regression limits. Once main has the raw-text API, text workloads use the
+    # standard limit.
+    structural_limits = {
+        "no_content": 1.05,
+        "inner_html_only": 1.05,
+    }
     legacy_limits = {
         "text_only_no_matches": 1.20,
         "text_only_sparse_matches": 1.20,
         "text_only_prose": 2.30,
         "raw_only": 1.20,
     }
-    limit = legacy_limits.get(workload, 1.10) if legacy_base else 1.10
+    limit = structural_limits.get(workload)
+    if limit is None:
+        limit = legacy_limits.get(workload, 1.10) if legacy_base else 1.10
     delta = (ratio - 1.0) * 100.0
     print(f"{workload}: {delta:+.2f}% vs main (limit {(limit - 1.0) * 100:.0f}%)")
     if ratio > limit:

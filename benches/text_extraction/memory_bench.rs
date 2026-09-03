@@ -81,6 +81,19 @@ fn sparse_matches_html(paragraphs: usize) -> String {
     html
 }
 
+fn late_text_match_html(paragraphs: usize) -> String {
+    let mut html = String::from("<article>");
+    for i in 0..paragraphs {
+        if i + 1 == paragraphs {
+            html.push_str(&format!("<p class='late'>selected {i}</p>"));
+        } else {
+            html.push_str(&format!("<p>structural paragraph {i}</p>"));
+        }
+    }
+    html.push_str("</article>");
+    html
+}
+
 fn measure_peak<F, T>(operation: F) -> usize
 where
     F: FnOnce() -> T,
@@ -129,6 +142,17 @@ fn both_modes_peak(size: usize) -> usize {
     measure_peak(|| parse(black_box(&html), black_box(&queries)).unwrap())
 }
 
+fn late_match_peak(size: usize, late_save: Save) -> usize {
+    let html = late_text_match_html(size);
+    let queries = [
+        Query::all("p", Save::only_inner_html().without_attributes())
+            .unwrap()
+            .build(),
+        Query::all("p.late", late_save).unwrap().build(),
+    ];
+    measure_peak(|| parse(black_box(&html), black_box(&queries)).unwrap())
+}
+
 fn main() {
     for size in [1_000, 10_000] {
         let no_content = no_content_no_match_peak(size);
@@ -147,6 +171,19 @@ fn main() {
         println!(
             "text_only_sparse_matches/{size}: {} bytes",
             sparse_text_peak(size)
+        );
+        let structural_late = late_match_peak(size, Save::name_only());
+        let mixed_late = late_match_peak(size, Save::only_text().without_attributes());
+        println!("structural_then_late_match/{size}: {structural_late} bytes");
+        println!(
+            "structural_then_late_text/{size}: {mixed_late} bytes ({:+} text bytes)",
+            mixed_late as isize - structural_late as isize
+        );
+        let allowed_late_text_overhead = size * 32 + 16_384;
+        assert!(
+            mixed_late <= structural_late + allowed_late_text_overhead,
+            "late text range added {} bytes after {size} structural matches; limit is {allowed_late_text_overhead}",
+            mixed_late.saturating_sub(structural_late)
         );
         println!("both_modes/{size}: {} bytes", both_modes_peak(size));
     }
