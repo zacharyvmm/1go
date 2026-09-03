@@ -259,6 +259,19 @@ fn textarea_preserves_preformatted_and_decodes_entities() {
 }
 
 #[test]
+fn preformatted_text_preserves_literal_and_decoded_nbsp() {
+    for (tag, source) in [
+        ("pre", "A\u{00A0}B"),
+        ("pre", "A&nbsp;B"),
+        ("textarea", "A\u{00A0}B"),
+        ("textarea", "A&nbsp;B"),
+    ] {
+        let html = format!("<{tag}>{source}</{tag}>");
+        assert_eq!(text_of(&html, tag), "A\u{00A0}B");
+    }
+}
+
+#[test]
 fn intervening_tag_cancels_pre_initial_newline() {
     let text = text_of("<pre><span>\nX</span></pre>", "pre");
     assert_eq!(text, "\nX");

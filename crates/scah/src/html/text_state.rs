@@ -363,18 +363,10 @@ impl ParserTextState {
             // Any non-newline cancels initial-newline eligibility.
             self.initial_newline_depth = None;
 
-            if is_nbsp_at(decoded, i) {
-                self.flush_pending(tape);
-                // Normalized text converts NBSP to an ordinary space even in pre.
-                tape.push_byte(b' ');
-                i += 2;
-                continue;
-            }
-
             let run_start = i;
             while i < decoded.len() {
                 let b = decoded[i];
-                if b == b'\r' || b == b'\n' || is_nbsp_at(decoded, i) {
+                if b == b'\r' || b == b'\n' {
                     break;
                 }
                 i += utf8_char_len(b);
