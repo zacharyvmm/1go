@@ -19,6 +19,16 @@ fn inline_boundaries_preserve_source_spacing() {
 }
 
 #[test]
+fn search_uses_structural_block_boundaries() {
+    let html = "<div>A<search>B</search>C</div>";
+    let queries = [Query::all("div", Save::only_text()).unwrap().build()];
+    let store = parse(html, &queries).unwrap();
+    let div = store.get("div").unwrap().next().unwrap();
+
+    assert_eq!(div.text(&store), Some("A\nB\nC"));
+}
+
+#[test]
 fn br_inserts_normalized_line_break() {
     let html = "<p>Hello<br>world</p>";
     let query = Query::all("p", Save::all()).unwrap().build();

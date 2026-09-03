@@ -248,7 +248,9 @@ impl TextTagFlags {
             | "footer" | "form" | "header" | "main" | "nav" | "section" | "h1" | "h2" | "h3"
             | "h4" | "h5" | "h6" | "p" | "ol" | "ul" | "table" | "li" | "dt" | "dd" | "thead"
             | "tbody" | "tfoot" | "colgroup" | "caption" | "body" | "details" | "dialog"
-            | "figcaption" | "figure" | "hgroup" | "legend" | "menu" | "summary" => Self::BLOCK,
+            | "figcaption" | "figure" | "hgroup" | "legend" | "menu" | "search" | "summary" => {
+                Self::BLOCK
+            }
             "tr" => Self::ROW | Self::BLOCK,
             "td" | "th" => Self::CELL,
             "template" | "script" | "style" => Self::SUPPRESSED,
@@ -381,7 +383,7 @@ impl ClassifiedTag {
                 TextTagFlags::BLOCK | TextTagFlags::PREFORMATTED,
             ),
             "body" | "details" | "dialog" | "figcaption" | "figure" | "hgroup" | "legend"
-            | "menu" | "summary" => (0, TextTagFlags::BLOCK),
+            | "menu" | "search" | "summary" => (0, TextTagFlags::BLOCK),
             _ => (0, 0),
         };
         Self {
