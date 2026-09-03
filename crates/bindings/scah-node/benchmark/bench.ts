@@ -26,7 +26,6 @@ type BenchmarkCase = {
 
 type ElementSnapshot = {
   innerHtml?: string | null
-  rawText?: string | null
   text?: string | null
 }
 
@@ -60,12 +59,12 @@ const PRODUCT_HTML = generateProductCatalogHtml(10_000)
 const CASES: Record<string, BenchmarkCase> = {
   scah: {
     all: (html, query) => {
-      const compiledQuery = Query.all(query, { innerHtml: true, rawText: true, text: true }).build()
+      const compiledQuery = Query.all(query, { innerHtml: true, text: true }).build()
       const store = parse(html, [compiledQuery])
       return store.get(query) ?? []
     },
     first: (html, query) => {
-      const compiledQuery = Query.first(query, { innerHtml: true, rawText: true, text: true }).build()
+      const compiledQuery = Query.first(query, { innerHtml: true, text: true }).build()
       const store = parse(html, [compiledQuery])
       return store.get(query)?.[0] ?? null
     },
@@ -316,9 +315,6 @@ function readElement(element: unknown) {
     if ('innerHtml' in element) {
       void element.innerHtml
     }
-    if ('rawText' in element) {
-      void element.rawText
-    }
     if ('text' in element) {
       void element.text
     }
@@ -336,15 +332,11 @@ function snapshotElement(element: unknown): ElementSnapshot | null {
     return null
   }
 
-  if ('innerHtml' in element || 'rawText' in element || 'text' in element || 'textContent' in element) {
+  if ('innerHtml' in element || 'text' in element || 'textContent' in element) {
     return {
       innerHtml:
         'innerHtml' in element && typeof element.innerHtml !== 'undefined'
           ? (element.innerHtml as string | null)
-          : null,
-      rawText:
-        'rawText' in element && typeof element.rawText !== 'undefined'
-          ? (element.rawText as string | null)
           : null,
       text:
         'text' in element && typeof element.text !== 'undefined'
@@ -390,7 +382,6 @@ function snapshotNestedProducts<T>(
     const productSnapshot = snapshotElement(product)
     snapshots.push({
       innerHtml: productSnapshot?.innerHtml ?? null,
-      rawText: productSnapshot?.rawText ?? null,
       text: productSnapshot?.text ?? null,
       title: snapshotElement(selectChild(product, 'h1')),
       rating: snapshotElement(selectChild(product, '.rating')),
@@ -446,18 +437,17 @@ function registerWhatwgBenchmarks() {
 function registerNestedBenchmarks() {
   group('Synthetic Nested Query', () => {
     bench('scah', () => {
-      const compiledQuery = Query.all('.product', { innerHtml: true, rawText: true, text: true })
+      const compiledQuery = Query.all('.product', { innerHtml: true, text: true })
         .then((product) => [
-          product.first('> h1', { innerHtml: true, rawText: true, text: true }),
-          product.first('> .rating', { innerHtml: true, rawText: true, text: true }),
-          product.first('> .description', { innerHtml: true, rawText: true, text: true }),
+          product.first('> h1', { innerHtml: true, text: true }),
+          product.first('> .rating', { innerHtml: true, text: true }),
+          product.first('> .description', { innerHtml: true, text: true }),
         ])
         .build()
       const store = parse(PRODUCT_HTML, [compiledQuery])
       const products = store.get('.product') ?? []
       const snapshots = products.map((product) => ({
         innerHtml: product.innerHtml,
-        rawText: product.rawText,
         text: product.text,
         title: snapshotElement(product.get('> h1')[0]),
         rating: snapshotElement(product.get('> .rating')[0]),
