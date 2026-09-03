@@ -134,7 +134,7 @@ impl<'a> ElementPredicate<'a> {
     pub fn matches_element_with_context<'b, E: IElement<'b>>(
         &self,
         other: &E,
-        structural: Option<super::builder::StructuralMatchContext>,
+        structural: Option<&super::builder::StructuralMatchContext>,
     ) -> bool {
         if !self.matches_name(other.name()) {
             return false;
@@ -204,10 +204,12 @@ impl<'a> ElementPredicate<'a> {
                 }
                 super::builder::StructuralPredicate::NthChildOf(formula, filter) => {
                     let key = filter as *const _ as usize;
-                    let matched_slot =
-                        (0..8).find(|&slot| context.filtered_child_keys[slot] == key);
-                    matched_slot
-                        .is_some_and(|slot| formula.matches(context.filtered_child_indices[slot]))
+                    context
+                        .filtered_child_indices
+                        .iter()
+                        .any(|&(filter_key, index)| {
+                            filter_key == key && index != 0 && formula.matches(index)
+                        })
                 }
             }
         })

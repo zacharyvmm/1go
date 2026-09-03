@@ -102,12 +102,11 @@ pub enum StructuralPredicate<'query> {
     NthChildOf(AnPlusB, LocalSelectorList<'query>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuralMatchContext {
     pub child_index: u32,
     pub type_index: u32,
-    pub filtered_child_indices: [u32; 8],
-    pub filtered_child_keys: [usize; 8],
+    pub filtered_child_indices: smallvec::SmallVec<[(usize, u32); 8]>,
     pub is_root: bool,
 }
 

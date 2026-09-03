@@ -538,6 +538,7 @@ impl ScopedCursor {
 }
 
 impl<'query> ScopedCursor {
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn next<'html, Q: QuerySpec<'query>>(
         &self,
@@ -556,7 +557,7 @@ impl<'query> ScopedCursor {
         tree: &Q,
         depth: super::DepthSize,
         element: &XHtmlElement<'html>,
-        structural: Option<crate::StructuralMatchContext>,
+        structural: Option<&crate::StructuralMatchContext>,
     ) -> bool {
         if !self.is_active() {
             return false;
