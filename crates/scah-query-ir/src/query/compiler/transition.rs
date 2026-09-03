@@ -1,6 +1,8 @@
 use crate::Reader;
 use crate::query::compiler::SelectorParseError;
-use crate::query::selector::{Combinator, ElementPredicate, IElement, Lexer};
+use crate::query::selector::{
+    Combinator, ElementPredicate, IElement, Lexer, StructuralMatchContext,
+};
 
 #[inline]
 pub const fn ascii_case_insensitive_hash(value: &str) -> u64 {
@@ -50,34 +52,24 @@ pub struct PredicateMetadata<'query> {
 
 impl<'query> PredicateMetadata<'query> {
     pub fn compile(predicate: &ElementPredicate<'query>) -> Self {
+        let name = predicate.name;
         let mut attribute_names = Vec::new();
-        for attribute in predicate.attributes.as_slice() {
-            if attribute.name.eq_ignore_ascii_case("id")
-                || attribute.name.eq_ignore_ascii_case("class")
-                || attribute_names
-                    .iter()
-                    .any(|name: &&str| name.eq_ignore_ascii_case(attribute.name))
-            {
-                continue;
-            }
-            attribute_names.push(attribute.name);
-        }
+        let mut needs_id = false;
+        let mut needs_class = false;
+        collect_metadata(
+            predicate,
+            &mut attribute_names,
+            &mut needs_id,
+            &mut needs_class,
+        );
+        needs_id |= predicate_needs_id(predicate);
+        needs_class |= predicate_needs_class(predicate);
 
         Self {
-            name: predicate.name,
-            name_hash: predicate.name.map_or(0, ascii_case_insensitive_hash),
-            needs_id: predicate.id.is_some()
-                || predicate
-                    .attributes
-                    .as_slice()
-                    .iter()
-                    .any(|attribute| attribute.name.eq_ignore_ascii_case("id")),
-            needs_class: !predicate.classes.as_slice().is_empty()
-                || predicate
-                    .attributes
-                    .as_slice()
-                    .iter()
-                    .any(|attribute| attribute.name.eq_ignore_ascii_case("class")),
+            name,
+            name_hash: name.map_or(0, ascii_case_insensitive_hash),
+            needs_id,
+            needs_class,
             attribute_names: AttributeNames::Owned(attribute_names.into_boxed_slice()),
         }
     }
@@ -117,36 +109,16 @@ impl<'query> PredicateMetadata<'query> {
             return false;
         }
 
-        let attributes = predicate.attributes.as_slice();
-        let needs_id = predicate.id.is_some() || has_attribute_named(attributes, "id");
-        let needs_class =
-            !predicate.classes.as_slice().is_empty() || has_attribute_named(attributes, "class");
+        let needs_id = predicate_needs_id(predicate);
+        let needs_class = predicate_needs_class(predicate);
         if self.needs_id != needs_id || self.needs_class != needs_class {
             return false;
         }
 
         let metadata_names = self.attribute_names.as_slice();
         let mut metadata_index = 0;
-        let mut attribute_index = 0;
-        while attribute_index < attributes.len() {
-            let attribute_name = attributes[attribute_index].name;
-            if !is_metadata_attribute(attribute_name)
-                && !has_previous_attribute(attributes, attribute_index, attribute_name)
-            {
-                if metadata_index >= metadata_names.len()
-                    || !const_ascii_case_insensitive_eq(
-                        metadata_names[metadata_index],
-                        attribute_name,
-                    )
-                {
-                    return false;
-                }
-                metadata_index += 1;
-            }
-            attribute_index += 1;
-        }
-
-        metadata_index == metadata_names.len()
+        metadata_matches_predicate(predicate, metadata_names, &mut metadata_index)
+            && metadata_index == metadata_names.len()
     }
 
     #[inline]
@@ -172,6 +144,156 @@ impl<'query> PredicateMetadata<'query> {
     pub fn attribute_names(&self) -> &[&'query str] {
         self.attribute_names.as_slice()
     }
+}
+
+fn collect_metadata<'query>(
+    predicate: &ElementPredicate<'query>,
+    attribute_names: &mut Vec<&'query str>,
+    needs_id: &mut bool,
+    needs_class: &mut bool,
+) {
+    *needs_id |= predicate.id.is_some();
+    *needs_class |= !predicate.classes.as_slice().is_empty();
+    for attribute in predicate.attributes.as_slice() {
+        if attribute.name.eq_ignore_ascii_case("id") {
+            *needs_id = true;
+        } else if attribute.name.eq_ignore_ascii_case("class") {
+            *needs_class = true;
+        } else if !attribute_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(attribute.name))
+        {
+            attribute_names.push(attribute.name);
+        }
+    }
+    for logical in predicate.logical.as_slice() {
+        let lists = match logical {
+            crate::query::selector::LocalLogicalPredicate::Not(list)
+            | crate::query::selector::LocalLogicalPredicate::Any(list) => list.as_slice(),
+        };
+        for local in lists {
+            collect_metadata(local, attribute_names, needs_id, needs_class);
+        }
+    }
+}
+
+const fn predicate_needs_id(predicate: &ElementPredicate<'_>) -> bool {
+    if predicate.id.is_some() || has_attribute_named(predicate.attributes.as_slice(), "id") {
+        return true;
+    }
+    let logical = predicate.logical.as_slice();
+    let mut index = 0;
+    while index < logical.len() {
+        let lists = match &logical[index] {
+            crate::query::selector::LocalLogicalPredicate::Not(list)
+            | crate::query::selector::LocalLogicalPredicate::Any(list) => list.as_slice(),
+        };
+        let mut local = 0;
+        while local < lists.len() {
+            if predicate_needs_id(&lists[local]) {
+                return true;
+            }
+            local += 1;
+        }
+        index += 1;
+    }
+    false
+}
+
+const fn predicate_needs_class(predicate: &ElementPredicate<'_>) -> bool {
+    if !predicate.classes.as_slice().is_empty()
+        || has_attribute_named(predicate.attributes.as_slice(), "class")
+    {
+        return true;
+    }
+    let structural = predicate.structural.as_slice();
+    let mut structural_index = 0;
+    while structural_index < structural.len() {
+        if let crate::query::selector::StructuralPredicate::NthChildOf(_, filter) =
+            &structural[structural_index]
+        {
+            let filters = filter.as_slice();
+            let mut filter_index = 0;
+            while filter_index < filters.len() {
+                if predicate_needs_class(&filters[filter_index]) {
+                    return true;
+                }
+                filter_index += 1;
+            }
+        }
+        structural_index += 1;
+    }
+    let logical = predicate.logical.as_slice();
+    let mut index = 0;
+    while index < logical.len() {
+        let lists = match &logical[index] {
+            crate::query::selector::LocalLogicalPredicate::Not(list)
+            | crate::query::selector::LocalLogicalPredicate::Any(list) => list.as_slice(),
+        };
+        let mut local = 0;
+        while local < lists.len() {
+            if predicate_needs_class(&lists[local]) {
+                return true;
+            }
+            local += 1;
+        }
+        index += 1;
+    }
+    false
+}
+
+const fn metadata_matches_predicate(
+    predicate: &ElementPredicate<'_>,
+    metadata_names: &[&str],
+    metadata_index: &mut usize,
+) -> bool {
+    if !metadata_matches_attributes(
+        predicate.attributes.as_slice(),
+        metadata_names,
+        metadata_index,
+    ) {
+        return false;
+    }
+    let logical = predicate.logical.as_slice();
+    let mut index = 0;
+    while index < logical.len() {
+        let lists = match &logical[index] {
+            crate::query::selector::LocalLogicalPredicate::Not(list)
+            | crate::query::selector::LocalLogicalPredicate::Any(list) => list.as_slice(),
+        };
+        let mut local = 0;
+        while local < lists.len() {
+            if !metadata_matches_predicate(&lists[local], metadata_names, metadata_index) {
+                return false;
+            }
+            local += 1;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn metadata_matches_attributes(
+    attributes: &[crate::query::selector::AttributeSelection<'_>],
+    metadata_names: &[&str],
+    metadata_index: &mut usize,
+) -> bool {
+    let mut attribute_index = 0;
+    while attribute_index < attributes.len() {
+        let attribute_name = attributes[attribute_index].name;
+        if !is_metadata_attribute(attribute_name)
+            && !has_previous_attribute(attributes, attribute_index, attribute_name)
+        {
+            if *metadata_index >= metadata_names.len()
+                || !const_ascii_case_insensitive_eq(metadata_names[*metadata_index], attribute_name)
+            {
+                return false;
+            }
+            *metadata_index += 1;
+        }
+        attribute_index += 1;
+    }
+    true
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -233,6 +355,34 @@ impl<'query> Transition<'query> {
     pub fn generate_transitions_from_string(
         query: &'query str,
     ) -> Result<Vec<Self>, SelectorParseError> {
+        let paths = Self::generate_transition_paths_from_string(query)?;
+        if paths.len() != 1 {
+            return Err(SelectorParseError::new(
+                "selector list requires a query builder",
+                0,
+            ));
+        }
+        Ok(paths.into_iter().next().unwrap())
+    }
+
+    pub fn generate_transition_paths_from_string(
+        query: &'query str,
+    ) -> Result<Vec<Vec<Self>>, SelectorParseError> {
+        if query.bytes().any(|byte| byte == 0x0b) {
+            return Err(SelectorParseError::new("illegal selector token", 0));
+        }
+        let alternatives = split_selector_list(query)?;
+        let mut paths = Vec::with_capacity(alternatives.len());
+        for alternative in alternatives {
+            paths.push(Self::generate_single_path(alternative)?);
+        }
+        Ok(paths)
+    }
+
+    fn generate_single_path(query: &'query str) -> Result<Vec<Self>, SelectorParseError> {
+        if query.bytes().any(|byte| byte == 0x0b) {
+            return Err(SelectorParseError::new("illegal selector token", 0));
+        }
         let reader = &mut Reader::new(query);
         let mut states = Vec::new();
         let mut seen_selector = false;
@@ -241,8 +391,35 @@ impl<'query> Transition<'query> {
             seen_selector = true;
         }
 
+        if !reader.eof() {
+            return Err(SelectorParseError::new(
+                "illegal selector token",
+                reader.get_position(),
+            ));
+        }
+
         if states.is_empty() {
             return Err(SelectorParseError::new("empty selector", 0));
+        }
+
+        // `:scope` is a zero-width anchor for nested sections. Once a path
+        // continues past it, the existing cursor parent already is the scope;
+        // retaining a synthetic element transition would incorrectly require
+        // the scope to appear again in the stream.
+        if states.len() > 1
+            && states[0]
+                .predicate
+                .structural
+                .as_slice()
+                .iter()
+                .all(|predicate| matches!(predicate, crate::StructuralPredicate::Scope))
+            && states[0].predicate.name.is_none()
+            && states[0].predicate.id.is_none()
+            && states[0].predicate.classes.as_slice().is_empty()
+            && states[0].predicate.attributes.as_slice().is_empty()
+            && states[0].predicate.logical.as_slice().is_empty()
+        {
+            states.remove(0);
         }
 
         Ok(states)
@@ -259,13 +436,71 @@ impl<'query> Transition<'query> {
             "Current depth is smaller than last depth: {current_depth} >= {last_depth}"
         );
 
-        self.guard.evaluate(last_depth, current_depth) && self.predicate.matches_element(element)
+        self.next_with_context(element, current_depth, last_depth, None)
+    }
+
+    pub fn next_with_context<'html, E: IElement<'html>>(
+        &self,
+        element: &E,
+        current_depth: u16,
+        last_depth: u16,
+        structural: Option<StructuralMatchContext>,
+    ) -> bool {
+        assert!(
+            current_depth >= last_depth,
+            "Current depth is smaller than last depth: {current_depth} >= {last_depth}"
+        );
+        self.guard.evaluate(last_depth, current_depth)
+            && self
+                .predicate
+                .matches_element_with_context(element, structural)
     }
 
     #[allow(clippy::needless_lifetimes)]
     pub fn back<'html>(&self, _element: &'html str, current_depth: u16, last_depth: u16) -> bool {
         last_depth == current_depth
     }
+}
+
+fn split_selector_list<'query>(
+    source: &'query str,
+) -> Result<Vec<&'query str>, SelectorParseError> {
+    let mut parts = Vec::new();
+    let bytes = source.as_bytes();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, &byte) in bytes.iter().enumerate() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'[' | b'(' => depth += 1,
+            b']' | b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(source[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(source[start..].trim());
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(SelectorParseError::new(
+            "selector list has an empty alternative",
+            0,
+        ));
+    }
+    Ok(parts)
 }
 
 const fn const_ascii_case_insensitive_eq(left: &str, right: &str) -> bool {
@@ -381,18 +616,23 @@ mod tests {
                         name: "href",
                         value: None,
                         kind: AttributeSelectionKind::Presence,
+                        case_sensitivity: crate::query::selector::AttributeCaseSensitivity::Default,
                     },
                     AttributeSelection {
                         name: "HREF",
                         value: None,
                         kind: AttributeSelectionKind::Presence,
+                        case_sensitivity: crate::query::selector::AttributeCaseSensitivity::Default,
                     },
                     AttributeSelection {
                         name: "class",
                         value: None,
                         kind: AttributeSelectionKind::Presence,
+                        case_sensitivity: crate::query::selector::AttributeCaseSensitivity::Default,
                     },
                 ]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             },
         );
 
@@ -415,6 +655,8 @@ mod tests {
                 id: None,
                 classes: ClassSelections::from_static(&[]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             },
         );
 
@@ -423,6 +665,8 @@ mod tests {
             id: Some("hero"),
             classes: ClassSelections::from_static(&[]),
             attributes: AttributeSelections::from_static(&[]),
+            logical: crate::LogicalPredicates::from_static(&[]),
+            structural: crate::StructuralPredicates::from_static(&[]),
         });
 
         assert_eq!(transition.predicate().name, Some("div"));
@@ -450,7 +694,10 @@ mod tests {
                 name: "href",
                 value: None,
                 kind: AttributeSelectionKind::Presence,
+                case_sensitivity: crate::query::selector::AttributeCaseSensitivity::Default,
             }]),
+            logical: crate::LogicalPredicates::from_static(&[]),
+            structural: crate::StructuralPredicates::from_static(&[]),
         };
         let metadata =
             PredicateMetadata::new_const(Some("a"), false, false, AttributeNames::from_static(&[]));
@@ -467,6 +714,8 @@ mod tests {
                 id: None,
                 classes: ClassSelections::from_static(&[]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             },
         );
         assert!(state.next(
@@ -490,6 +739,8 @@ mod tests {
                 id: None,
                 classes: ClassSelections::from_static(&[]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             },
         );
         assert!(state.next(
@@ -513,6 +764,8 @@ mod tests {
                 id: None,
                 classes: ClassSelections::from_static(&[]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             },
         );
         assert!(!state.next(
@@ -536,6 +789,8 @@ mod tests {
                 id: None,
                 classes: ClassSelections::from_static(&[]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             },
         );
         let subsequent = Transition::new(
@@ -545,6 +800,8 @@ mod tests {
                 id: None,
                 classes: ClassSelections::from_static(&[]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             },
         );
         let element = FakeElement {

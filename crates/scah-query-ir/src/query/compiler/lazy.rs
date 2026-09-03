@@ -166,6 +166,7 @@ impl<S: AsRef<str>> LazyQueryBuilder<S> {
 
         let mut queries = Vec::with_capacity(self.queries.len());
         let mut states = Vec::with_capacity(self.queries.len() * 2);
+        let mut alternatives = Vec::with_capacity(self.queries.len());
 
         for query in self.queries {
             let source = {
@@ -182,14 +183,16 @@ impl<S: AsRef<str>> LazyQueryBuilder<S> {
                 }
             };
 
-            let mut string_states = Transition::generate_transitions_from_string(source)?;
-            let range = {
+            let paths = Transition::generate_transition_paths_from_string(source)?;
+            let mut section_alternatives = Vec::new();
+            for mut path in paths {
                 let start = states.len();
-                states.append(&mut string_states);
-                let end = states.len();
-
-                TransitionId(start)..TransitionId(end)
-            };
+                states.append(&mut path);
+                section_alternatives.push(TransitionId(start)..TransitionId(states.len()));
+            }
+            let range = section_alternatives.first().unwrap().start
+                ..section_alternatives.last().unwrap().end;
+            alternatives.push(section_alternatives);
 
             queries.push(QuerySection {
                 source,
@@ -208,6 +211,7 @@ impl<S: AsRef<str>> LazyQueryBuilder<S> {
             QueryBuilder {
                 states,
                 selection: queries,
+                alternatives,
             }
             .build(),
         ))
@@ -396,7 +400,9 @@ mod tests {
                             name: Some("div"),
                             id: None,
                             classes: ClassSelections::from_static(&[]),
-                            attributes: AttributeSelections::from_static(&[])
+                            attributes: AttributeSelections::from_static(&[]),
+                            logical: crate::LogicalPredicates::from_static(&[]),
+                            structural: crate::StructuralPredicates::from_static(&[]),
                         }
                     ),
                     Transition::new(
@@ -405,7 +411,9 @@ mod tests {
                             name: Some("a"),
                             id: None,
                             classes: ClassSelections::from_static(&[]),
-                            attributes: AttributeSelections::from_static(&[])
+                            attributes: AttributeSelections::from_static(&[]),
+                            logical: crate::LogicalPredicates::from_static(&[]),
+                            structural: crate::StructuralPredicates::from_static(&[]),
                         }
                     ),
                     Transition::new(
@@ -414,7 +422,9 @@ mod tests {
                             name: Some("a"),
                             id: None,
                             classes: ClassSelections::from_static(&[]),
-                            attributes: AttributeSelections::from_static(&[])
+                            attributes: AttributeSelections::from_static(&[]),
+                            logical: crate::LogicalPredicates::from_static(&[]),
+                            structural: crate::StructuralPredicates::from_static(&[]),
                         }
                     ),
                 ]
@@ -444,6 +454,12 @@ mod tests {
                 ]
                 .into_boxed_slice(),
                 exit_at_section_end: None,
+                alternatives: vec![
+                    vec![TransitionId(0)..TransitionId(1)].into_boxed_slice(),
+                    vec![TransitionId(1)..TransitionId(2)].into_boxed_slice(),
+                    vec![TransitionId(2)..TransitionId(3)].into_boxed_slice(),
+                ]
+                .into_boxed_slice(),
             }
         );
     }

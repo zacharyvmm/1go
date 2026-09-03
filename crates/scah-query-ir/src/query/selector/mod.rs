@@ -9,8 +9,10 @@ mod lexer;
 mod string_search;
 
 pub use builder::{
-    Attribute, AttributeSelection, AttributeSelections, ClassSelections, ElementPredicate, IElement,
+    AnPlusB, Attribute, AttributeSelection, AttributeSelections, ClassSelections, ElementPredicate,
+    IElement, LocalLogicalPredicate, LocalSelectorList, LogicalPredicates, StructuralMatchContext,
+    StructuralPredicate, StructuralPredicates,
 };
 pub use lexer::Combinator;
 pub(super) use lexer::Lexer;
-pub use string_search::AttributeSelectionKind;
+pub use string_search::{AttributeCaseSensitivity, AttributeSelectionKind};

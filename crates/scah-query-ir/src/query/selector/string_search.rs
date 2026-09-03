@@ -9,6 +9,13 @@ pub enum AttributeSelectionKind {
     Substring,           // [attribute*=value]
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum AttributeCaseSensitivity {
+    Default,
+    AsciiInsensitive,
+    Sensitive,
+}
+
 impl AttributeSelectionKind {
     pub fn find(&self, query: &str, source: &str) -> bool {
         match self {
@@ -26,6 +33,50 @@ impl AttributeSelectionKind {
             Self::Substring => source.contains(query),
         }
     }
+
+    pub fn find_ascii_insensitive(&self, query: &str, source: &str) -> bool {
+        match self {
+            Self::Exact => ascii_eq(query, source),
+            Self::Presence => true,
+            Self::WhitespaceSeparated => {
+                source.split_whitespace().any(|word| ascii_eq(query, word))
+            }
+            Self::HyphenSeparated => {
+                ascii_eq(query, source)
+                    || source
+                        .get(..query.len())
+                        .is_some_and(|prefix| ascii_eq(query, prefix))
+                        && source.as_bytes().get(query.len()) == Some(&b'-')
+            }
+            Self::Prefix => source
+                .get(..query.len())
+                .is_some_and(|prefix| ascii_eq(query, prefix)),
+            Self::Suffix => source
+                .get(source.len().saturating_sub(query.len())..)
+                .is_some_and(|suffix| ascii_eq(query, suffix)),
+            Self::Substring => {
+                query.is_empty()
+                    || source
+                        .as_bytes()
+                        .windows(query.len())
+                        .any(|w| ascii_eq_bytes(query.as_bytes(), w))
+            }
+        }
+    }
+}
+
+#[inline]
+fn ascii_eq(left: &str, right: &str) -> bool {
+    ascii_eq_bytes(left.as_bytes(), right.as_bytes())
+}
+
+#[inline]
+fn ascii_eq_bytes(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 #[cfg(test)]
