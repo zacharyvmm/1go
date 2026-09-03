@@ -140,7 +140,7 @@ Control what data is captured per selector:
 | Attribute prefix | `a[href^="https"]` | Working |
 | Attribute suffix | `a[href$=".com"]` | Working |
 | Attribute substring | `a[href*="example"]` | Working |
-| Attribute value flags | `[data-kind="FOO" i]`, `[data-kind="FOO" s]` | Working |
+| Attribute value flags | `[data-kind="FOO" i]`, `[data-kind="FOO" S]` | ASCII-insensitive or sensitive; flags are case-insensitive |
 | Adjacent sibling | `h1 + p` | Working |
 | General sibling | `h1 ~ p` | Working |
 | Selector lists | `h1, h2`, `main > h1, main > h2` | Working |
@@ -153,6 +153,9 @@ Control what data is captured per selector:
 Filtered `of S` arguments are intentionally limited to local compound selectors
 that can be evaluated at an opening tag. Future-dependent selectors such as
 `:has()`, `:empty`, `:last-child`, and `:nth-last-child()` are rejected.
+Structural pseudo-classes inside `:is()`, `:not()`, `:where()`, and filtered
+`of S` lists are also rejected. A nested scope anchor must be standalone, as in
+`:scope > a`; compound anchors such as `:scope.card > a` are not supported.
 
 > Full API documentation: [docs.rs/scah](https://docs.rs/scah)
 
