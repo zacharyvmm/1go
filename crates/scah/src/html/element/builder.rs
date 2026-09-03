@@ -766,7 +766,10 @@ mod tests {
                 name: "href",
                 value: None,
                 kind: AttributeSelectionKind::Presence,
+                case_sensitivity: crate::AttributeCaseSensitivity::Default,
             }]),
+            logical: Default::default(),
+            structural: Default::default(),
         });
 
         let mut reader =

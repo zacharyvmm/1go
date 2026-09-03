@@ -431,11 +431,29 @@ impl<'query, const N_STATES: usize, const N_SECTIONS: usize> QuerySpec<'query>
 }
 
 impl<'query> Query<'query> {
+    fn require_legacy_engine_compatible_paths(
+        paths: &[Vec<Transition<'query>>],
+    ) -> Result<(), SelectorParseError> {
+        if paths.len() > 1
+            || paths
+                .iter()
+                .flatten()
+                .any(|transition| transition.predicate().requires_structural())
+        {
+            return Err(SelectorParseError::new(
+                "selector requires streaming engine support",
+                0,
+            ));
+        }
+        Ok(())
+    }
+
     pub fn first(
         query: &'query str,
         save: Save,
     ) -> Result<QueryBuilder<'query>, SelectorParseError> {
         let paths = Transition::generate_transition_paths_from_string(query)?;
+        Self::require_legacy_engine_compatible_paths(&paths)?;
         let mut states = Vec::new();
         let mut alternatives = Vec::new();
         for path in paths {
@@ -461,6 +479,7 @@ impl<'query> Query<'query> {
 
     pub fn all(query: &'query str, save: Save) -> Result<QueryBuilder<'query>, SelectorParseError> {
         let paths = Transition::generate_transition_paths_from_string(query)?;
+        Self::require_legacy_engine_compatible_paths(&paths)?;
         let mut states = Vec::new();
         let mut alternatives = Vec::new();
         for path in paths {
@@ -625,7 +644,7 @@ mod tests {
 
     #[test]
     fn position_back_uses_the_last_state_in_the_parent_alternative() {
-        let query = Query::all("article > p, div", Save::none())
+        let query = Query::all("article > p", Save::none())
             .unwrap()
             .all("span", Save::none())
             .unwrap()
@@ -639,5 +658,21 @@ mod tests {
 
         assert_eq!(position.selection, QuerySectionId(0));
         assert_eq!(position.state, TransitionId(1));
+    }
+
+    #[test]
+    fn public_query_builder_gates_selectors_until_engine_support_lands() {
+        for selector in ["h1, h2", "li:first-child", "li:nth-child(2 of .hit)"] {
+            let error = Query::all(selector, Save::none()).unwrap_err();
+            assert_eq!(
+                error.message(),
+                "selector requires streaming engine support"
+            );
+        }
+
+        assert!(
+            Transition::generate_transition_paths_from_string("h1, h2").is_ok(),
+            "the IR remains available to the engine implementation layer"
+        );
     }
 }
