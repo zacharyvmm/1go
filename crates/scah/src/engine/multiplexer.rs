@@ -2,6 +2,7 @@ use super::attribute_interest::AttributeInterest;
 use super::executor::QueryExecutor;
 use crate::__private::ascii_case_insensitive_hash;
 use crate::Position;
+use crate::StructuralMatchContext;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
@@ -68,6 +69,7 @@ type Runners<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MultiplexerFeatures {
     pub(crate) has_sibling_queries: bool,
+    pub(crate) has_structural_queries: bool,
     pub(crate) has_retiring_runners: bool,
 }
 
@@ -114,6 +116,7 @@ where
             .iter()
             .fold(MultiplexerFeatures::default(), |mut aggregate, query| {
                 aggregate.has_sibling_queries |= query.has_sibling_combinator();
+                aggregate.has_structural_queries |= query.has_structural_queries();
                 aggregate.has_retiring_runners |= query.exit_at_section_end().is_some();
                 aggregate
             })
@@ -233,6 +236,9 @@ where
                     preflight.runner_indices.push(runner_index);
                 }
             }
+            if self.features.has_structural_queries {
+                preflight.attribute_interest.require_all();
+            }
             return;
         }
 
@@ -246,6 +252,9 @@ where
                 preflight.runner_indices.push(runner_index);
             }
         }
+        if self.features.has_structural_queries {
+            preflight.attribute_interest.require_all();
+        }
     }
 
     #[inline]
@@ -253,8 +262,21 @@ where
         self.features
     }
 
+    pub(crate) fn structural_filters(&self) -> Vec<*const ()> {
+        let mut filters = Vec::new();
+        for runner in &self.runners {
+            for filter in runner.query.structural_filters() {
+                if !filters.iter().any(|seen| *seen == filter) {
+                    filters.push(filter);
+                }
+            }
+        }
+        filters
+    }
+
     // Preserve the ordinary executor's inlining across this thin dispatch
     // layer; otherwise x86-64 keeps the wrapper in the parser hot loop.
+    #[allow(dead_code)]
     #[inline(always)]
     pub(crate) fn next_plain_into(
         &mut self,
@@ -263,6 +285,25 @@ where
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
+    ) {
+        self.next_plain_into_with_context(
+            xhtml_element,
+            position,
+            store,
+            save_hits,
+            preflight,
+            None,
+        );
+    }
+
+    pub(crate) fn next_plain_into_with_context(
+        &mut self,
+        xhtml_element: &XHtmlElement<'html>,
+        position: &DocumentPosition,
+        store: &mut Store<'html, 'query>,
+        save_hits: &mut Vec<SaveHit>,
+        preflight: &ElementPreflight<'query>,
+        structural: Option<StructuralMatchContext>,
     ) {
         debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
@@ -273,6 +314,7 @@ where
                 position,
                 store,
                 save_hits,
+                structural,
             );
         }
         #[cfg(any(debug_assertions, test))]
@@ -282,6 +324,7 @@ where
     }
 
     #[inline(never)]
+    #[allow(dead_code)]
     pub(crate) fn next_with_siblings_into(
         &mut self,
         xhtml_element: &XHtmlElement<'html>,
@@ -290,6 +333,27 @@ where
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
         sibling_callbacks: &mut Vec<SiblingCallback>,
+    ) {
+        self.next_with_siblings_into_with_context(
+            xhtml_element,
+            position,
+            store,
+            save_hits,
+            preflight,
+            sibling_callbacks,
+            None,
+        );
+    }
+
+    pub(crate) fn next_with_siblings_into_with_context(
+        &mut self,
+        xhtml_element: &XHtmlElement<'html>,
+        position: &DocumentPosition,
+        store: &mut Store<'html, 'query>,
+        save_hits: &mut Vec<SaveHit>,
+        preflight: &ElementPreflight<'query>,
+        sibling_callbacks: &mut Vec<SiblingCallback>,
+        structural: Option<StructuralMatchContext>,
     ) {
         debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
@@ -302,6 +366,7 @@ where
                 store,
                 save_hits,
                 sibling_callbacks,
+                structural,
             );
         }
         #[cfg(any(debug_assertions, test))]

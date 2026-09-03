@@ -4,8 +4,8 @@ use super::open_elements::{OpenElement, OpenElementStack, SavedElement};
 use super::tag::TagFlags;
 use crate::Attribute;
 use crate::ParseError;
-use crate::QuerySpec;
 use crate::Reader;
+use crate::StructuralMatchContext;
 use crate::XHtmlElement;
 use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
@@ -15,6 +15,7 @@ use crate::engine::multiplexer::{
     DocumentPosition, ElementPreflight, QueryMultiplexer, SaveHit, SiblingCallback,
 };
 use crate::store::Store;
+use crate::{LocalSelectorList, QuerySpec};
 
 #[derive(Default)]
 struct ParserTempState<'html, 'query> {
@@ -27,6 +28,82 @@ struct ParserTempState<'html, 'query> {
     preflight: ElementPreflight<'query>,
 
     sibling: Option<Box<SiblingParserState>>,
+    structural: Option<Box<StructuralParserState<'html>>>,
+}
+
+struct StructuralParserState<'html> {
+    child_counts: Vec<u32>,
+    type_counts: Vec<Vec<(&'html str, u32)>>,
+    filters: Vec<(*const (), Vec<u32>)>,
+    root_seen: bool,
+}
+
+impl<'html> StructuralParserState<'html> {
+    fn open(
+        &mut self,
+        name: &'html str,
+        persistent: bool,
+        element: &XHtmlElement<'html>,
+    ) -> StructuralMatchContext {
+        let is_root = !self.root_seen;
+        self.root_seen = true;
+        let child_index = if let Some(count) = self.child_counts.last_mut() {
+            *count = count.saturating_add(1);
+            *count
+        } else {
+            1
+        };
+        let type_index = if let Some(counts) = self.type_counts.last_mut() {
+            if let Some((_, count)) = counts
+                .iter_mut()
+                .find(|(child_name, _)| child_name.eq_ignore_ascii_case(name))
+            {
+                *count = count.saturating_add(1);
+                *count
+            } else {
+                counts.push((name, 1));
+                1
+            }
+        } else {
+            1
+        };
+        let mut filtered_child_indices = [0; 8];
+        let mut filtered_child_keys = [0; 8];
+        for (slot, (filter, counts)) in self.filters.iter_mut().enumerate().take(8) {
+            filtered_child_keys[slot] = *filter as usize;
+            // The pointers originate in the query slice and outlive this parser.
+            if unsafe { (&*(*filter as *const LocalSelectorList<'static>)).as_slice() }
+                .iter()
+                .any(|predicate| predicate.matches_element(element))
+            {
+                let parent_count = counts.last_mut().expect("filter parent count");
+                *parent_count = parent_count.saturating_add(1);
+                filtered_child_indices[slot] = *parent_count;
+            }
+        }
+        if persistent {
+            self.child_counts.push(0);
+            self.type_counts.push(Vec::new());
+            for (_, counts) in &mut self.filters {
+                counts.push(0);
+            }
+        }
+        StructuralMatchContext {
+            child_index,
+            type_index,
+            filtered_child_indices,
+            filtered_child_keys,
+            is_root,
+        }
+    }
+
+    fn close(&mut self) {
+        self.child_counts.pop();
+        self.type_counts.pop();
+        for (_, counts) in &mut self.filters {
+            counts.pop();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -93,7 +170,9 @@ where
         let capture_text_content = selectors.requires_text_content();
         let persist_attributes = selectors.requires_attribute_storage();
         let parse_attributes = selectors.requires_attribute_parsing();
-        let has_sibling_queries = selectors.features().has_sibling_queries;
+        let features = selectors.features();
+        let has_sibling_queries = features.has_sibling_queries;
+        let structural_filters = selectors.structural_filters();
         let store = capacity.map_or_else(Store::default, |capacity| {
             Store::with_capacity_requirements(
                 capacity,
@@ -117,6 +196,19 @@ where
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState {
                 sibling: has_sibling_queries.then(Box::default),
+                structural: features.has_structural_queries.then(|| {
+                    Box::new(StructuralParserState {
+                        // Keep a virtual document parent so fragment roots
+                        // participate in ordinal selectors consistently.
+                        child_counts: vec![0],
+                        type_counts: vec![Vec::new()],
+                        filters: structural_filters
+                            .into_iter()
+                            .map(|filter| (filter, vec![0]))
+                            .collect(),
+                        root_seen: false,
+                    })
+                }),
                 ..ParserTempState::default()
             },
             capture_text_content,
@@ -394,6 +486,10 @@ where
                     }
                     self.position.element_depth = self.open_elements.depth();
                 }
+                let structural =
+                    self.temp_state.structural.as_deref_mut().map(|state| {
+                        state.open(self.element.name, !is_self_closing, &self.element)
+                    });
 
                 crate::scah_trace!(
                     self.store,
@@ -415,21 +511,23 @@ where
                     let sibling = sibling
                         .as_deref_mut()
                         .expect("sibling parser state requires sibling queries");
-                    self.selectors.next_with_siblings_into(
+                    self.selectors.next_with_siblings_into_with_context(
                         &self.element,
                         &self.position,
                         &mut self.store,
                         save_hits,
                         preflight,
                         &mut sibling.pending,
+                        structural,
                     );
                 } else {
-                    self.selectors.next_plain_into(
+                    self.selectors.next_plain_into_with_context(
                         &self.element,
                         &self.position,
                         &mut self.store,
                         &mut self.temp_state.save_hits,
                         &self.temp_state.preflight,
+                        structural,
                     );
                 }
                 if self.persist_attributes {
@@ -548,6 +646,9 @@ where
         let saved_range = OpenElementStack::saved_range(&open_element);
         debug_assert_eq!(saved_range.end, self.temp_state.saved_elements.len());
         self.finalize_open_element(&open_element, reader);
+        if let Some(structural) = self.temp_state.structural.as_deref_mut() {
+            structural.close();
+        }
         self.temp_state.saved_elements.truncate(saved_range.start);
         self.position.element_depth = close_depth;
         let early_exit = self.selectors.back::<RETIREMENT>(

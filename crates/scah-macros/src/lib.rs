@@ -468,7 +468,8 @@ fn transition_tokens(index: usize, transition: &Transition<'_>) -> proc_macro2::
     let predicate = predicate_tokens(index, transition.predicate());
     let name = option_str_tokens(transition.predicate().name);
     let needs_id = transition.metadata().needs_id();
-    let needs_class = transition.metadata().needs_class();
+    let needs_class =
+        transition.metadata().needs_class() || predicate_needs_class(transition.predicate());
     let names_ident = syn::Ident::new(
         &format!("__SCAH_ATTRIBUTE_NAMES_{index}"),
         Span::call_site(),
@@ -485,6 +486,36 @@ fn transition_tokens(index: usize, transition: &Transition<'_>) -> proc_macro2::
             ),
         )
     }
+}
+
+fn predicate_needs_class(predicate: &ElementPredicate<'_>) -> bool {
+    if !predicate.classes.as_slice().is_empty()
+        || predicate
+            .attributes
+            .as_slice()
+            .iter()
+            .any(|attribute| attribute.name.eq_ignore_ascii_case("class"))
+    {
+        return true;
+    }
+    predicate
+        .structural
+        .as_slice()
+        .iter()
+        .any(|structural| match structural {
+            StructuralPredicate::NthChildOf(_, filter) => {
+                filter.as_slice().iter().any(predicate_needs_class)
+            }
+            _ => false,
+        })
+        || predicate.logical.as_slice().iter().any(|logical| {
+            let selectors = match logical {
+                LocalLogicalPredicate::Not(selectors) | LocalLogicalPredicate::Any(selectors) => {
+                    selectors
+                }
+            };
+            selectors.as_slice().iter().any(predicate_needs_class)
+        })
 }
 
 fn predicate_tokens(index: usize, predicate: &ElementPredicate<'_>) -> proc_macro2::TokenStream {

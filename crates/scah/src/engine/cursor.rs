@@ -548,8 +548,21 @@ impl<'query> ScopedCursor {
         if !self.is_active() {
             return false;
         }
+        self.next_with_context(tree, depth, element, None)
+    }
+
+    pub fn next_with_context<'html, Q: QuerySpec<'query>>(
+        &self,
+        tree: &Q,
+        depth: super::DepthSize,
+        element: &XHtmlElement<'html>,
+        structural: Option<crate::StructuralMatchContext>,
+    ) -> bool {
+        if !self.is_active() {
+            return false;
+        }
         let fsm = tree.get_transition(self.position.state);
-        fsm.next(element, depth, self.match_base_depth())
+        fsm.next_with_context(element, depth, self.match_base_depth(), structural)
     }
 
     pub fn get_position(&self) -> &Position {
@@ -578,11 +591,7 @@ impl<'query> ScopedCursor {
                 selection: self.position.selection,
             });
         } else {
-            let mut child = self.position.next_child(tree);
-            while let Some(c) = child {
-                positions.push(c);
-                child = c.next_sibling(tree);
-            }
+            positions.extend(tree.child_positions(&self.position));
         }
         positions
     }
