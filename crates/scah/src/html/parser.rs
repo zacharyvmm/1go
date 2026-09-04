@@ -74,9 +74,8 @@ impl<'html, 'query> StructuralParserState<'html, 'query> {
                 1
             }
         });
-        let mut filtered_child_indices = SmallVec::with_capacity(self.filters.len());
+        let mut filtered_child_indices = SmallVec::new();
         for (filter, counts) in &mut self.filters {
-            let mut filtered_child_index = 0;
             // The pointers originate in the query slice and outlive this parser.
             if unsafe { (&*(*filter as *const LocalSelectorList<'static>)).as_slice() }
                 .iter()
@@ -84,9 +83,8 @@ impl<'html, 'query> StructuralParserState<'html, 'query> {
             {
                 let parent_count = counts.last_mut().expect("filter parent count");
                 *parent_count = parent_count.saturating_add(1);
-                filtered_child_index = *parent_count;
+                filtered_child_indices.push((*filter as usize, *parent_count));
             }
-            filtered_child_indices.push((*filter as usize, filtered_child_index));
         }
         if persistent {
             if let Some(counts) = &mut self.child_counts {
