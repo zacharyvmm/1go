@@ -8,7 +8,8 @@ export declare class Element {
   getAttribute(key: string): string | null
   get attributes(): object
   get innerHtml(): string | null
-  get textContent(): string | null
+  get rawText(): string | null
+  get text(): string | null
   get(query: string): Array<Element>
 }
 export type JsElement = Element
@@ -49,7 +50,8 @@ export interface JsonElement {
   class?: string
   attributes: object
   innerHtml?: string
-  textContent?: string
+  rawText?: string
+  text?: string
 }
 
 export declare function parse(html: string, queries: Array<JsQuery>): Store
@@ -58,4 +60,6 @@ export interface Save {
   innerHtml?: boolean
   textContent?: boolean
   attributes?: boolean
+  rawText?: boolean
+  text?: boolean
 }
