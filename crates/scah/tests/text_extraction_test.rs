@@ -290,6 +290,25 @@ fn pre_normalizes_crlf_and_cr() {
 }
 
 #[test]
+fn preformatted_initial_newline_distinguishes_source_and_reference_cr() {
+    for tag in ["pre", "textarea"] {
+        for (source, expected) in [
+            ("\rX", "X"),
+            ("\r\n&amp;X", "&X"),
+            ("&#10;X", "X"),
+            ("&#13;X", "\rX"),
+        ] {
+            let html = format!("<{tag}>{source}</{tag}>");
+            assert_eq!(
+                text_of(&html, tag),
+                expected,
+                "tag={tag}, source={source:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn parent_of_pre_may_trim_outer_edges() {
     let html = "<section><pre>\n  A\n</pre></section>";
     let queries = &[

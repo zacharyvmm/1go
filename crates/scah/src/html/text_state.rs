@@ -1,4 +1,7 @@
-use super::entities::{contains_ampersand, decode_character_references};
+use super::entities::{
+    contains_ampersand, decode_character_references,
+    decode_character_references_normalizing_source_newlines,
+};
 use super::text_edge::TextEdgePolicy;
 use crate::engine::DepthSize;
 use crate::store::TextTape;
@@ -310,7 +313,7 @@ impl ParserTextState {
 
     fn write_preformatted_source(&mut self, tape: &mut TextTape, source: &str, depth: DepthSize) {
         if !contains_ampersand(source) {
-            self.write_preformatted_decoded(tape, source.as_bytes(), depth);
+            self.write_preformatted_bytes::<true>(tape, source.as_bytes(), depth);
             return;
         }
 
@@ -319,24 +322,24 @@ impl ParserTextState {
             self.path_stats.decoded_fragments += 1;
         }
         self.decode_scratch.clear();
-        decode_character_references(source, &mut self.decode_scratch);
+        decode_character_references_normalizing_source_newlines(source, &mut self.decode_scratch);
         let decoded = std::mem::take(&mut self.decode_scratch);
-        self.write_preformatted_decoded(tape, &decoded, depth);
+        self.write_preformatted_bytes::<false>(tape, &decoded, depth);
         self.decode_scratch = decoded;
     }
 
-    fn write_preformatted_decoded(
+    fn write_preformatted_bytes<const NORMALIZE_SOURCE_NEWLINES: bool>(
         &mut self,
         tape: &mut TextTape,
-        decoded: &[u8],
+        bytes: &[u8],
         depth: DepthSize,
     ) {
         let mut i = 0;
-        while i < decoded.len() {
-            let byte = decoded[i];
+        while i < bytes.len() {
+            let byte = bytes[i];
 
-            if byte == b'\r' {
-                let next = decoded.get(i + 1).copied();
+            if NORMALIZE_SOURCE_NEWLINES && byte == b'\r' {
+                let next = bytes.get(i + 1).copied();
                 if next == Some(b'\n') {
                     i += 2;
                 } else {
@@ -364,20 +367,20 @@ impl ParserTextState {
             self.initial_newline_depth = None;
 
             let run_start = i;
-            while i < decoded.len() {
-                let b = decoded[i];
-                if b == b'\r' || b == b'\n' {
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b == b'\n' || (NORMALIZE_SOURCE_NEWLINES && b == b'\r') {
                     break;
                 }
                 i += utf8_char_len(b);
-                if i > decoded.len() {
-                    i = decoded.len();
+                if i > bytes.len() {
+                    i = bytes.len();
                     break;
                 }
             }
 
             self.flush_pending(tape);
-            tape.push_bytes(&decoded[run_start..i]);
+            tape.push_bytes(&bytes[run_start..i]);
         }
     }
 

@@ -44,6 +44,27 @@ pub(crate) fn contains_ampersand(source: &str) -> bool {
 #[cold]
 #[inline(never)]
 pub(crate) fn decode_character_references(source: &str, out: &mut Vec<u8>) {
+    decode_character_references_impl::<false>(source, out);
+}
+
+/// Decode character references after applying HTML source-newline normalization.
+///
+/// Only CR and CRLF bytes copied from `source` become LF. A CR produced by a
+/// numeric character reference remains CR because character references are
+/// resolved after source preprocessing.
+#[cold]
+#[inline(never)]
+pub(crate) fn decode_character_references_normalizing_source_newlines(
+    source: &str,
+    out: &mut Vec<u8>,
+) {
+    decode_character_references_impl::<true>(source, out);
+}
+
+fn decode_character_references_impl<const NORMALIZE_SOURCE_NEWLINES: bool>(
+    source: &str,
+    out: &mut Vec<u8>,
+) {
     let bytes = source.as_bytes();
     let mut copied_through = 0;
 
@@ -52,7 +73,7 @@ pub(crate) fn decode_character_references(source: &str, out: &mut Vec<u8>) {
         .position(|&byte| byte == b'&')
     {
         let ampersand = copied_through + relative_ampersand;
-        out.extend_from_slice(&bytes[copied_through..ampersand]);
+        append_source::<NORMALIZE_SOURCE_NEWLINES>(&bytes[copied_through..ampersand], out);
 
         match decode_after_ampersand(&bytes[ampersand + 1..], out) {
             Some(consumed) => copied_through = ampersand + 1 + consumed,
@@ -63,7 +84,30 @@ pub(crate) fn decode_character_references(source: &str, out: &mut Vec<u8>) {
         }
     }
 
-    out.extend_from_slice(&bytes[copied_through..]);
+    append_source::<NORMALIZE_SOURCE_NEWLINES>(&bytes[copied_through..], out);
+}
+
+#[inline]
+fn append_source<const NORMALIZE_SOURCE_NEWLINES: bool>(source: &[u8], out: &mut Vec<u8>) {
+    if !NORMALIZE_SOURCE_NEWLINES || !source.contains(&b'\r') {
+        out.extend_from_slice(source);
+        return;
+    }
+
+    let mut copied_through = 0;
+    while let Some(relative_cr) = source[copied_through..]
+        .iter()
+        .position(|&byte| byte == b'\r')
+    {
+        let cr = copied_through + relative_cr;
+        out.extend_from_slice(&source[copied_through..cr]);
+        out.push(b'\n');
+        copied_through = cr + 1;
+        if source.get(copied_through) == Some(&b'\n') {
+            copied_through += 1;
+        }
+    }
+    out.extend_from_slice(&source[copied_through..]);
 }
 
 /// Decode the bytes following an ampersand and return their consumed length.
@@ -208,7 +252,10 @@ fn append_code_point(character: char, out: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{contains_ampersand, decode_character_references};
+    use super::{
+        contains_ampersand, decode_character_references,
+        decode_character_references_normalizing_source_newlines,
+    };
 
     fn decode(source: &str) -> String {
         let mut output = Vec::new();
@@ -240,6 +287,16 @@ mod tests {
     #[test]
     fn decodes_decimal_and_hex_numeric_references() {
         assert_eq!(decode("&#65; &#65 &#x41; &#X41"), "A A A A");
+    }
+
+    #[test]
+    fn source_newline_normalization_preserves_reference_cr() {
+        let mut output = Vec::new();
+        decode_character_references_normalizing_source_newlines(
+            "\r\n&amp;\r&#13;&#10;",
+            &mut output,
+        );
+        assert_eq!(String::from_utf8(output).unwrap(), "\n&\n\r\n");
     }
 
     #[test]
