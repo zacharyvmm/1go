@@ -36,7 +36,7 @@ impl JsElement {
             class: element.class.map(|s| s.to_string()),
             attributes: self.attributes(env)?,
             inner_html: element.inner_html.map(|s| s.to_string()),
-            text_content: element.text_content(&self.store).map(|s| s.to_string()),
+            text_content: element.text(&self.store).map(|s| s.to_string()),
         };
 
         Ok(json)
@@ -98,7 +98,7 @@ impl JsElement {
         self.store
             .elements
             .get(self.id.index())
-            .and_then(|e| e.text_content(&self.store))
+            .and_then(|e| e.text(&self.store))
     }
 
     #[napi]

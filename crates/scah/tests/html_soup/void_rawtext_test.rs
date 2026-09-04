@@ -8,10 +8,10 @@ fn void_elements_do_not_capture_following_text() {
 
     assert_eq!(elements(&store, "br").len(), 1);
     assert_eq!(elements(&store, "img").len(), 1);
-    assert_eq!(texts(&store, "br"), vec![None]);
-    assert_eq!(texts(&store, "img"), vec![None]);
+    assert_eq!(texts(&store, "br"), vec![Some("")]);
+    assert_eq!(texts(&store, "img"), vec![Some("")]);
     assert_eq!(inner_htmls(&store, "img"), vec![None]);
-    assert_eq!(texts(&store, "div"), vec![Some("Line1 Line2 Line3")]);
+    assert_eq!(texts(&store, "div"), vec![Some("Line1\nLine2Line3")]);
     assert_eq!(elements(&store, "div > br").len(), 1);
     assert_eq!(elements(&store, "div > img").len(), 1);
 }
@@ -24,7 +24,7 @@ fn void_syntax_and_plain_void_behavior_match() {
     assert_eq!(elements(&store, "input").len(), 2);
     assert_eq!(elements(&store, "form > input").len(), 2);
     assert_eq!(attr(&store, "input", "id"), vec![None, None]);
-    assert_eq!(texts(&store, "input"), vec![None, None]);
+    assert_eq!(texts(&store, "input"), vec![Some(""), Some("")]);
     assert_eq!(inner_htmls(&store, "input"), vec![None, None]);
 }
 
@@ -34,8 +34,8 @@ fn html_tag_and_id_class_attribute_names_are_ascii_case_insensitive() {
     let store = parse_with_saves(
         html,
         &[
-            ("div#hero.card", Save::only_text_content()),
-            ("DIV#hero.featured", Save::only_text_content()),
+            ("div#hero.card", Save::only_text()),
+            ("DIV#hero.featured", Save::only_text()),
         ],
     );
 
@@ -48,9 +48,9 @@ fn mixed_case_void_elements_do_not_capture_following_text() {
     let html = "<DIV>before<Br>middle<IMg src='x'>after</DIV>";
     let store = parse_all(html, &["div", "br", "img"]);
 
-    assert_eq!(texts(&store, "br"), vec![None]);
-    assert_eq!(texts(&store, "img"), vec![None]);
-    assert_eq!(texts(&store, "div"), vec![Some("before middle after")]);
+    assert_eq!(texts(&store, "br"), vec![Some("")]);
+    assert_eq!(texts(&store, "img"), vec![Some("")]);
+    assert_eq!(texts(&store, "div"), vec![Some("before\nmiddleafter")]);
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn raw_text_textarea_is_not_parsed_as_markup() {
     let store = parse_all(html, &["a"]);
     let links = elements(&store, "a");
     assert_eq!(links.len(), 1);
-    assert_eq!(links[0].text_content(&store), Some("real"));
+    assert_eq!(links[0].text(&store), Some("real"));
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn raw_text_title_is_not_parsed_as_markup() {
     let store = parse_all(html, &["a"]);
     let links = elements(&store, "a");
     assert_eq!(links.len(), 1);
-    assert_eq!(links[0].text_content(&store), Some("real"));
+    assert_eq!(links[0].text(&store), Some("real"));
 }
 
 #[test]
@@ -171,7 +171,11 @@ fn raw_text_close_tag_tolerates_trailing_garbage_after_whitespace() {
     let html = r#"<div><style>body { color: red; }</style ignored><a href="tail">tail</a></div>"#;
     let store = parse_all(html, &["style", "div > a", "style > a"]);
 
-    assert_eq!(texts(&store, "style"), vec![Some("body { color: red; }")]);
+    assert_eq!(
+        elements(&store, "style")[0].raw_text(&store),
+        Some("body { color: red; }")
+    );
+    assert_eq!(texts(&store, "style"), vec![Some("")]);
     assert_eq!(elements(&store, "div > a").len(), 1);
     assert_eq!(attr(&store, "div > a", "href"), vec![Some("tail")]);
     assert!(
@@ -244,7 +248,7 @@ fn non_void_trailing_solidus_is_not_self_closing() {
     let divs: Vec<_> = store.get("div").unwrap().collect();
     assert_eq!(divs.len(), 1);
     assert_eq!(
-        divs[0].text_content(&store),
+        divs[0].text(&store),
         Some("after"),
         "non-void <div /> must capture trailing content as text"
     );
@@ -269,7 +273,7 @@ fn unquoted_value_trailing_solidus_is_preserved() {
         "a solidus inside an unquoted value must be preserved verbatim"
     );
     assert_eq!(
-        divs[0].text_content(&store),
+        divs[0].text(&store),
         Some("after"),
         "non-void <div> keeps capturing content after an unquoted /value/"
     );
@@ -291,8 +295,8 @@ fn void_elements_do_not_capture_trailing_text_variants() {
     let store = parse_all(html, &["br", "img", "div"]);
     assert_eq!(elements(&store, "br").len(), 1);
     assert_eq!(elements(&store, "img").len(), 1);
-    assert_eq!(texts(&store, "br"), vec![None]);
-    assert_eq!(texts(&store, "img"), vec![None]);
-    assert_eq!(texts(&store, "div"), vec![Some("Line1 Line2 Line3")]);
+    assert_eq!(texts(&store, "br"), vec![Some("")]);
+    assert_eq!(texts(&store, "img"), vec![Some("")]);
+    assert_eq!(texts(&store, "div"), vec![Some("Line1\nLine2Line3")]);
     assert_eq!(attr(&store, "img", "src"), vec![Some("x")]);
 }

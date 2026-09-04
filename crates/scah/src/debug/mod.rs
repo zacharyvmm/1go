@@ -68,7 +68,8 @@ pub enum TraceEvent<'html, 'query> {
         element_count: usize,
         query_node_count: usize,
         attribute_count: usize,
-        text_content_len: usize,
+        raw_text_len: usize,
+        text_len: usize,
     },
     OpenTag {
         tag: &'html str,
@@ -129,13 +130,15 @@ pub enum TraceEvent<'html, 'query> {
         element_id: ElementId,
         parent_id: ElementId,
         save_inner_html: bool,
-        save_text_content: bool,
+        save_raw_text: bool,
+        save_text: bool,
     },
     ContentFinalized {
         element_id: ElementId,
         tag: &'html str,
         has_inner_html: bool,
-        has_text_content: bool,
+        has_raw_text: bool,
+        has_text: bool,
     },
     EarlyExit {
         runner_index: usize,
@@ -207,11 +210,12 @@ impl<'html, 'query> TraceEvent<'html, 'query> {
                 element_count,
                 query_node_count,
                 attribute_count,
-                text_content_len,
+                raw_text_len,
+                text_len,
             } => {
                 write!(
                     output,
-                    "\"event\":\"ParseFinished\",\"element_count\":{element_count},\"query_node_count\":{query_node_count},\"attribute_count\":{attribute_count},\"text_content_len\":{text_content_len}"
+                    "\"event\":\"ParseFinished\",\"element_count\":{element_count},\"query_node_count\":{query_node_count},\"attribute_count\":{attribute_count},\"raw_text_len\":{raw_text_len},\"text_len\":{text_len}"
                 )
                 .unwrap();
             }
@@ -330,11 +334,12 @@ impl<'html, 'query> TraceEvent<'html, 'query> {
                 element_id,
                 parent_id,
                 save_inner_html,
-                save_text_content,
+                save_raw_text,
+                save_text,
             } => {
                 write!(
                     output,
-                    "\"event\":\"ElementSaved\",\"runner_index\":{runner_index},\"selector\":{},\"element\":{},\"element_id\":{},\"parent_id\":{},\"save_inner_html\":{save_inner_html},\"save_text_content\":{save_text_content}",
+                    "\"event\":\"ElementSaved\",\"runner_index\":{runner_index},\"selector\":{},\"element\":{},\"element_id\":{},\"parent_id\":{},\"save_inner_html\":{save_inner_html},\"save_raw_text\":{save_raw_text},\"save_text\":{save_text}",
                     JsonString(selector),
                     JsonString(element),
                     element_id.index(),
@@ -346,11 +351,12 @@ impl<'html, 'query> TraceEvent<'html, 'query> {
                 element_id,
                 tag,
                 has_inner_html,
-                has_text_content,
+                has_raw_text,
+                has_text,
             } => {
                 write!(
                     output,
-                    "\"event\":\"ContentFinalized\",\"element_id\":{},\"tag\":{},\"has_inner_html\":{has_inner_html},\"has_text_content\":{has_text_content}",
+                    "\"event\":\"ContentFinalized\",\"element_id\":{},\"tag\":{},\"has_inner_html\":{has_inner_html},\"has_raw_text\":{has_raw_text},\"has_text\":{has_text}",
                     element_id.index(),
                     JsonString(tag)
                 )
@@ -437,7 +443,8 @@ mod tests {
             element_id: ElementId::from(1),
             parent_id: ElementId::from(0),
             save_inner_html: true,
-            save_text_content: true,
+            save_raw_text: true,
+            save_text: true,
         });
 
         let jsonl = trace.to_jsonl();

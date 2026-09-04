@@ -3,11 +3,71 @@ use std::ops::{Deref, Range};
 use super::arena::{Arena, Node, id};
 use super::{Attribute, Store};
 
+/// Lazily allocated, mode-specific text ranges indexed by element ID.
+///
+/// The raw and normalized vectors grow independently. A query that requests
+/// only one representation never pays for range slots belonging to the other.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ElementTextRanges {
+    raw_text: Option<Vec<Option<Range<usize>>>>,
+    text: Option<Vec<Option<Range<usize>>>>,
+}
+
+impl ElementTextRanges {
+    fn set_range(
+        ranges: &mut Option<Vec<Option<Range<usize>>>>,
+        element_id: id::ElementId,
+        range: Range<usize>,
+    ) {
+        let ranges = ranges.get_or_insert_default();
+        let required_len = element_id.index() + 1;
+        if ranges.len() < required_len {
+            ranges.resize_with(required_len, || None);
+        }
+        ranges[element_id.index()] = Some(range);
+    }
+
+    pub(crate) fn set_raw_text(&mut self, element_id: id::ElementId, range: Range<usize>) {
+        Self::set_range(&mut self.raw_text, element_id, range);
+    }
+
+    pub(crate) fn set_text(&mut self, element_id: id::ElementId, range: Range<usize>) {
+        Self::set_range(&mut self.text, element_id, range);
+    }
+
+    pub(crate) fn raw_text(&self, element_id: id::ElementId) -> Option<&Range<usize>> {
+        self.raw_text
+            .as_ref()
+            .and_then(|ranges| ranges.get(element_id.index()))
+            .and_then(Option::as_ref)
+    }
+
+    pub(crate) fn text(&self, element_id: id::ElementId) -> Option<&Range<usize>> {
+        self.text
+            .as_ref()
+            .and_then(|ranges| ranges.get(element_id.index()))
+            .and_then(Option::as_ref)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracks_raw_text(&self) -> bool {
+        self.raw_text.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracks_text(&self) -> bool {
+        self.text.is_some()
+    }
+}
+
 /// A matched HTML element stored in the [`Store`](crate::Store).
 ///
 /// Each `Element` represents one HTML tag that was captured during parsing.
 /// It holds zero-copy `&str` references into the original HTML source for
 /// its name, class, id, and inner HTML.
+///
+/// Text ranges live in a store-owned sidecar and are accessed through
+/// [`Element::raw_text`] / [`Element::text`] (not as fields on this struct).
 ///
 /// # Accessing Data
 ///
@@ -17,7 +77,8 @@ use super::{Attribute, Store};
 /// | Class | `element.class` |
 /// | ID | `element.id` |
 /// | Inner HTML | `element.inner_html` |
-/// | Text content | [`element.text_content(&store)`](Element::text_content) |
+/// | Text content | [`element.text(&store)`](Element::text) |
+/// | Raw text | [`element.raw_text(&store)`](Element::raw_text) |
 /// | All attributes | [`element.attributes(&store)`](Element::attributes) |
 /// | Single attribute | [`element.attribute(&store, "href")`](Element::attribute) |
 /// | Child query results | [`element.get(&store, "selector")`](Element::get) |
@@ -32,9 +93,6 @@ pub struct Element<'html> {
     /// The raw HTML between the element's opening and closing tags.
     /// Only populated when [`Save::inner_html`](crate::Save::inner_html) was `true`.
     pub inner_html: Option<&'html str>,
-    /// Internal range into the shared text-content buffer.
-    /// Use [`Element::text_content`] to get the actual `&str`.
-    pub text_content: Option<Range<usize>>,
     /// Internal range into the attribute arena.
     /// Use [`Element::attributes`] or [`Element::attribute`] instead.
     pub attributes: Option<Range<u32>>,
@@ -113,13 +171,40 @@ impl<'html> Element<'html> {
                 .and_then(|kv| kv.value)
         })
     }
-    /// Get the element's concatenated text content.
+    /// Get the element's source-preserving descendant text.
+    ///
+    /// Only populated when [`Save::raw_text`](crate::Save::raw_text) was `true`.
+    pub fn raw_text(&self, dom: &'html Store) -> Option<&'html str> {
+        let element_id = unsafe { dom.elements.index_of(self) };
+        dom.raw_text_range(element_id)
+            .map(|range| dom.text.raw_text.slice(range.clone()))
+    }
+
+    /// Get the element's normalized, human-readable descendant text.
     ///
     /// Returns the whitespace-trimmed, concatenated text nodes within
-    /// this element. Only populated when [`Save::text_content`](crate::Save::text_content) was `true`.
-    pub fn text_content(&self, dom: &'html Store) -> Option<&'html str> {
-        self.text_content
-            .as_ref()
-            .map(|range| dom.text_content.slice(range.clone()))
+    /// this element. Only populated when [`Save::text`](crate::Save::text) was `true`.
+    pub fn text(&self, dom: &'html Store) -> Option<&'html str> {
+        let element_id = unsafe { dom.elements.index_of(self) };
+        dom.text_range(element_id)
+            .map(|range| dom.text.text.slice(range.clone()))
+    }
+
+    /// Returns whether this element captured a raw-text range.
+    ///
+    /// Distinguishes uncaptured content (`false`) from captured empty
+    /// content (`true` with [`Element::raw_text`] returning `Some("")`).
+    pub fn has_raw_text(&self, dom: &Store<'_, '_>) -> bool {
+        let element_id = unsafe { dom.elements.index_of(self) };
+        dom.raw_text_range(element_id).is_some()
+    }
+
+    /// Returns whether this element captured a normalized-text range.
+    ///
+    /// Distinguishes uncaptured content (`false`) from captured empty
+    /// content (`true` with [`Element::text`] returning `Some("")`).
+    pub fn has_text(&self, dom: &Store<'_, '_>) -> bool {
+        let element_id = unsafe { dom.elements.index_of(self) };
+        dom.text_range(element_id).is_some()
     }
 }

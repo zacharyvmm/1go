@@ -334,8 +334,9 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
             ["Save", "all"] => Ok(Save::all()),
             ["Save", "none"] => Ok(Save::none()),
             ["Save", "only_inner_html"] => Ok(Save::only_inner_html()),
-            ["Save", "only_text_content"] => Ok(Save::only_text_content()),
             ["Save", "name_only"] => Ok(Save::name_only()),
+            ["Save", "only_raw_text"] => Ok(Save::only_raw_text()),
+            ["Save", "only_text"] => Ok(Save::only_text()),
             _ => Err(syn::Error::new_spanned(
                 expr,
                 "unsupported save expression in query!",
@@ -528,9 +529,10 @@ fn query_section_tokens(section: &QuerySection<'_>) -> proc_macro2::TokenStream 
 
 fn save_tokens(save: Save) -> proc_macro2::TokenStream {
     let inner_html = save.inner_html;
-    let text_content = save.text_content;
+    let raw_text = save.raw_text;
+    let text = save.text;
     let attributes = save.attributes;
-    quote! { ::scah::Save { inner_html: #inner_html, text_content: #text_content, attributes: #attributes } }
+    quote! { ::scah::Save { inner_html: #inner_html, raw_text: #raw_text, text: #text, attributes: #attributes } }
 }
 
 fn selection_kind_tokens(kind: SelectionKind) -> proc_macro2::TokenStream {
@@ -614,11 +616,10 @@ mod tests {
 
     #[test]
     fn accepts_without_attributes_save_modifier() {
-        let expression =
-            syn::parse_str::<Expr>("Save::only_text_content().without_attributes()").unwrap();
+        let expression = syn::parse_str::<Expr>("Save::only_text().without_attributes()").unwrap();
         assert_eq!(
             parse_save_expr(&expression).unwrap(),
-            scah_query_ir::Save::only_text_content().without_attributes()
+            scah_query_ir::Save::only_text().without_attributes()
         );
     }
 }

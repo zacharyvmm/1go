@@ -24,10 +24,10 @@ fn multiple_nested_unclosed_elements_finalize_in_order() {
     assert_eq!(elements(&store, "article").len(), 1);
     assert_eq!(elements(&store, "h1").len(), 1);
     assert_eq!(elements(&store, "p").len(), 1);
-    assert_eq!(texts(&store, "h1"), vec![Some("Title Body")]);
+    assert_eq!(texts(&store, "h1"), vec![Some("Title\nBody")]);
     assert_eq!(texts(&store, "p"), vec![Some("Body")]);
-    assert_eq!(texts(&store, "article"), vec![Some("Title Body")]);
-    assert_eq!(texts(&store, "main"), vec![Some("Title Body")]);
+    assert_eq!(texts(&store, "article"), vec![Some("Title\nBody")]);
+    assert_eq!(texts(&store, "main"), vec![Some("Title\nBody")]);
 }
 
 #[test]

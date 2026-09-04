@@ -4,13 +4,14 @@ use super::transition::Transition;
 
 /// Controls which pieces of content to capture for matched elements.
 ///
-/// When an element matches a CSS selector, scah can optionally capture its
-/// **inner HTML** (the raw markup between the opening and closing tags) and/or
-/// its **text content** (the concatenated, whitespace-trimmed text nodes).
+/// When an element matches a CSS selector, scah can optionally capture:
+/// - **inner HTML** — raw markup between the opening and closing tags
+/// - **raw text** — source-preserving descendant text
+/// - **text** — normalized, human-readable descendant text
 ///
 /// Use the convenience constructors [`Save::all`], [`Save::none`],
-/// [`Save::only_inner_html`], and [`Save::only_text_content`] to create
-/// common configurations.
+/// [`Save::only_inner_html`], [`Save::only_raw_text`], and [`Save::only_text`]
+/// for common configurations.
 ///
 /// # Example
 ///
@@ -20,21 +21,28 @@ use super::transition::Transition;
 /// // Capture everything
 /// let save = Save::all();
 /// assert!(save.inner_html);
-/// assert!(save.text_content);
+/// assert!(save.raw_text);
+/// assert!(save.text);
 ///
-/// // Capture only text content (lighter weight)
-/// let save = Save::only_text_content();
+/// // Capture only normalized text (lighter weight)
+/// let save = Save::only_text();
 /// assert!(!save.inner_html);
-/// assert!(save.text_content);
+/// assert!(!save.raw_text);
+/// assert!(save.text);
 /// ```
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub struct Save {
     /// When `true`, the raw HTML between the element's opening and closing
     /// tags is stored as [`Element::inner_html`](crate::Element::inner_html).
     pub inner_html: bool,
-    /// When `true`, the concatenated text content of the element is stored
-    /// and retrievable via [`Element::text_content()`](crate::Element::text_content).
-    pub text_content: bool,
+    /// When `true`, source-preserving descendant text is stored and
+    /// retrievable via [`Element::raw_text()`](crate::Element::raw_text).
+    pub raw_text: bool,
+    /// When `true`, normalized human-readable descendant text is stored and
+    /// retrievable via [`Element::text()`](crate::Element::text).
+    ///
+    /// This is not layout-aware browser `innerText`.
+    pub text: bool,
     /// When `true`, the matched element's `id`, `class`, and generic
     /// attributes are retained in the result store.
     pub attributes: bool,
@@ -51,37 +59,51 @@ impl Save {
     pub fn only_inner_html() -> Self {
         Self {
             inner_html: true,
-            text_content: false,
+            raw_text: false,
+            text: false,
             attributes: true,
         }
     }
 
-    /// Capture only the text content of matched elements.
-    pub fn only_text_content() -> Self {
+    /// Capture only source-preserving descendant text.
+    pub fn only_raw_text() -> Self {
         Self {
             inner_html: false,
-            text_content: true,
+            raw_text: true,
+            text: false,
             attributes: true,
         }
     }
 
-    /// Capture both inner HTML and text content.
+    /// Capture only normalized, human-readable descendant text.
+    pub fn only_text() -> Self {
+        Self {
+            inner_html: false,
+            raw_text: false,
+            text: true,
+            attributes: true,
+        }
+    }
+
+    /// Capture inner HTML, raw text, and normalized text.
     pub fn all() -> Self {
         Self {
             inner_html: true,
-            text_content: true,
+            raw_text: true,
+            text: true,
             attributes: true,
         }
     }
 
-    /// Capture neither inner HTML nor text content.
+    /// Capture neither inner HTML nor text.
     ///
     /// The matched element's tag name, id, class, and attributes are still
     /// stored; only the heavier content extraction is skipped.
     pub fn none() -> Self {
         Self {
             inner_html: false,
-            text_content: false,
+            raw_text: false,
+            text: false,
             attributes: true,
         }
     }
@@ -91,7 +113,8 @@ impl Save {
     pub const fn name_only() -> Self {
         Self {
             inner_html: false,
-            text_content: false,
+            raw_text: false,
+            text: false,
             attributes: false,
         }
     }
@@ -135,7 +158,7 @@ pub enum SelectionKind {
 /// let query = Query::all("main > section", Save::all())?
 ///     .then(|ctx| Ok([
 ///         ctx.all("> a[href]", Save::all())?,
-///         ctx.all("div a", Save::only_text_content())?,
+///         ctx.all("div a", Save::only_text())?,
 ///     ]))?
 ///     .build();
 /// # Ok::<(), scah_query_ir::SelectorParseError>(())
@@ -264,7 +287,7 @@ impl<'query> QueryBuilder<'query> {
     ///
     /// let query = Query::all("article", Save::none())?
     ///     .then(|article| Ok([
-    ///         article.first("h1", Save::only_text_content())?,
+    ///         article.first("h1", Save::only_text())?,
     ///         article.all("a[href]", Save::all())?,
     ///     ]))?
     ///     .build();
@@ -306,8 +329,11 @@ impl<'query> QueryBuilder<'query> {
                 //BUG: you can only early exit when the ALL of them have been found, thus the parent must be awaited for
                 SelectionKind::All => return None,
 
-                // This is it need's to find the </{element}> to get either inner_html or text_content
-                SelectionKind::First => section.save.inner_html || section.save.text_content,
+                // First queries that capture content cannot exit until the
+                // winning element closes and its ranges are finalized.
+                SelectionKind::First => {
+                    section.save.inner_html || section.save.raw_text || section.save.text
+                }
             };
             if stop_here {
                 return Some(index);
@@ -563,7 +589,7 @@ mod tests {
             .then(|article| {
                 Ok([
                     article.all("a[href]", Save::all())?,
-                    article.first("h1", Save::only_text_content())?,
+                    article.first("h1", Save::only_text())?,
                 ])
             })
             .unwrap()
@@ -581,7 +607,7 @@ mod tests {
             .then(|article| {
                 Ok([
                     article.all("a[href]", Save::all())?,
-                    article.first("+ b", Save::only_text_content())?,
+                    article.first("+ b", Save::only_text())?,
                 ])
             })
             .unwrap_err();
@@ -599,7 +625,7 @@ mod tests {
             .then(|article| {
                 Ok([
                     article.all("a[href]", Save::all())?,
-                    article.first("h1", Save::only_text_content())?,
+                    article.first("h1", Save::only_text())?,
                     article.all("p", Save::none())?,
                 ])
             })
@@ -625,7 +651,7 @@ mod tests {
             .then(|article| {
                 Ok([article.all("section", Save::none())?.then(|section| {
                     Ok([
-                        section.first("h2", Save::only_text_content())?,
+                        section.first("h2", Save::only_text())?,
                         section.all("a[href]", Save::all())?,
                     ])
                 })?])

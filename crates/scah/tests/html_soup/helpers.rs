@@ -34,7 +34,7 @@ pub fn elements<'a>(store: &'a Store<'a, 'a>, selector: &str) -> Vec<&'a Element
 pub fn texts<'a>(store: &'a Store<'a, 'a>, selector: &str) -> Vec<Option<&'a str>> {
     elements(store, selector)
         .into_iter()
-        .map(|element| element.text_content(store))
+        .map(|element| element.text(store))
         .collect()
 }
 

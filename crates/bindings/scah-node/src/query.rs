@@ -76,8 +76,9 @@ impl JsSave {
     fn to_save(self) -> Save {
         Save {
             inner_html: self.inner_html.unwrap_or(false),
-            text_content: self.text_content.unwrap_or(false),
             attributes: self.attributes.unwrap_or(true),
+            raw_text: false,
+            text: self.text_content.unwrap_or(false),
         }
     }
 }
