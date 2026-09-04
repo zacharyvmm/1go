@@ -377,10 +377,11 @@ where
                         }
                     }
 
-                    self.selectors.prepare_element::<SIBLINGS, RETIREMENT>(
-                        name,
-                        &mut self.temp_state.preflight,
-                    );
+                    self.selectors
+                        .prepare_element::<SIBLINGS, RETIREMENT, EXTENDED>(
+                            name,
+                            &mut self.temp_state.preflight,
+                        );
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {

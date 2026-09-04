@@ -242,13 +242,17 @@ where
 
     /// Whether an active runner may inspect or save attributes for this name.
     #[inline(always)]
-    pub(crate) fn prepare_element<const SIBLINGS: bool, const RETIREMENT: bool>(
+    pub(crate) fn prepare_element<
+        const SIBLINGS: bool,
+        const RETIREMENT: bool,
+        const EXTENDED: bool,
+    >(
         &self,
         name: &str,
         preflight: &mut ElementPreflight<'query>,
     ) {
         preflight.attribute_interest.clear();
-        if let Some(structural_interest) = &self.structural_attribute_interest {
+        if EXTENDED && let Some(structural_interest) = &self.structural_attribute_interest {
             preflight.attribute_interest.merge(structural_interest);
         }
         preflight.runner_indices.clear();
@@ -831,7 +835,7 @@ mod tests {
         let selectors = QueryMultiplexer::new(&queries);
         let mut preflight = ElementPreflight::default();
 
-        selectors.prepare_element::<false, false>("span", &mut preflight);
+        selectors.prepare_element::<false, false, false>("span", &mut preflight);
 
         assert_eq!(preflight.runner_indices.as_slice(), &[1, 2]);
         assert!(preflight.attribute_interest.includes_class());
@@ -849,7 +853,7 @@ mod tests {
         let selectors = QueryMultiplexer::new(&queries);
         let mut preflight = ElementPreflight::default();
 
-        selectors.prepare_element::<false, false>("div", &mut preflight);
+        selectors.prepare_element::<false, false, true>("div", &mut preflight);
 
         assert!(preflight.runner_indices.is_empty());
         assert!(preflight.attribute_interest.includes_class());
