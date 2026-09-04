@@ -100,7 +100,6 @@ pub struct QueryMultiplexer<'query, Q> {
     runners: Runners<'query, Q>,
     active: ActiveRunnerSet,
     features: MultiplexerFeatures,
-    structural_attribute_interest: Option<Box<AttributeInterest<'query>>>,
     #[cfg(feature = "bench-internals")]
     cursor_stats: Option<CursorStats>,
 }
@@ -129,12 +128,10 @@ where
             })
     }
 
-    fn collect_structural_attribute_interest(
-        queries: &'query [Q],
-    ) -> Option<Box<AttributeInterest<'query>>> {
+    pub(crate) fn structural_attribute_interest(&self) -> Option<AttributeInterest<'query>> {
         let mut interest = AttributeInterest::default();
-        for query in queries {
-            for transition in query.states() {
+        for runner in &self.runners {
+            for transition in runner.query().states() {
                 for structural in transition.predicate().structural.as_slice() {
                     if let StructuralPredicate::NthChildOf(_, filter) = structural {
                         for predicate in filter.as_slice() {
@@ -144,7 +141,7 @@ where
                 }
             }
         }
-        (!interest.is_empty()).then(|| Box::new(interest))
+        (!interest.is_empty()).then_some(interest)
     }
 
     #[inline]
@@ -158,7 +155,6 @@ where
             runners,
             active: None,
             features: Self::collect_features(queries),
-            structural_attribute_interest: Self::collect_structural_attribute_interest(queries),
             #[cfg(feature = "bench-internals")]
             cursor_stats: None,
         }
@@ -171,7 +167,6 @@ where
             runners,
             active: None,
             features: Self::collect_features(queries),
-            structural_attribute_interest: Self::collect_structural_attribute_interest(queries),
             cursor_stats: Some(CursorStats::default()),
         }
     }
@@ -242,19 +237,12 @@ where
 
     /// Whether an active runner may inspect or save attributes for this name.
     #[inline(always)]
-    pub(crate) fn prepare_element<
-        const SIBLINGS: bool,
-        const RETIREMENT: bool,
-        const EXTENDED: bool,
-    >(
+    pub(crate) fn prepare_element<const SIBLINGS: bool, const RETIREMENT: bool>(
         &self,
         name: &str,
         preflight: &mut ElementPreflight<'query>,
     ) {
         preflight.attribute_interest.clear();
-        if EXTENDED && let Some(structural_interest) = &self.structural_attribute_interest {
-            preflight.attribute_interest.merge(structural_interest);
-        }
         preflight.runner_indices.clear();
         preflight.runner_len = self.runners.len();
         let name_hash = ascii_case_insensitive_hash(name);
@@ -283,6 +271,20 @@ where
                 preflight.runner_indices.push(runner_index);
             }
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn prepare_element_with_structural_interest<
+        const SIBLINGS: bool,
+        const RETIREMENT: bool,
+    >(
+        &self,
+        name: &str,
+        preflight: &mut ElementPreflight<'query>,
+        structural_interest: &AttributeInterest<'query>,
+    ) {
+        self.prepare_element::<SIBLINGS, RETIREMENT>(name, preflight);
+        preflight.attribute_interest.merge(structural_interest);
     }
 
     #[inline]
@@ -615,9 +617,9 @@ mod tests {
     fn multiplexer_dense_state_does_not_embed_sparse_vector() {
         assert_eq!(std::mem::size_of::<ActiveRunnerSet>(), 8);
         #[cfg(not(feature = "bench-internals"))]
-        assert_eq!(std::mem::size_of::<QueryMultiplexer<'_, Query>>(), 48);
+        assert_eq!(std::mem::size_of::<QueryMultiplexer<'_, Query>>(), 40);
         #[cfg(feature = "bench-internals")]
-        assert_eq!(std::mem::size_of::<QueryMultiplexer<'_, Query>>(), 72);
+        assert_eq!(std::mem::size_of::<QueryMultiplexer<'_, Query>>(), 64);
     }
 
     #[test]
@@ -835,7 +837,7 @@ mod tests {
         let selectors = QueryMultiplexer::new(&queries);
         let mut preflight = ElementPreflight::default();
 
-        selectors.prepare_element::<false, false, false>("span", &mut preflight);
+        selectors.prepare_element::<false, false>("span", &mut preflight);
 
         assert_eq!(preflight.runner_indices.as_slice(), &[1, 2]);
         assert!(preflight.attribute_interest.includes_class());
@@ -853,7 +855,12 @@ mod tests {
         let selectors = QueryMultiplexer::new(&queries);
         let mut preflight = ElementPreflight::default();
 
-        selectors.prepare_element::<false, false, true>("div", &mut preflight);
+        let structural_interest = selectors.structural_attribute_interest().unwrap();
+        selectors.prepare_element_with_structural_interest::<false, false>(
+            "div",
+            &mut preflight,
+            &structural_interest,
+        );
 
         assert!(preflight.runner_indices.is_empty());
         assert!(preflight.attribute_interest.includes_class());
