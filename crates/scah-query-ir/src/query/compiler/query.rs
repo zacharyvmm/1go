@@ -431,7 +431,7 @@ impl<'query, const N_STATES: usize, const N_SECTIONS: usize> QuerySpec<'query>
 }
 
 impl<'query> Query<'query> {
-    fn require_legacy_engine_compatible_paths(
+    pub(crate) fn require_legacy_engine_compatible_paths(
         paths: &[Vec<Transition<'query>>],
     ) -> Result<(), SelectorParseError> {
         if paths.len() > 1
@@ -674,5 +674,28 @@ mod tests {
             Transition::generate_transition_paths_from_string("h1, h2").is_ok(),
             "the IR remains available to the engine implementation layer"
         );
+    }
+
+    #[test]
+    fn chained_query_builder_gates_selectors_until_engine_support_lands() {
+        for selector in ["h1, h2", "li:first-child", "li:nth-child(2 of .hit)"] {
+            let all_error = Query::all("main", Save::none())
+                .unwrap()
+                .all(selector, Save::none())
+                .unwrap_err();
+            assert_eq!(
+                all_error.message(),
+                "selector requires streaming engine support"
+            );
+
+            let first_error = Query::all("main", Save::none())
+                .unwrap()
+                .first(selector, Save::none())
+                .unwrap_err();
+            assert_eq!(
+                first_error.message(),
+                "selector requires streaming engine support"
+            );
+        }
     }
 }

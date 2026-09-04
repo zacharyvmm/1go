@@ -155,6 +155,7 @@ impl<'query> QueryBuilder<'query> {
 
         let current_state_len = self.states.len();
         let paths = Transition::generate_transition_paths_from_string(query)?;
+        Query::require_legacy_engine_compatible_paths(&paths)?;
         let mut states = Vec::new();
         let mut alternatives = Vec::new();
         for path in paths {
@@ -189,6 +190,7 @@ impl<'query> QueryBuilder<'query> {
 
         let current_state_len = self.states.len();
         let paths = Transition::generate_transition_paths_from_string(query)?;
+        Query::require_legacy_engine_compatible_paths(&paths)?;
         let mut states = Vec::new();
         let mut alternatives = Vec::new();
         for path in paths {
