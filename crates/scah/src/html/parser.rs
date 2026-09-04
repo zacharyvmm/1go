@@ -238,11 +238,20 @@ where
         }
         self.indexer.prepare(reader.source());
         let features = self.selectors.features();
-        match (features.has_sibling_queries, features.has_retiring_runners) {
-            (false, false) => self.next_mode::<false, false>(reader),
-            (false, true) => self.next_retiring(reader),
-            (true, false) => self.next_with_siblings(reader),
-            (true, true) => self.next_with_siblings_retiring(reader),
+        let extended = features.has_structural_queries || features.has_selector_lists;
+        match (
+            features.has_sibling_queries,
+            features.has_retiring_runners,
+            extended,
+        ) {
+            (false, false, false) => self.next_mode::<false, false, false>(reader),
+            (false, false, true) => self.next_mode::<false, false, true>(reader),
+            (false, true, false) => self.next_mode::<false, true, false>(reader),
+            (false, true, true) => self.next_mode::<false, true, true>(reader),
+            (true, false, false) => self.next_mode::<true, false, false>(reader),
+            (true, false, true) => self.next_mode::<true, false, true>(reader),
+            (true, true, false) => self.next_mode::<true, true, false>(reader),
+            (true, true, true) => self.next_mode::<true, true, true>(reader),
         }
     }
 
@@ -255,50 +264,25 @@ where
         // the Reader and may step a different source between calls.
         self.indexer.prepare(reader.source());
         let features = self.selectors.features();
-        match (features.has_sibling_queries, features.has_retiring_runners) {
-            (false, false) => while self.next_mode::<false, false>(reader) {},
-            (false, true) => self.run_retiring(reader),
-            (true, false) => self.run_with_siblings(reader),
-            (true, true) => self.run_with_siblings_retiring(reader),
+        let extended = features.has_structural_queries || features.has_selector_lists;
+        match (
+            features.has_sibling_queries,
+            features.has_retiring_runners,
+            extended,
+        ) {
+            (false, false, false) => while self.next_mode::<false, false, false>(reader) {},
+            (false, false, true) => while self.next_mode::<false, false, true>(reader) {},
+            (false, true, false) => while self.next_mode::<false, true, false>(reader) {},
+            (false, true, true) => while self.next_mode::<false, true, true>(reader) {},
+            (true, false, false) => while self.next_mode::<true, false, false>(reader) {},
+            (true, false, true) => while self.next_mode::<true, false, true>(reader) {},
+            (true, true, false) => while self.next_mode::<true, true, false>(reader) {},
+            (true, true, true) => while self.next_mode::<true, true, true>(reader) {},
         }
     }
 
-    #[inline(never)]
-    fn next_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
-        self.next_mode::<false, true>(reader)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn next_with_siblings(&mut self, reader: &mut Reader<'html>) -> bool {
-        self.next_mode::<true, false>(reader)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn next_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
-        self.next_mode::<true, true>(reader)
-    }
-
-    #[inline(never)]
-    fn run_retiring(&mut self, reader: &mut Reader<'html>) {
-        while self.next_mode::<false, true>(reader) {}
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn run_with_siblings(&mut self, reader: &mut Reader<'html>) {
-        while self.next_mode::<true, false>(reader) {}
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn run_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) {
-        while self.next_mode::<true, true>(reader) {}
-    }
-
     #[inline(always)]
-    fn next_mode<const SIBLINGS: bool, const RETIREMENT: bool>(
+    fn next_mode<const SIBLINGS: bool, const RETIREMENT: bool, const EXTENDED: bool>(
         &mut self,
         reader: &mut Reader<'html>,
     ) -> bool {
@@ -486,10 +470,14 @@ where
                     }
                     self.position.element_depth = self.open_elements.depth();
                 }
-                let structural =
-                    self.temp_state.structural.as_deref_mut().map(|state| {
-                        state.open(self.element.name, !is_self_closing, &self.element)
-                    });
+                let structural = if EXTENDED {
+                    self.temp_state
+                        .structural
+                        .as_deref_mut()
+                        .map(|state| state.open(self.element.name, !is_self_closing, &self.element))
+                } else {
+                    None
+                };
 
                 crate::scah_trace!(
                     self.store,
@@ -511,24 +499,45 @@ where
                     let sibling = sibling
                         .as_deref_mut()
                         .expect("sibling parser state requires sibling queries");
-                    self.selectors.next_with_siblings_into_with_context(
-                        &self.element,
-                        &self.position,
-                        &mut self.store,
-                        save_hits,
-                        preflight,
-                        &mut sibling.pending,
-                        structural.as_ref(),
-                    );
+                    if EXTENDED {
+                        self.selectors.next_with_siblings_into_with_context(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            save_hits,
+                            preflight,
+                            &mut sibling.pending,
+                            structural.as_ref(),
+                        );
+                    } else {
+                        self.selectors.next_with_siblings_into(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            save_hits,
+                            preflight,
+                            &mut sibling.pending,
+                        );
+                    }
                 } else {
-                    self.selectors.next_plain_into_with_context(
-                        &self.element,
-                        &self.position,
-                        &mut self.store,
-                        &mut self.temp_state.save_hits,
-                        &self.temp_state.preflight,
-                        structural.as_ref(),
-                    );
+                    if EXTENDED {
+                        self.selectors.next_plain_into_with_context(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            &mut self.temp_state.save_hits,
+                            &self.temp_state.preflight,
+                            structural.as_ref(),
+                        );
+                    } else {
+                        self.selectors.next_plain_into(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            &mut self.temp_state.save_hits,
+                            &self.temp_state.preflight,
+                        );
+                    }
                 }
                 if self.persist_attributes {
                     let attributes_saved = match self.temp_state.save_hits.as_slice() {
@@ -939,7 +948,7 @@ mod tests {
         let mut forced_sibling = XHtmlParser::new(QueryMultiplexer::new(&queries));
         forced_sibling.temp_state.sibling = Some(Box::default());
         let mut sibling_reader = Reader::new(html);
-        while forced_sibling.next_mode::<true, false>(&mut sibling_reader) {}
+        while forced_sibling.next_mode::<true, false, false>(&mut sibling_reader) {}
 
         assert_eq!(forced_sibling.finish(), plain.finish());
     }

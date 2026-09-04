@@ -5,7 +5,7 @@ use crate::StructuralMatchContext;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{Position, StructuralPredicate};
+use crate::{Position, QuerySectionId, StructuralPredicate};
 use crate::{QuerySpec, Reader};
 use smallvec::SmallVec;
 
@@ -69,6 +69,7 @@ type Runners<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MultiplexerFeatures {
     pub(crate) has_sibling_queries: bool,
+    pub(crate) has_selector_lists: bool,
     pub(crate) has_structural_queries: bool,
     pub(crate) has_retiring_runners: bool,
 }
@@ -117,6 +118,11 @@ where
             .iter()
             .fold(MultiplexerFeatures::default(), |mut aggregate, query| {
                 aggregate.has_sibling_queries |= query.has_sibling_combinator();
+                aggregate.has_selector_lists |= query
+                    .queries()
+                    .iter()
+                    .enumerate()
+                    .any(|(index, _)| query.selection_ranges(QuerySectionId(index)).len() > 1);
                 aggregate.has_structural_queries |= query.has_structural_queries();
                 aggregate.has_retiring_runners |= query.exit_at_section_end().is_some();
                 aggregate
@@ -304,16 +310,24 @@ where
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
     ) {
-        self.next_plain_into_with_context(
-            xhtml_element,
-            position,
-            store,
-            save_hits,
-            preflight,
-            None,
-        );
+        debug_assert_eq!(self.runners.len(), preflight.runner_len);
+        save_hits.clear();
+        for &runner_index in &preflight.runner_indices {
+            self.runners[runner_index].next_plain(
+                RunnerId(runner_index),
+                xhtml_element,
+                position,
+                store,
+                save_hits,
+            );
+        }
+        #[cfg(any(debug_assertions, test))]
+        self.trace_preflight_rejections(xhtml_element, position, store, preflight);
+        #[cfg(feature = "bench-internals")]
+        self.track_cursor_stats();
     }
 
+    #[inline(always)]
     pub(crate) fn next_plain_into_with_context(
         &mut self,
         xhtml_element: &XHtmlElement<'html>,
@@ -326,7 +340,7 @@ where
         debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
         for &runner_index in &preflight.runner_indices {
-            self.runners[runner_index].next_plain(
+            self.runners[runner_index].next_plain_with_context(
                 RunnerId(runner_index),
                 xhtml_element,
                 position,

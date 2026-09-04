@@ -549,9 +549,11 @@ impl<'query> ScopedCursor {
         if !self.is_active() {
             return false;
         }
-        self.next_with_context(tree, depth, element, None)
+        let fsm = tree.get_transition(self.position.state);
+        fsm.next(element, depth, self.match_base_depth())
     }
 
+    #[inline(always)]
     pub fn next_with_context<'html, Q: QuerySpec<'query>>(
         &self,
         tree: &Q,

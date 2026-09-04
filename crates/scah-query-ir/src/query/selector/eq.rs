@@ -128,9 +128,56 @@ impl<'a> ElementPredicate<'a> {
     }
 
     pub fn matches_element<'b, E: IElement<'b>>(&self, other: &E) -> bool {
-        self.matches_element_with_context(other, None)
+        if !self.matches_name(other.name()) {
+            return false;
+        }
+
+        if self.id.is_some() && self.id != other.id() {
+            return false;
+        }
+
+        if !self.classes.as_slice().is_empty() {
+            let Some(element_classes) = other.class() else {
+                return false;
+            };
+
+            if !self.matches_classes(element_classes) {
+                return false;
+            }
+        }
+
+        self.attributes.as_slice().iter().all(|selector_attribute| {
+            if selector_attribute.name.eq_ignore_ascii_case("id") {
+                selector_attribute.matches_field(other.id())
+                    || other
+                        .attributes()
+                        .iter()
+                        .any(|attribute| selector_attribute.matches_attribute(attribute))
+            } else if selector_attribute.name.eq_ignore_ascii_case("class") {
+                selector_attribute.matches_field(other.class())
+                    || other
+                        .attributes()
+                        .iter()
+                        .any(|attribute| selector_attribute.matches_attribute(attribute))
+            } else {
+                other
+                    .attributes()
+                    .iter()
+                    .any(|attribute| selector_attribute.matches_attribute(attribute))
+            }
+        }) && self.logical.as_slice().iter().all(|logical| match logical {
+            super::builder::LocalLogicalPredicate::Not(list) => !list
+                .as_slice()
+                .iter()
+                .any(|predicate| predicate.matches_element(other)),
+            super::builder::LocalLogicalPredicate::Any(list) => list
+                .as_slice()
+                .iter()
+                .any(|predicate| predicate.matches_element(other)),
+        })
     }
 
+    #[inline(always)]
     pub fn matches_element_with_context<'b, E: IElement<'b>>(
         &self,
         other: &E,

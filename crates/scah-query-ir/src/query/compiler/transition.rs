@@ -517,9 +517,10 @@ impl<'query> Transition<'query> {
             "Current depth is smaller than last depth: {current_depth} >= {last_depth}"
         );
 
-        self.next_with_context(element, current_depth, last_depth, None)
+        self.guard.evaluate(last_depth, current_depth) && self.predicate.matches_element(element)
     }
 
+    #[inline(always)]
     pub fn next_with_context<'html, E: IElement<'html>>(
         &self,
         element: &E,
