@@ -128,6 +128,14 @@ impl<'a> ElementPredicate<'a> {
     }
 
     pub fn matches_element<'b, E: IElement<'b>>(&self, other: &E) -> bool {
+        self.matches_element_with_context(other, None)
+    }
+
+    /// Match the element-local portion of this predicate without structural
+    /// context. Streaming engines may use this for prevalidated local lists.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn matches_local_element_unchecked<'b, E: IElement<'b>>(&self, other: &E) -> bool {
         if !self.matches_name(other.name()) {
             return false;
         }
@@ -169,11 +177,11 @@ impl<'a> ElementPredicate<'a> {
             super::builder::LocalLogicalPredicate::Not(list) => !list
                 .as_slice()
                 .iter()
-                .any(|predicate| predicate.matches_element(other)),
+                .any(|predicate| predicate.matches_local_element_unchecked(other)),
             super::builder::LocalLogicalPredicate::Any(list) => list
                 .as_slice()
                 .iter()
-                .any(|predicate| predicate.matches_element(other)),
+                .any(|predicate| predicate.matches_local_element_unchecked(other)),
         })
     }
 
@@ -183,83 +191,33 @@ impl<'a> ElementPredicate<'a> {
         other: &E,
         structural: Option<&super::builder::StructuralMatchContext>,
     ) -> bool {
-        if !self.matches_name(other.name()) {
-            return false;
-        }
-
-        if self.id.is_some() && self.id != other.id() {
-            return false;
-        }
-
-        if !self.classes.as_slice().is_empty() {
-            let Some(element_classes) = other.class() else {
-                return false;
-            };
-
-            if !self.matches_classes(element_classes) {
-                return false;
-            }
-        }
-
-        self.attributes.as_slice().iter().all(|selector_attribute| {
-            // `id` and `class` live in dedicated element fields, not the
-            // generic attribute list, so route `[id]`/`[class]` selectors
-            // there. Attribute names are case-insensitive in HTML. A rare
-            // valueless `id`/`class` that landed in the attribute list is
-            // still matched via the fallback scan.
-            if selector_attribute.name.eq_ignore_ascii_case("id") {
-                selector_attribute.matches_field(other.id())
-                    || other
-                        .attributes()
-                        .iter()
-                        .any(|attribute| selector_attribute.matches_attribute(attribute))
-            } else if selector_attribute.name.eq_ignore_ascii_case("class") {
-                selector_attribute.matches_field(other.class())
-                    || other
-                        .attributes()
-                        .iter()
-                        .any(|attribute| selector_attribute.matches_attribute(attribute))
-            } else {
-                other
-                    .attributes()
-                    .iter()
-                    .any(|xhtml_attribute| selector_attribute.matches_attribute(xhtml_attribute))
-            }
-        }) && self.logical.as_slice().iter().all(|logical| match logical {
-            super::builder::LocalLogicalPredicate::Not(list) => !list
-                .as_slice()
-                .iter()
-                .any(|predicate| predicate.matches_element(other)),
-            super::builder::LocalLogicalPredicate::Any(list) => list
-                .as_slice()
-                .iter()
-                .any(|predicate| predicate.matches_element(other)),
-        }) && self.structural.as_slice().iter().all(|predicate| {
-            let Some(context) = structural else {
-                return false;
-            };
-            match predicate {
-                super::builder::StructuralPredicate::Root => context.is_root,
-                super::builder::StructuralPredicate::Scope => context.is_root,
-                super::builder::StructuralPredicate::FirstChild => context.child_index == 1,
-                super::builder::StructuralPredicate::NthChild(formula) => {
-                    formula.matches(context.child_index)
+        self.matches_local_element_unchecked(other)
+            && self.structural.as_slice().iter().all(|predicate| {
+                let Some(context) = structural else {
+                    return false;
+                };
+                match predicate {
+                    super::builder::StructuralPredicate::Root => context.is_root,
+                    super::builder::StructuralPredicate::Scope => context.is_root,
+                    super::builder::StructuralPredicate::FirstChild => context.child_index == 1,
+                    super::builder::StructuralPredicate::NthChild(formula) => {
+                        formula.matches(context.child_index)
+                    }
+                    super::builder::StructuralPredicate::FirstOfType => context.type_index == 1,
+                    super::builder::StructuralPredicate::NthOfType(formula) => {
+                        formula.matches(context.type_index)
+                    }
+                    super::builder::StructuralPredicate::NthChildOf(formula, filter) => {
+                        let key = filter as *const _ as usize;
+                        context
+                            .filtered_child_indices
+                            .iter()
+                            .any(|&(filter_key, index)| {
+                                filter_key == key && index != 0 && formula.matches(index)
+                            })
+                    }
                 }
-                super::builder::StructuralPredicate::FirstOfType => context.type_index == 1,
-                super::builder::StructuralPredicate::NthOfType(formula) => {
-                    formula.matches(context.type_index)
-                }
-                super::builder::StructuralPredicate::NthChildOf(formula, filter) => {
-                    let key = filter as *const _ as usize;
-                    context
-                        .filtered_child_indices
-                        .iter()
-                        .any(|&(filter_key, index)| {
-                            filter_key == key && index != 0 && formula.matches(index)
-                        })
-                }
-            }
-        })
+            })
     }
 }
 

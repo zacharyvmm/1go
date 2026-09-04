@@ -71,6 +71,9 @@ pub(crate) struct MultiplexerFeatures {
     pub(crate) has_sibling_queries: bool,
     pub(crate) has_selector_lists: bool,
     pub(crate) has_structural_queries: bool,
+    pub(crate) needs_child_ordinals: bool,
+    pub(crate) needs_type_ordinals: bool,
+    pub(crate) needs_filtered_ordinals: bool,
     pub(crate) has_retiring_runners: bool,
 }
 
@@ -123,6 +126,23 @@ where
                     .enumerate()
                     .any(|(index, _)| query.selection_ranges(QuerySectionId(index)).len() > 1);
                 aggregate.has_structural_queries |= query.has_structural_queries();
+                for transition in query.states() {
+                    for predicate in transition.predicate().structural.as_slice() {
+                        match predicate {
+                            StructuralPredicate::FirstChild | StructuralPredicate::NthChild(_) => {
+                                aggregate.needs_child_ordinals = true;
+                            }
+                            StructuralPredicate::FirstOfType
+                            | StructuralPredicate::NthOfType(_) => {
+                                aggregate.needs_type_ordinals = true;
+                            }
+                            StructuralPredicate::NthChildOf(_, _) => {
+                                aggregate.needs_filtered_ordinals = true;
+                            }
+                            StructuralPredicate::Root | StructuralPredicate::Scope => {}
+                        }
+                    }
+                }
                 aggregate.has_retiring_runners |= query.exit_at_section_end().is_some();
                 aggregate
             })
@@ -658,6 +678,38 @@ mod tests {
                 .features()
                 .has_retiring_runners
         );
+    }
+
+    #[test]
+    fn multiplexer_features_specialize_structural_bookkeeping() {
+        let root = [Query::all(":root", Save::none()).unwrap().build()];
+        let child = [Query::all("li:first-child", Save::none()).unwrap().build()];
+        let type_ordinal = [Query::all("li:nth-of-type(2)", Save::none())
+            .unwrap()
+            .build()];
+        let filtered = [Query::all("li:nth-child(2 of .hit)", Save::none())
+            .unwrap()
+            .build()];
+
+        let root_features = QueryMultiplexer::new(&root).features();
+        assert!(!root_features.needs_child_ordinals);
+        assert!(!root_features.needs_type_ordinals);
+        assert!(!root_features.needs_filtered_ordinals);
+
+        let child_features = QueryMultiplexer::new(&child).features();
+        assert!(child_features.needs_child_ordinals);
+        assert!(!child_features.needs_type_ordinals);
+        assert!(!child_features.needs_filtered_ordinals);
+
+        let type_features = QueryMultiplexer::new(&type_ordinal).features();
+        assert!(!type_features.needs_child_ordinals);
+        assert!(type_features.needs_type_ordinals);
+        assert!(!type_features.needs_filtered_ordinals);
+
+        let filtered_features = QueryMultiplexer::new(&filtered).features();
+        assert!(!filtered_features.needs_child_ordinals);
+        assert!(!filtered_features.needs_type_ordinals);
+        assert!(filtered_features.needs_filtered_ordinals);
     }
 
     #[test]

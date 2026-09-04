@@ -520,6 +520,24 @@ impl<'query> Transition<'query> {
         self.guard.evaluate(last_depth, current_depth) && self.predicate.matches_element(element)
     }
 
+    /// Evaluate a transition whose predicate has already been proven not to
+    /// require structural context.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn next_local_unchecked<'html, E: IElement<'html>>(
+        &self,
+        element: &E,
+        current_depth: u16,
+        last_depth: u16,
+    ) -> bool {
+        assert!(
+            current_depth >= last_depth,
+            "Current depth is smaller than last depth: {current_depth} >= {last_depth}"
+        );
+        self.guard.evaluate(last_depth, current_depth)
+            && self.predicate.matches_local_element_unchecked(element)
+    }
+
     #[inline(always)]
     pub fn next_with_context<'html, E: IElement<'html>>(
         &self,
@@ -951,5 +969,35 @@ mod tests {
         assert!(transition.metadata().needs_id());
         assert!(transition.metadata().needs_class());
         assert_eq!(transition.metadata().attribute_names(), &["data-card"]);
+    }
+
+    #[test]
+    fn public_next_requires_context_for_structural_predicates() {
+        let transition = Transition::generate_transitions_from_string("li:first-child")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let element = FakeElement {
+            name: "li",
+            id: None,
+            class: None,
+            attributes: &[],
+        };
+
+        assert!(
+            transition
+                .predicate()
+                .matches_local_element_unchecked(&element)
+        );
+        assert!(!transition.predicate().matches_element(&element));
+        assert!(!transition.next(&element, 1, 0));
+
+        let context = StructuralMatchContext {
+            child_index: 1,
+            type_index: 1,
+            filtered_child_indices: Default::default(),
+            is_root: false,
+        };
+        assert!(transition.next_with_context(&element, 1, 0, Some(&context)));
     }
 }

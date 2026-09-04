@@ -550,7 +550,7 @@ impl<'query> ScopedCursor {
             return false;
         }
         let fsm = tree.get_transition(self.position.state);
-        fsm.next(element, depth, self.match_base_depth())
+        fsm.next_local_unchecked(element, depth, self.match_base_depth())
     }
 
     #[inline(always)]

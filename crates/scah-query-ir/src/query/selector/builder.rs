@@ -328,8 +328,7 @@ impl<'query> AttributeSelection<'query> {
             }
 
             match token {
-                SelectionAttributeToken::String(string_value)
-                | SelectionAttributeToken::QuotedString(string_value) => {
+                SelectionAttributeToken::String(string_value) => {
                     if kv.value.is_none()
                         && kv.name.is_some()
                         && !equal
@@ -360,6 +359,16 @@ impl<'query> AttributeSelection<'query> {
                     } else {
                         kv.push(string_value, reader.get_position())?;
                     }
+                }
+
+                SelectionAttributeToken::QuotedString(string_value) => {
+                    if kv.value.is_some() {
+                        return Err(SelectorParseError::new(
+                            "attribute value modifier must be an unquoted identifier",
+                            reader.get_position(),
+                        ));
+                    }
+                    kv.push(string_value, reader.get_position())?;
                 }
 
                 SelectionAttributeToken::StringMatchSelector(equal_selector) => {
@@ -654,11 +663,13 @@ impl<'a> ElementPredicate<'a> {
                             reader.get_position(),
                         ));
                     }
-                    if matches!(*name, "nth-child" | "nth-of-type") {
+                    let is_nth_child = name.eq_ignore_ascii_case("nth-child");
+                    let is_nth_of_type = name.eq_ignore_ascii_case("nth-of-type");
+                    if is_nth_child || is_nth_of_type {
                         let argument = read_balanced_function_argument(reader)?;
                         let (formula_source, filter_source) = split_nth_filter(argument)?;
                         let formula = parse_an_plus_b(formula_source)?;
-                        structural.push(if *name == "nth-child" {
+                        structural.push(if is_nth_child {
                             if let Some(filter_source) = filter_source {
                                 StructuralPredicate::NthChildOf(
                                     formula,
@@ -678,19 +689,19 @@ impl<'a> ElementPredicate<'a> {
                         });
                     } else {
                         let argument = read_balanced_function_argument(reader)?;
-                        let predicate = match *name {
-                            "not" => {
-                                LocalLogicalPredicate::Not(parse_local_selector_list(argument)?)
-                            }
-                            "is" | "where" => LocalLogicalPredicate::Any(
-                                parse_forgiving_local_selector_list(argument),
-                            ),
-                            _ => {
-                                return Err(SelectorParseError::new(
-                                    "unsupported pseudo-class",
-                                    reader.get_position().saturating_sub(name.len() + 2),
-                                ));
-                            }
+                        let predicate = if name.eq_ignore_ascii_case("not") {
+                            LocalLogicalPredicate::Not(parse_local_selector_list(argument)?)
+                        } else if name.eq_ignore_ascii_case("is")
+                            || name.eq_ignore_ascii_case("where")
+                        {
+                            LocalLogicalPredicate::Any(parse_forgiving_local_selector_list(
+                                argument,
+                            ))
+                        } else {
+                            return Err(SelectorParseError::new(
+                                "unsupported pseudo-class",
+                                reader.get_position().saturating_sub(name.len() + 2),
+                            ));
                         };
                         logical.push(predicate);
                     }
@@ -702,17 +713,19 @@ impl<'a> ElementPredicate<'a> {
                             reader.get_position(),
                         ));
                     }
-                    structural.push(match *name {
-                        "first-child" => StructuralPredicate::FirstChild,
-                        "first-of-type" => StructuralPredicate::FirstOfType,
-                        "root" => StructuralPredicate::Root,
-                        "scope" => StructuralPredicate::Scope,
-                        _ => {
-                            return Err(SelectorParseError::new(
-                                "unsupported pseudo-class",
-                                reader.get_position().saturating_sub(name.len() + 1),
-                            ));
-                        }
+                    structural.push(if name.eq_ignore_ascii_case("first-child") {
+                        StructuralPredicate::FirstChild
+                    } else if name.eq_ignore_ascii_case("first-of-type") {
+                        StructuralPredicate::FirstOfType
+                    } else if name.eq_ignore_ascii_case("root") {
+                        StructuralPredicate::Root
+                    } else if name.eq_ignore_ascii_case("scope") {
+                        StructuralPredicate::Scope
+                    } else {
+                        return Err(SelectorParseError::new(
+                            "unsupported pseudo-class",
+                            reader.get_position().saturating_sub(name.len() + 1),
+                        ));
                     });
                 }
                 (Some(SelectionKeyWords::ID), SelectionKeyWords::String(id_name)) => {
@@ -1028,6 +1041,7 @@ fn is_valid_attribute_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Transition;
 
     #[test]
     fn test_basic_element_selection() {
@@ -1301,6 +1315,18 @@ mod tests {
     }
 
     #[test]
+    fn quoted_attribute_modifiers_are_rejected() {
+        for selector in [r#"[data-x="FOO" "i"]"#, r#"[data-x="FOO" 's']"#] {
+            let mut reader = Reader::new(selector);
+            let error = ElementPredicate::try_from(&mut reader).unwrap_err();
+            assert_eq!(
+                error.message(),
+                "attribute value modifier must be an unquoted identifier"
+            );
+        }
+    }
+
+    #[test]
     fn an_plus_b_accepts_css_whitespace_and_ascii_case_variants() {
         for (source, expected) in [
             ("3n + 1", AnPlusB { a: 3, b: 1 }),
@@ -1316,6 +1342,24 @@ mod tests {
     fn an_plus_b_rejects_whitespace_that_changes_tokens() {
         for source in ["3 n", "+ 2n", "+ 2", "n 2"] {
             assert!(parse_an_plus_b(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn pseudo_class_names_are_ascii_case_insensitive() {
+        for selector in [
+            "li:FIRST-CHILD",
+            "li:First-Of-Type",
+            "li:NTH-CHILD(2n+1)",
+            "li:nth-OF-type(2)",
+            "div:NOT(.ad)",
+            "div:Is(.card)",
+            "div:WHERE(.card)",
+            ":ROOT",
+            ":SCOPE > a",
+        ] {
+            Transition::generate_transition_paths_from_string(selector)
+                .unwrap_or_else(|error| panic!("{selector}: {error}"));
         }
     }
 

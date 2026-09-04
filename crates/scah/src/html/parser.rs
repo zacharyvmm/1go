@@ -34,8 +34,8 @@ struct ParserTempState<'html, 'query> {
 }
 
 struct StructuralParserState<'html, 'query> {
-    child_counts: Vec<u32>,
-    type_counts: Vec<Vec<(&'html str, u32)>>,
+    child_counts: Option<Vec<u32>>,
+    type_counts: Option<Vec<Vec<(&'html str, u32)>>>,
     filters: Vec<(*const (), Vec<u32>)>,
     attribute_interest: AttributeInterest<'query>,
     root_seen: bool,
@@ -50,33 +50,37 @@ impl<'html, 'query> StructuralParserState<'html, 'query> {
     ) -> StructuralMatchContext {
         let is_root = !self.root_seen;
         self.root_seen = true;
-        let child_index = if let Some(count) = self.child_counts.last_mut() {
-            *count = count.saturating_add(1);
-            *count
-        } else {
-            1
-        };
-        let type_index = if let Some(counts) = self.type_counts.last_mut() {
-            if let Some((_, count)) = counts
-                .iter_mut()
-                .find(|(child_name, _)| child_name.eq_ignore_ascii_case(name))
-            {
+        let child_index = self.child_counts.as_mut().map_or(0, |counts| {
+            if let Some(count) = counts.last_mut() {
                 *count = count.saturating_add(1);
                 *count
             } else {
-                counts.push((name, 1));
                 1
             }
-        } else {
-            1
-        };
+        });
+        let type_index = self.type_counts.as_mut().map_or(0, |levels| {
+            if let Some(counts) = levels.last_mut() {
+                if let Some((_, count)) = counts
+                    .iter_mut()
+                    .find(|(child_name, _)| child_name.eq_ignore_ascii_case(name))
+                {
+                    *count = count.saturating_add(1);
+                    *count
+                } else {
+                    counts.push((name, 1));
+                    1
+                }
+            } else {
+                1
+            }
+        });
         let mut filtered_child_indices = SmallVec::with_capacity(self.filters.len());
         for (filter, counts) in &mut self.filters {
             let mut filtered_child_index = 0;
             // The pointers originate in the query slice and outlive this parser.
             if unsafe { (&*(*filter as *const LocalSelectorList<'static>)).as_slice() }
                 .iter()
-                .any(|predicate| predicate.matches_element(element))
+                .any(|predicate| predicate.matches_local_element_unchecked(element))
             {
                 let parent_count = counts.last_mut().expect("filter parent count");
                 *parent_count = parent_count.saturating_add(1);
@@ -85,8 +89,12 @@ impl<'html, 'query> StructuralParserState<'html, 'query> {
             filtered_child_indices.push((*filter as usize, filtered_child_index));
         }
         if persistent {
-            self.child_counts.push(0);
-            self.type_counts.push(Vec::new());
+            if let Some(counts) = &mut self.child_counts {
+                counts.push(0);
+            }
+            if let Some(counts) = &mut self.type_counts {
+                counts.push(Vec::new());
+            }
             for (_, counts) in &mut self.filters {
                 counts.push(0);
             }
@@ -100,8 +108,12 @@ impl<'html, 'query> StructuralParserState<'html, 'query> {
     }
 
     fn close(&mut self) {
-        self.child_counts.pop();
-        self.type_counts.pop();
+        if let Some(counts) = &mut self.child_counts {
+            counts.pop();
+        }
+        if let Some(counts) = &mut self.type_counts {
+            counts.pop();
+        }
         for (_, counts) in &mut self.filters {
             counts.pop();
         }
@@ -203,8 +215,8 @@ where
                     Box::new(StructuralParserState {
                         // Keep a virtual document parent so fragment roots
                         // participate in ordinal selectors consistently.
-                        child_counts: vec![0],
-                        type_counts: vec![Vec::new()],
+                        child_counts: features.needs_child_ordinals.then(|| vec![0]),
+                        type_counts: features.needs_type_ordinals.then(|| vec![Vec::new()]),
                         filters: structural_filters
                             .into_iter()
                             .map(|filter| (filter, vec![0]))

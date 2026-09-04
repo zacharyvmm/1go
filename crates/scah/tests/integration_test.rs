@@ -806,6 +806,39 @@ fn uppercase_attribute_flags_have_runtime_and_macro_parity() {
 }
 
 #[test]
+fn mixed_case_pseudo_names_have_runtime_and_macro_parity() {
+    let html =
+        "<main><div class='card'></div><div class='ad'></div><ul><li></li><li></li></ul></main>";
+    let runtime_queries = [
+        Query::all("li:FIRST-CHILD", Save::all()).unwrap().build(),
+        Query::all("li:NTH-CHILD(2)", Save::all()).unwrap().build(),
+        Query::all("div:NOT(.ad)", Save::all()).unwrap().build(),
+        Query::all(":ROOT", Save::all()).unwrap().build(),
+    ];
+    let compiled_queries = [
+        query! { all("li:FIRST-CHILD", Save::all()) },
+        query! { all("li:NTH-CHILD(2)", Save::all()) },
+        query! { all("div:NOT(.ad)", Save::all()) },
+        query! { all(":ROOT", Save::all()) },
+    ];
+    let runtime_store = parse(html, &runtime_queries).unwrap();
+    let compiled_store = parse(html, &compiled_queries).unwrap();
+
+    for selector in ["li:FIRST-CHILD", "li:NTH-CHILD(2)", "div:NOT(.ad)", ":ROOT"] {
+        assert_eq!(
+            runtime_store.get(selector).unwrap().count(),
+            compiled_store.get(selector).unwrap().count(),
+            "{selector}"
+        );
+        assert_eq!(
+            runtime_store.get(selector).unwrap().count(),
+            1,
+            "{selector}"
+        );
+    }
+}
+
+#[test]
 fn unsupported_structural_compositions_fail_at_query_build_time() {
     for selector in [
         "li:is(:first-child)",
