@@ -281,7 +281,6 @@ where
         }
     }
 
-    #[allow(dead_code)] // exposed by the dedicated no-text API in the next stack layer
     pub(crate) fn run_without_text_capture(&mut self, reader: &mut Reader<'html>) {
         debug_assert!(!self.capture_mode.captures_any());
         if self.parse_error.is_some() {
@@ -797,7 +796,7 @@ where
         } else {
             (0, 0)
         };
-        self.finalize_open_element(&open_element, reader);
+        self.finalize_open_element::<CAPTURE>(&open_element, reader);
         self.temp_state.saved_elements.truncate(saved_range.start);
         if CAPTURE {
             debug_assert!(closing_raw_count <= self.raw_active_count);
@@ -989,12 +988,21 @@ where
         early_exit
     }
 
-    fn finalize_open_element(&mut self, open_element: &OpenElement<'html>, reader: &Reader<'html>) {
+    fn finalize_open_element<const CAPTURE: bool>(
+        &mut self,
+        open_element: &OpenElement<'html>,
+        reader: &Reader<'html>,
+    ) {
         for saved_index in OpenElementStack::saved_range(open_element) {
             let saved = &self.temp_state.saved_elements[saved_index];
             let inner_html = saved
                 .inner_html_start()
                 .map(|start| reader.slice(start..self.position.reader_position));
+            if !CAPTURE {
+                self.store
+                    .set_content(saved.element_id, inner_html, None, None);
+                continue;
+            }
             let raw_text = saved
                 .raw_text_start()
                 .map(|start| start..self.store.text.raw_text.len());
