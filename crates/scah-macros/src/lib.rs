@@ -469,6 +469,7 @@ fn transition_tokens(index: usize, transition: &Transition<'_>) -> proc_macro2::
     let name = option_str_tokens(transition.predicate().name);
     let needs_id = transition.metadata().needs_id();
     let needs_class = transition.metadata().needs_class();
+    let local_name_only = transition.metadata().local_name_only();
     let names_ident = syn::Ident::new(
         &format!("__SCAH_ATTRIBUTE_NAMES_{index}"),
         Span::call_site(),
@@ -481,6 +482,7 @@ fn transition_tokens(index: usize, transition: &Transition<'_>) -> proc_macro2::
                 #name,
                 #needs_id,
                 #needs_class,
+                #local_name_only,
                 ::scah::__private::AttributeNames::from_static(#names_ident),
             ),
         )

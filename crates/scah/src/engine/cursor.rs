@@ -554,6 +554,20 @@ impl<'query> ScopedCursor {
     }
 
     #[inline(always)]
+    pub(crate) fn next_with_name_prechecked<'html, Q: QuerySpec<'query>>(
+        &self,
+        tree: &Q,
+        depth: super::DepthSize,
+        element: &XHtmlElement<'html>,
+    ) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        let fsm = tree.get_transition(self.position.state);
+        fsm.next_local_with_name_prechecked(element, depth, self.match_base_depth())
+    }
+
+    #[inline(always)]
     pub fn next_with_context<'html, Q: QuerySpec<'query>>(
         &self,
         tree: &Q,

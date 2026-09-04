@@ -707,7 +707,13 @@ where
             }
 
             let position = self.cursors[i].position;
-            let matched = self.cursors[i].next(self.query, depth, element);
+            let matched = if snapshot_len == 1
+                && !matches!(self.cursors[i].lifetime(), CursorLifetime::AdjacentSibling)
+            {
+                self.cursors[i].next_with_name_prechecked(self.query, depth, element)
+            } else {
+                self.cursors[i].next(self.query, depth, element)
+            };
 
             if !matched {
                 #[cfg(any(debug_assertions, test))]
