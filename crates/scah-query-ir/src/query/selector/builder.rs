@@ -937,12 +937,11 @@ fn split_nth_filter(source: &str) -> Result<(&str, Option<&str>), SelectorParseE
             depth = depth.saturating_sub(1);
         } else if depth == 0 && byte.is_ascii_whitespace() {
             let rest = source[index..].trim_start();
-            if rest.len() >= 2
-                && rest[..2].eq_ignore_ascii_case("of")
-                && rest[2..]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_whitespace())
+            let rest_bytes = rest.as_bytes();
+            if rest_bytes
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"of"))
+                && rest_bytes.get(2).is_some_and(u8::is_ascii_whitespace)
             {
                 let formula = source[..index].trim();
                 let filter = rest[2..].trim();
@@ -1229,6 +1228,14 @@ mod tests {
                 error.message(),
                 "structural pseudo-classes are not supported inside local selector lists"
             );
+        }
+    }
+
+    #[test]
+    fn malformed_unicode_nth_arguments_return_errors() {
+        for selector in ["li:nth-child(2 中)", "li:nth-of-type(2 中)"] {
+            let mut reader = Reader::new(selector);
+            assert!(ElementPredicate::try_from(&mut reader).is_err());
         }
     }
 }
