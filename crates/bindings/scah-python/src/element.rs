@@ -66,7 +66,15 @@ impl PyElement {
     }
 
     #[getter]
-    pub fn text_content(&self) -> Option<&str> {
+    pub fn raw_text(&self) -> Option<&str> {
+        self.store
+            .elements
+            .get(self.id.index())
+            .and_then(|e| e.raw_text(&self.store))
+    }
+
+    #[getter]
+    pub fn text(&self) -> Option<&str> {
         self.store
             .elements
             .get(self.id.index())
@@ -100,7 +108,8 @@ impl PyElement {
             "class",
             "attributes",
             "inner_html",
-            "text_content",
+            "raw_text",
+            "text",
         ]
     }
 
@@ -111,7 +120,8 @@ impl PyElement {
             "class" => self.class_name().into_bound_py_any(py),
             "attributes" => self.attributes(py).and_then(|a| a.into_bound_py_any(py)),
             "inner_html" => self.inner_html().into_bound_py_any(py),
-            "text_content" => self.text_content().into_bound_py_any(py),
+            "raw_text" => self.raw_text().into_bound_py_any(py),
+            "text" => self.text().into_bound_py_any(py),
             _ => Err(pyo3::exceptions::PyKeyError::new_err(key.to_string())),
         }
     }
