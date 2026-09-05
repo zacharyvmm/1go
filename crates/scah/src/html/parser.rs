@@ -367,7 +367,7 @@ where
             // to `XHtmlTag::from`: that parser intentionally keeps text after
             // `/` as part of the closing tag name, which would leave the raw
             // element open for a tolerated form such as `</style ignored>`.
-            if CAPTURE && self.capture_mode.captures_any() {
+            if CAPTURE && (self.raw_active_count > 0 || self.text_active_count > 0) {
                 self.flush_source_text(reader, reader.get_position());
             }
             self.raw_text_close = None;
@@ -402,7 +402,7 @@ where
             match span {
                 TagEvent::Complete(span) if span.kind == TagKind::Ignored => {
                     self.position.reader_position = span.start;
-                    if CAPTURE && self.capture_mode.captures_any() {
+                    if CAPTURE && (self.raw_active_count > 0 || self.text_active_count > 0) {
                         self.flush_source_text(reader, self.position.reader_position);
                     }
                     if CAPTURE && self.capture_mode.captures_text() {
@@ -426,7 +426,7 @@ where
                         } else {
                             (TagFlags::classify(name), TextTagFlags::default())
                         };
-                    if CAPTURE && self.capture_mode.captures_any() {
+                    if CAPTURE && (self.raw_active_count > 0 || self.text_active_count > 0) {
                         self.flush_source_text(reader, open.start);
                     }
                     if tag_flags.can_trigger_implied_close() {
@@ -451,7 +451,7 @@ where
                         self.temp_state
                             .preflight
                             .attribute_interest
-                            .require_attribute("hidden");
+                            .require_hidden();
                     }
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
@@ -497,9 +497,6 @@ where
         };
         let tag_start_position = self.position.reader_position;
 
-        if CAPTURE && self.capture_mode.captures_any() {
-            self.flush_source_text(reader, tag_start_position);
-        }
         match tag {
             XHtmlTag::Open => {
                 let tag = open_tag_flags.expect("opening tags are classified before preflight");
@@ -714,6 +711,11 @@ where
                 }
             }
             XHtmlTag::Close(closing_tag) => {
+                // Opening tags flush before implied-close processing above.
+                // Closing tags still need to flush their preceding text here.
+                if CAPTURE && (self.raw_active_count > 0 || self.text_active_count > 0) {
+                    self.flush_source_text(reader, tag_start_position);
+                }
                 if CAPTURE && self.capture_mode.captures_text() {
                     self.text_state.cancel_initial_newline();
                 }
@@ -1028,7 +1030,7 @@ where
             return;
         }
 
-        if CAPTURE && self.capture_mode.captures_any() {
+        if CAPTURE && (self.raw_active_count > 0 || self.text_active_count > 0) {
             self.flush_source_text(reader, reader.get_position());
         }
         self.position.reader_position = reader.get_position();

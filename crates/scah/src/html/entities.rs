@@ -162,6 +162,22 @@ fn digit_value(byte: u8, radix: u32) -> Option<u32> {
 }
 
 fn decode_named(source: &[u8], out: &mut Vec<u8>) -> Option<usize> {
+    // Escaped HTML most often uses these five complete spellings. Resolve
+    // them before the full-table search. Requiring the semicolon leaves
+    // longest-prefix and legacy semicolon-less matching to the general path.
+    let common: Option<(&[u8], usize)> = match source {
+        [b'a', b'm', b'p', b';', ..] => Some((b"&", 4)),
+        [b'l', b't', b';', ..] => Some((b"<", 3)),
+        [b'g', b't', b';', ..] => Some((b">", 3)),
+        [b'q', b'u', b'o', b't', b';', ..] => Some((b"\"", 5)),
+        [b'n', b'b', b's', b'p', b';', ..] => Some(("\u{00A0}".as_bytes(), 5)),
+        _ => None,
+    };
+    if let Some((value, consumed)) = common {
+        out.extend_from_slice(value);
+        return Some(consumed);
+    }
+
     let mut name_end = 0;
     while name_end < source.len()
         && name_end < MAX_NAME_LEN
@@ -354,6 +370,24 @@ mod tests {
         assert_eq!(
             decode("&unknown; & &#; &#x; &#X; end"),
             "&unknown; & &#; &#x; &#X; end"
+        );
+    }
+
+    #[test]
+    fn every_named_reference_matches_the_generated_value() {
+        for index in 0..super::NAMED_ENTITY_COUNT {
+            let name = std::str::from_utf8(super::entity_name(index)).unwrap();
+            let value = std::str::from_utf8(super::entity_value(index)).unwrap();
+            assert_eq!(decode(&format!("&{name}")), value, "{name}");
+            assert_eq!(
+                decode(&format!("&{name}!é")),
+                format!("{value}!é"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            decode("&amp;&amper;&AMP;&Amp;&notin;&notit;"),
+            "&&er;&&Amp;∉¬it;"
         );
     }
 

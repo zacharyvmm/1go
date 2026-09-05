@@ -285,25 +285,30 @@ impl ParserTextState {
     fn write_collapsed_decoded(&mut self, tape: &mut TextTape, decoded: &[u8]) {
         let mut i = 0;
         while i < decoded.len() {
-            let byte = decoded[i];
-            if is_html_whitespace(byte) {
+            if is_html_whitespace(decoded[i]) {
                 self.queue_separator(PendingSeparator::Space);
-                i += 1;
+                while i < decoded.len() && is_html_whitespace(decoded[i]) {
+                    i += 1;
+                }
                 continue;
             }
 
-            // Copy maximal non-special UTF-8 run in one extend.
+            // Ordinary prose already has single internal spaces. Copy those
+            // with the surrounding words instead of appending each word and
+            // its separator separately. ASCII whitespace cannot occur inside
+            // a UTF-8 encoding, so byte scanning keeps both slice edges valid.
             let run_start = i;
             while i < decoded.len() {
-                let b = decoded[i];
-                if is_html_whitespace(b) {
+                let byte = decoded[i];
+                if is_html_whitespace(byte)
+                    && !(byte == b' '
+                        && decoded
+                            .get(i + 1)
+                            .is_some_and(|&next| !is_html_whitespace(next)))
+                {
                     break;
                 }
-                i += utf8_char_len(b);
-                if i > decoded.len() {
-                    i = decoded.len();
-                    break;
-                }
+                i += 1;
             }
 
             self.flush_pending(tape);

@@ -466,13 +466,14 @@ fn bench_text_modes(c: &mut Criterion) {
         );
 
         let hidden = hidden_heavy_html(size);
+        let hidden_q = &[Query::all("div", Save::only_text()).unwrap().build()];
         group.throughput(Throughput::Bytes(hidden.len() as u64));
         group.bench_with_input(
             BenchmarkId::new("hidden_heavy", size),
             &hidden,
             |b, html| {
                 b.iter(|| {
-                    let store = parse(black_box(html), black_box(text_q)).unwrap();
+                    let store = parse(black_box(html), black_box(hidden_q)).unwrap();
                     consume_text(&store, "div");
                     black_box(store);
                 })

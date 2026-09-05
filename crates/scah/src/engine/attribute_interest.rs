@@ -15,6 +15,7 @@ pub(crate) struct AttributeInterest<'query> {
     all: bool,
     id: bool,
     class: bool,
+    hidden: bool,
     keys: SmallVec<[&'query str; 4]>,
 }
 
@@ -24,6 +25,7 @@ impl<'query> AttributeInterest<'query> {
         self.all = false;
         self.id = false;
         self.class = false;
+        self.hidden = false;
         self.keys.clear();
     }
 
@@ -33,16 +35,10 @@ impl<'query> AttributeInterest<'query> {
         self.keys.clear();
     }
 
+    /// Normalized text checks hidden on every tag, independently of selectors.
     #[inline]
-    pub fn require_attribute(&mut self, key: &'query str) {
-        if self.all || self.includes_attribute(key) {
-            return;
-        }
-        if self.keys.len() == INLINE_ATTRIBUTE_KEYS {
-            self.require_all();
-        } else {
-            self.keys.push(key);
-        }
+    pub fn require_hidden(&mut self) {
+        self.hidden = true;
     }
 
     #[cfg(test)]
@@ -107,6 +103,7 @@ impl<'query> AttributeInterest<'query> {
 
         self.id |= other.id;
         self.class |= other.class;
+        self.hidden |= other.hidden;
         for &key in &other.keys {
             if !self
                 .keys
@@ -124,7 +121,7 @@ impl<'query> AttributeInterest<'query> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        !self.all && !self.id && !self.class && self.keys.is_empty()
+        !self.all && !self.id && !self.class && !self.hidden && self.keys.is_empty()
     }
 
     #[inline]
@@ -140,6 +137,7 @@ impl<'query> AttributeInterest<'query> {
     #[inline]
     pub fn includes_attribute(&self, key: &str) -> bool {
         self.all
+            || (self.hidden && key.eq_ignore_ascii_case("hidden"))
             || self
                 .keys
                 .iter()
@@ -204,12 +202,14 @@ mod tests {
     #[test]
     fn explicit_attribute_interest_preserves_selective_parsing() {
         let mut interest = AttributeInterest::default();
-        interest.require_attribute("hidden");
-        interest.require_attribute("HIDDEN");
+        interest.require_hidden();
+        interest.require_hidden();
+        assert!(interest.includes_attribute("HIDDEN"));
 
         assert!(interest.includes_attribute("hidden"));
         assert!(!interest.includes_attribute("data-unused"));
-        assert_eq!(interest.keys.as_slice(), &["hidden"]);
+        assert!(interest.hidden);
+        assert!(interest.keys.is_empty());
     }
 
     #[test]
