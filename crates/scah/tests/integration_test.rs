@@ -806,6 +806,38 @@ fn uppercase_attribute_flags_have_runtime_and_macro_parity() {
 }
 
 #[test]
+fn unquoted_i_and_s_values_have_runtime_and_macro_parity() {
+    let html = "<div data-i='i' data-s='s' data-mi='I' data-ms='s'></div>";
+    let runtime_queries = [
+        Query::all("[data-i=i]", Save::all()).unwrap().build(),
+        Query::all("[data-s=s]", Save::all()).unwrap().build(),
+        Query::all("[data-mi=i i]", Save::all()).unwrap().build(),
+        Query::all("[data-ms=s s]", Save::all()).unwrap().build(),
+    ];
+    let compiled_queries = [
+        query! { all("[data-i=i]", Save::all()) },
+        query! { all("[data-s=s]", Save::all()) },
+        query! { all("[data-mi=i i]", Save::all()) },
+        query! { all("[data-ms=s s]", Save::all()) },
+    ];
+    let runtime_store = parse(html, &runtime_queries).unwrap();
+    let compiled_store = parse(html, &compiled_queries).unwrap();
+
+    for selector in ["[data-i=i]", "[data-s=s]", "[data-mi=i i]", "[data-ms=s s]"] {
+        assert_eq!(
+            runtime_store.get(selector).unwrap().count(),
+            1,
+            "{selector}"
+        );
+        assert_eq!(
+            compiled_store.get(selector).unwrap().count(),
+            1,
+            "{selector}"
+        );
+    }
+}
+
+#[test]
 fn mixed_case_pseudo_names_have_runtime_and_macro_parity() {
     let html =
         "<main><div class='card'></div><div class='ad'></div><ul><li></li><li></li></ul></main>";
@@ -835,6 +867,46 @@ fn mixed_case_pseudo_names_have_runtime_and_macro_parity() {
             1,
             "{selector}"
         );
+    }
+}
+
+#[test]
+fn an_plus_b_case_and_whitespace_have_runtime_and_macro_parity() {
+    let html = "<ul><li></li><li></li><li></li><li></li></ul>";
+    let runtime_queries = [
+        Query::all("li:nth-child(ODD)", Save::all())
+            .unwrap()
+            .build(),
+        Query::all("li:nth-child(2N + 1)", Save::all())
+            .unwrap()
+            .build(),
+    ];
+    let compiled_queries = [
+        query! { all("li:nth-child(ODD)", Save::all()) },
+        query! { all("li:nth-child(2N + 1)", Save::all()) },
+    ];
+    let runtime_store = parse(html, &runtime_queries).unwrap();
+    let compiled_store = parse(html, &compiled_queries).unwrap();
+
+    for selector in ["li:nth-child(ODD)", "li:nth-child(2N + 1)"] {
+        assert_eq!(
+            runtime_store.get(selector).unwrap().count(),
+            2,
+            "{selector}"
+        );
+        assert_eq!(
+            compiled_store.get(selector).unwrap().count(),
+            2,
+            "{selector}"
+        );
+    }
+
+    for selector in [
+        "li:nth-child(3 n)",
+        "li:nth-child(+ 2n)",
+        "li:nth-child(+ 2)",
+    ] {
+        assert!(Query::all(selector, Save::none()).is_err(), "{selector}");
     }
 }
 
