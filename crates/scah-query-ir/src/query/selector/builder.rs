@@ -333,6 +333,7 @@ impl<'query> AttributeSelection<'query> {
                 | SelectionAttributeToken::QuotedString(string_value) => {
                     if kv.value.is_none()
                         && kv.name.is_some()
+                        && !equal
                         && (string_value.eq_ignore_ascii_case("i")
                             || string_value.eq_ignore_ascii_case("s"))
                     {
@@ -883,23 +884,30 @@ fn parse_local_selector_list<'query>(
     Ok(LocalSelectorList::Owned(selectors.into_boxed_slice()))
 }
 
+fn is_css_whitespace_char(character: char) -> bool {
+    character.is_ascii() && is_css_whitespace(character as u8)
+}
+
 fn parse_an_plus_b(source: &str) -> Result<AnPlusB, SelectorParseError> {
-    let normalized: String = source
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .collect();
-    match normalized.as_str() {
-        "odd" => return Ok(AnPlusB { a: 2, b: 1 }),
-        "even" => return Ok(AnPlusB { a: 2, b: 0 }),
-        _ => {}
+    let source = source.trim_matches(is_css_whitespace_char);
+
+    if source.eq_ignore_ascii_case("odd") {
+        return Ok(AnPlusB { a: 2, b: 1 });
     }
-    if let Ok(b) = normalized.parse::<i32>() {
+    if source.eq_ignore_ascii_case("even") {
+        return Ok(AnPlusB { a: 2, b: 0 });
+    }
+    if let Ok(b) = source.parse::<i32>() {
         return Ok(AnPlusB { a: 0, b });
     }
-    let Some(n_index) = normalized.find('n') else {
+
+    let Some(n_index) = source
+        .bytes()
+        .position(|byte| byte.eq_ignore_ascii_case(&b'n'))
+    else {
         return Err(SelectorParseError::new("invalid An+B formula", 0));
     };
-    let coefficient = &normalized[..n_index];
+    let coefficient = &source[..n_index];
     let a = match coefficient {
         "" | "+" => 1,
         "-" => -1,
@@ -907,13 +915,25 @@ fn parse_an_plus_b(source: &str) -> Result<AnPlusB, SelectorParseError> {
             .parse::<i32>()
             .map_err(|_| SelectorParseError::new("invalid An+B coefficient", 0))?,
     };
-    let remainder = &normalized[n_index + 1..];
+
+    let remainder = source[n_index + 1..].trim_matches(is_css_whitespace_char);
     let b = if remainder.is_empty() {
         0
     } else {
-        remainder
-            .parse::<i32>()
-            .map_err(|_| SelectorParseError::new("invalid An+B offset", 0))?
+        let sign = remainder.as_bytes()[0];
+        if !matches!(sign, b'+' | b'-') {
+            return Err(SelectorParseError::new("invalid An+B offset", n_index + 1));
+        }
+        let digits = remainder[1..].trim_start_matches(is_css_whitespace_char);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(SelectorParseError::new("invalid An+B offset", n_index + 1));
+        }
+        let magnitude = digits
+            .parse::<i64>()
+            .map_err(|_| SelectorParseError::new("invalid An+B offset", n_index + 1))?;
+        let signed = if sign == b'-' { -magnitude } else { magnitude };
+        i32::try_from(signed)
+            .map_err(|_| SelectorParseError::new("invalid An+B offset", n_index + 1))?
     };
     Ok(AnPlusB { a, b })
 }
@@ -1211,6 +1231,68 @@ mod tests {
             let mut reader = Reader::new(selector);
             let element = ElementPredicate::try_from(&mut reader).unwrap();
             assert_eq!(element.attributes.as_slice()[0].case_sensitivity, expected);
+        }
+    }
+
+    #[test]
+    fn unquoted_i_and_s_attribute_values_are_not_mistaken_for_modifiers() {
+        for (selector, expected_value, expected_kind, expected_case) in [
+            (
+                "[x=i]",
+                "i",
+                AttributeSelectionKind::Exact,
+                AttributeCaseSensitivity::Default,
+            ),
+            (
+                "[x=s]",
+                "s",
+                AttributeSelectionKind::Exact,
+                AttributeCaseSensitivity::Default,
+            ),
+            (
+                "[x=i i]",
+                "i",
+                AttributeSelectionKind::Exact,
+                AttributeCaseSensitivity::AsciiInsensitive,
+            ),
+            (
+                "[x=s i]",
+                "s",
+                AttributeSelectionKind::Exact,
+                AttributeCaseSensitivity::AsciiInsensitive,
+            ),
+            (
+                "[x~=i]",
+                "i",
+                AttributeSelectionKind::WhitespaceSeparated,
+                AttributeCaseSensitivity::Default,
+            ),
+        ] {
+            let mut reader = Reader::new(selector);
+            let element = ElementPredicate::try_from(&mut reader).unwrap();
+            let attribute = &element.attributes.as_slice()[0];
+            assert_eq!(attribute.value, Some(expected_value), "{selector}");
+            assert_eq!(attribute.kind, expected_kind, "{selector}");
+            assert_eq!(attribute.case_sensitivity, expected_case, "{selector}");
+        }
+    }
+
+    #[test]
+    fn an_plus_b_accepts_css_whitespace_and_ascii_case_variants() {
+        for (source, expected) in [
+            ("3n + 1", AnPlusB { a: 3, b: 1 }),
+            ("-n+ 6", AnPlusB { a: -1, b: 6 }),
+            ("ODD", AnPlusB { a: 2, b: 1 }),
+            ("2N+1", AnPlusB { a: 2, b: 1 }),
+        ] {
+            assert_eq!(parse_an_plus_b(source), Ok(expected), "{source}");
+        }
+    }
+
+    #[test]
+    fn an_plus_b_rejects_whitespace_that_changes_tokens() {
+        for source in ["3 n", "+ 2n", "+ 2", "n 2"] {
+            assert!(parse_an_plus_b(source).is_err(), "{source}");
         }
     }
 
