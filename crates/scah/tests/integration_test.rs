@@ -739,6 +739,27 @@ fn filtered_ordinals_support_more_than_eight_distinct_filters() {
 }
 
 #[test]
+fn filtered_ordinals_support_more_than_eight_overlapping_filters() {
+    let selectors: Vec<_> = (0..9)
+        .map(|index| format!("li:nth-child(1 of .f{index})"))
+        .collect();
+    let queries: Vec<_> = selectors
+        .iter()
+        .map(|selector| Query::all(selector, Save::all()).unwrap().build())
+        .collect();
+    let classes = (0..9)
+        .map(|index| format!("f{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let html = format!("<ul><li class='{classes}'></li></ul>");
+    let store = parse(&html, &queries).unwrap();
+
+    for selector in &selectors {
+        assert_eq!(store.get(selector).unwrap().count(), 1, "{selector}");
+    }
+}
+
+#[test]
 fn filtered_ordinal_uses_one_selector_list() {
     let selector = "li:nth-child(2 of .a, [data-card])";
     let query = Query::all(selector, Save::all()).unwrap().build();
@@ -913,13 +934,20 @@ fn an_plus_b_case_and_whitespace_have_runtime_and_macro_parity() {
 #[test]
 fn unsupported_structural_compositions_fail_at_query_build_time() {
     for selector in [
-        "li:is(:first-child)",
         "li:not(:first-child)",
         "li:nth-child(2 of :first-child)",
         ":scope.foo > a",
     ] {
         assert!(Query::all(selector, Save::none()).is_err(), "{selector}");
     }
+
+    let selector = "li:is(:first-child)";
+    let queries = [Query::all(selector, Save::all()).unwrap().build()];
+    let store = parse("<ul><li></li></ul>", &queries).unwrap();
+    assert_eq!(
+        store.get(selector).map_or(0, |elements| elements.count()),
+        0
+    );
 }
 
 #[test]
