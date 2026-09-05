@@ -5,7 +5,7 @@ use crate::StructuralMatchContext;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
-use crate::{Position, QuerySectionId, StructuralPredicate};
+use crate::{LocalSelectorList, Position, QuerySectionId, StructuralPredicate};
 use crate::{QuerySpec, Reader};
 use smallvec::SmallVec;
 
@@ -312,16 +312,51 @@ where
         self.features
     }
 
-    pub(crate) fn structural_filters(&self) -> Vec<*const ()> {
-        let mut filters = Vec::new();
+    pub(crate) fn structural_filters(&self) -> Vec<&'query LocalSelectorList<'query>> {
+        let mut filters: Vec<&'query LocalSelectorList<'query>> = Vec::new();
         for runner in &self.runners {
             for filter in runner.query.structural_filters() {
-                if !filters.contains(&filter) {
+                if !filters
+                    .iter()
+                    .any(|existing| std::ptr::eq(*existing, filter))
+                {
                     filters.push(filter);
                 }
             }
         }
         filters
+    }
+
+    pub(crate) fn type_ordinal_names(&self) -> Option<SmallVec<[&'query str; 4]>> {
+        let mut names: SmallVec<[&'query str; 4]> = SmallVec::new();
+        for runner in &self.runners {
+            for transition in runner.query.states() {
+                let needs_type_ordinal =
+                    transition
+                        .predicate()
+                        .structural
+                        .as_slice()
+                        .iter()
+                        .any(|predicate| {
+                            matches!(
+                                predicate,
+                                StructuralPredicate::FirstOfType
+                                    | StructuralPredicate::NthOfType(_)
+                            )
+                        });
+                if !needs_type_ordinal {
+                    continue;
+                }
+                let name = transition.predicate().name?;
+                if !names
+                    .iter()
+                    .any(|existing| name.eq_ignore_ascii_case(existing))
+                {
+                    names.push(name);
+                }
+            }
+        }
+        Some(names)
     }
 
     // Preserve the ordinary executor's inlining across this thin dispatch
@@ -361,7 +396,7 @@ where
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
-        structural: Option<&StructuralMatchContext>,
+        structural: Option<&StructuralMatchContext<'query>>,
     ) {
         debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
@@ -412,7 +447,7 @@ where
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
         sibling_callbacks: &mut Vec<SiblingCallback>,
-        structural: Option<&StructuralMatchContext>,
+        structural: Option<&StructuralMatchContext<'query>>,
     ) {
         debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
@@ -710,6 +745,31 @@ mod tests {
         assert!(!filtered_features.needs_child_ordinals);
         assert!(!filtered_features.needs_type_ordinals);
         assert!(filtered_features.needs_filtered_ordinals);
+    }
+
+    #[test]
+    fn type_ordinal_interest_tracks_named_types_and_falls_back_for_universal_queries() {
+        let named = [
+            Query::all("li:nth-of-type(2)", Save::none())
+                .unwrap()
+                .build(),
+            Query::all("SPAN:first-of-type", Save::none())
+                .unwrap()
+                .build(),
+        ];
+        let names = QueryMultiplexer::new(&named)
+            .type_ordinal_names()
+            .expect("named selectors have finite type interest");
+        assert_eq!(names.as_slice(), &["li", "SPAN"]);
+
+        let universal = [Query::all("*:nth-of-type(2)", Save::none())
+            .unwrap()
+            .build()];
+        assert!(
+            QueryMultiplexer::new(&universal)
+                .type_ordinal_names()
+                .is_none()
+        );
     }
 
     #[test]

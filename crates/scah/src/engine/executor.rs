@@ -959,7 +959,7 @@ where
         document_position: &DocumentPosition,
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
-        structural: Option<&StructuralMatchContext>,
+        structural: Option<&StructuralMatchContext<'query>>,
     ) {
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();
@@ -1189,7 +1189,7 @@ where
         store: &mut Store<'html, 'query>,
         save_hits: &mut Vec<SaveHit>,
         sibling_callbacks: &mut Vec<SiblingCallback>,
-        structural: Option<&StructuralMatchContext>,
+        structural: Option<&StructuralMatchContext<'query>>,
     ) {
         let depth = document_position.element_depth;
         let snapshot_len = self.cursors.len();

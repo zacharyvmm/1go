@@ -4,7 +4,7 @@ use std::ops::Range;
 use super::builder::{QueryBuilder, Save, SelectionKind};
 use super::error::SelectorParseError;
 use super::transition::Transition;
-use crate::query::selector::Combinator;
+use crate::query::selector::{Combinator, LocalSelectorList};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Copy)]
 pub struct TransitionId(pub usize);
@@ -132,15 +132,17 @@ pub trait QuerySpec<'query> {
             .any(|transition| transition.predicate().requires_structural())
     }
 
-    fn structural_filters(&self) -> Vec<*const ()> {
-        let mut filters = Vec::new();
+    fn structural_filters(&'query self) -> Vec<&'query LocalSelectorList<'query>> {
+        let mut filters: Vec<&'query LocalSelectorList<'query>> = Vec::new();
         for transition in self.states() {
             for predicate in transition.predicate().structural.as_slice() {
                 if let crate::query::selector::StructuralPredicate::NthChildOf(_, filter) =
                     predicate
-                    && !filters.contains(&(filter as *const _ as *const ()))
+                    && !filters
+                        .iter()
+                        .any(|existing| std::ptr::eq(*existing, filter))
                 {
-                    filters.push(filter as *const _ as *const ());
+                    filters.push(filter);
                 }
             }
         }

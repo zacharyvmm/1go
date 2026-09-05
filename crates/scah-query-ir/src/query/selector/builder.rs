@@ -102,13 +102,33 @@ pub enum StructuralPredicate<'query> {
     NthChildOf(AnPlusB, LocalSelectorList<'query>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructuralMatchContext {
+#[derive(Debug, Clone)]
+pub struct StructuralMatchContext<'query> {
     pub child_index: u32,
     pub type_index: u32,
-    pub filtered_child_indices: smallvec::SmallVec<[(usize, u32); 8]>,
+    pub filtered_child_indices: smallvec::SmallVec<[(&'query LocalSelectorList<'query>, u32); 8]>,
     pub is_root: bool,
 }
+
+impl PartialEq for StructuralMatchContext<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.child_index == other.child_index
+            && self.type_index == other.type_index
+            && self.is_root == other.is_root
+            && self.filtered_child_indices.len() == other.filtered_child_indices.len()
+            && self
+                .filtered_child_indices
+                .iter()
+                .zip(&other.filtered_child_indices)
+                .all(
+                    |(&(left_filter, left_index), &(right_filter, right_index))| {
+                        std::ptr::eq(left_filter, right_filter) && left_index == right_index
+                    },
+                )
+    }
+}
+
+impl Eq for StructuralMatchContext<'_> {}
 
 #[derive(Debug, Clone)]
 pub enum StructuralPredicates<'query> {
