@@ -679,10 +679,13 @@ impl<'a> ElementPredicate<'a> {
                         });
                     } else {
                         let argument = read_balanced_function_argument(reader)?;
-                        let selectors = parse_local_selector_list(argument)?;
                         let predicate = match *name {
-                            "not" => LocalLogicalPredicate::Not(selectors),
-                            "is" | "where" => LocalLogicalPredicate::Any(selectors),
+                            "not" => {
+                                LocalLogicalPredicate::Not(parse_local_selector_list(argument)?)
+                            }
+                            "is" | "where" => LocalLogicalPredicate::Any(
+                                parse_forgiving_local_selector_list(argument),
+                            ),
                             _ => {
                                 return Err(SelectorParseError::new(
                                     "unsupported pseudo-class",
@@ -827,6 +830,18 @@ fn read_balanced_function_argument<'query>(
 fn parse_local_selector_list<'query>(
     source: &'query str,
 ) -> Result<LocalSelectorList<'query>, SelectorParseError> {
+    parse_local_selector_list_parts(source, false)
+}
+
+fn parse_forgiving_local_selector_list<'query>(source: &'query str) -> LocalSelectorList<'query> {
+    parse_local_selector_list_parts(source, true)
+        .expect("forgiving selector-list parsing cannot fail")
+}
+
+fn parse_local_selector_list_parts<'query>(
+    source: &'query str,
+    forgiving: bool,
+) -> Result<LocalSelectorList<'query>, SelectorParseError> {
     let bytes = source.as_bytes();
     let mut parts = Vec::new();
     let mut start = 0;
@@ -856,32 +871,41 @@ fn parse_local_selector_list<'query>(
         }
     }
     parts.push(&source[start..]);
-    if parts.iter().any(|part| part.trim().is_empty()) {
+    let mut selectors = Vec::with_capacity(parts.len());
+    for part in parts {
+        match parse_local_selector(part) {
+            Ok(selector) => selectors.push(selector),
+            Err(_) if forgiving => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(LocalSelectorList::Owned(selectors.into_boxed_slice()))
+}
+
+fn parse_local_selector(source: &str) -> Result<ElementPredicate<'_>, SelectorParseError> {
+    let source = source.trim();
+    if source.is_empty() {
         return Err(SelectorParseError::new(
             "pseudo-class selector list has an empty alternative",
             0,
         ));
     }
 
-    let mut selectors = Vec::with_capacity(parts.len());
-    for part in parts {
-        let mut reader = Reader::new(part.trim());
-        let selector = ElementPredicate::try_from(&mut reader)?;
-        if !reader.eof() {
-            return Err(SelectorParseError::new(
-                "combinators are not supported inside local pseudo-classes",
-                reader.get_position(),
-            ));
-        }
-        if selector.requires_structural() {
-            return Err(SelectorParseError::new(
-                "structural pseudo-classes are not supported inside local selector lists",
-                0,
-            ));
-        }
-        selectors.push(selector);
+    let mut reader = Reader::new(source);
+    let selector = ElementPredicate::try_from(&mut reader)?;
+    if !reader.eof() {
+        return Err(SelectorParseError::new(
+            "combinators are not supported inside local pseudo-classes",
+            reader.get_position(),
+        ));
     }
-    Ok(LocalSelectorList::Owned(selectors.into_boxed_slice()))
+    if selector.requires_structural() {
+        return Err(SelectorParseError::new(
+            "structural pseudo-classes are not supported inside local selector lists",
+            0,
+        ));
+    }
+    Ok(selector)
 }
 
 fn is_css_whitespace_char(character: char) -> bool {
@@ -1298,12 +1322,7 @@ mod tests {
 
     #[test]
     fn structural_pseudos_in_local_selector_lists_are_rejected() {
-        for selector in [
-            "li:is(:first-child)",
-            "li:not(:first-child)",
-            "li:where(:nth-child(2))",
-            "li:nth-child(2 of :first-child)",
-        ] {
+        for selector in ["li:not(:first-child)", "li:nth-child(2 of :first-child)"] {
             let mut reader = Reader::new(selector);
             let error = ElementPredicate::try_from(&mut reader).unwrap_err();
             assert_eq!(
@@ -1311,6 +1330,36 @@ mod tests {
                 "structural pseudo-classes are not supported inside local selector lists"
             );
         }
+    }
+
+    #[test]
+    fn is_and_where_discard_unsupported_alternatives() {
+        for selector in [
+            "div:is(.card, :has(a), :first-child)",
+            "div:where(.card, :has(a), :nth-child(2))",
+        ] {
+            let mut reader = Reader::new(selector);
+            let element = ElementPredicate::try_from(&mut reader).unwrap();
+            let LocalLogicalPredicate::Any(alternatives) = &element.logical.as_slice()[0] else {
+                panic!("{selector} did not compile to an any predicate");
+            };
+            assert_eq!(alternatives.as_slice().len(), 1, "{selector}");
+            assert_eq!(
+                alternatives.as_slice()[0].classes.as_slice(),
+                &["card"],
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_with_only_unsupported_alternatives_matches_nothing() {
+        let mut reader = Reader::new("div:is(:has(a), :first-child)");
+        let element = ElementPredicate::try_from(&mut reader).unwrap();
+        let LocalLogicalPredicate::Any(alternatives) = &element.logical.as_slice()[0] else {
+            panic!("selector did not compile to an any predicate");
+        };
+        assert!(alternatives.as_slice().is_empty());
     }
 
     #[test]
