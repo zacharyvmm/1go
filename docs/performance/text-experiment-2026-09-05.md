@@ -2,7 +2,7 @@
 
 The experiment passes all six text-extraction limits and both ordinary-parser limits in three-round comparisons on the Acer's x86-64 CPU. No architectural refactor or gate-budget change was needed.
 
-Branch: `codex/text-performance-experiment`.
+Branch: `perf/text-performance-experiment`.
 
 The starting point is [PR #62 at ec0ac04](https://github.com/zacharyvmm/scah/commit/ec0ac044b24733ec5627f62126e9e8379133168b). The main baseline is [7847d18](https://github.com/zacharyvmm/scah/commit/7847d18684d647916506d29328fa47414f2a978a). Raw round estimates, compiler settings, and hashes of the measured source files are in [the measurement record](text-experiment-2026-09-05.json).
 

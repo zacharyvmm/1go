@@ -1,5 +1,5 @@
 {
-  "branch": "codex/text-performance-experiment",
+  "branch": "perf/text-performance-experiment",
   "pr_baseline": "ec0ac044b24733ec5627f62126e9e8379133168b",
   "main_baseline": "7847d18684d647916506d29328fa47414f2a978a",
   "host": "Acer-Nitro-5",
