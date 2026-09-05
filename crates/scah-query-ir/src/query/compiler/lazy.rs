@@ -183,7 +183,11 @@ impl<S: AsRef<str>> LazyQueryBuilder<S> {
                 }
             };
 
-            let paths = Transition::generate_transition_paths_from_string(source)?;
+            let paths = if query.parent.is_some() {
+                Transition::generate_scoped_transition_paths_from_string(source)?
+            } else {
+                Transition::generate_transition_paths_from_string(source)?
+            };
             Query::require_legacy_engine_compatible_paths(&paths)?;
             let mut section_alternatives = Vec::new();
             for mut path in paths {

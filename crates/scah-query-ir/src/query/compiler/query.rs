@@ -452,7 +452,28 @@ impl<'query> Query<'query> {
         query: &'query str,
         save: Save,
     ) -> Result<QueryBuilder<'query>, SelectorParseError> {
-        let paths = Transition::generate_transition_paths_from_string(query)?;
+        Self::build_initial(query, save, SelectionKind::First, false)
+    }
+
+    #[doc(hidden)]
+    pub fn first_scoped(
+        query: &'query str,
+        save: Save,
+    ) -> Result<QueryBuilder<'query>, SelectorParseError> {
+        Self::build_initial(query, save, SelectionKind::First, true)
+    }
+
+    fn build_initial(
+        query: &'query str,
+        save: Save,
+        kind: SelectionKind,
+        scoped: bool,
+    ) -> Result<QueryBuilder<'query>, SelectorParseError> {
+        let paths = if scoped {
+            Transition::generate_scoped_transition_paths_from_string(query)?
+        } else {
+            Transition::generate_transition_paths_from_string(query)?
+        };
         Self::require_legacy_engine_compatible_paths(&paths)?;
         let mut states = Vec::new();
         let mut alternatives = Vec::new();
@@ -462,13 +483,7 @@ impl<'query> Query<'query> {
             alternatives.push(start..TransitionId(states.len()));
         }
         let range = alternatives.first().unwrap().start..alternatives.last().unwrap().end;
-        let queries = vec![QuerySection::new(
-            query,
-            save,
-            SelectionKind::First,
-            range,
-            None,
-        )];
+        let queries = vec![QuerySection::new(query, save, kind, range, None)];
 
         Ok(QueryBuilder {
             states,
@@ -478,29 +493,15 @@ impl<'query> Query<'query> {
     }
 
     pub fn all(query: &'query str, save: Save) -> Result<QueryBuilder<'query>, SelectorParseError> {
-        let paths = Transition::generate_transition_paths_from_string(query)?;
-        Self::require_legacy_engine_compatible_paths(&paths)?;
-        let mut states = Vec::new();
-        let mut alternatives = Vec::new();
-        for path in paths {
-            let start = TransitionId(states.len());
-            states.extend(path);
-            alternatives.push(start..TransitionId(states.len()));
-        }
-        let range = alternatives.first().unwrap().start..alternatives.last().unwrap().end;
-        let queries = vec![QuerySection::new(
-            query,
-            save,
-            SelectionKind::All,
-            range,
-            None,
-        )];
+        Self::build_initial(query, save, SelectionKind::All, false)
+    }
 
-        Ok(QueryBuilder {
-            states,
-            selection: queries,
-            alternatives: vec![alternatives],
-        })
+    #[doc(hidden)]
+    pub fn all_scoped(
+        query: &'query str,
+        save: Save,
+    ) -> Result<QueryBuilder<'query>, SelectorParseError> {
+        Self::build_initial(query, save, SelectionKind::All, true)
     }
 }
 

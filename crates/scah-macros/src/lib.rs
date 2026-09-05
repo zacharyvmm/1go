@@ -349,20 +349,19 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
     }
 }
 
-fn compile_node<'a>(node: &'a QueryNode) -> Result<QueryBuilder<'a>> {
-    let mut builder = match node.kind {
-        SelectionKind::All => {
-            Query::all(Box::leak(node.selector.value().into_boxed_str()), node.save)
-        }
-        SelectionKind::First => {
-            Query::first(Box::leak(node.selector.value().into_boxed_str()), node.save)
-        }
+fn compile_node<'a>(node: &'a QueryNode, scoped: bool) -> Result<QueryBuilder<'a>> {
+    let selector = Box::leak(node.selector.value().into_boxed_str());
+    let mut builder = match (node.kind, scoped) {
+        (SelectionKind::All, false) => Query::all(selector, node.save),
+        (SelectionKind::First, false) => Query::first(selector, node.save),
+        (SelectionKind::All, true) => Query::all_scoped(selector, node.save),
+        (SelectionKind::First, true) => Query::first_scoped(selector, node.save),
     }
     .map_err(|err| syn::Error::new(node.selector.span(), err.to_string()))?;
 
     let current_index = scah_query_ir::QuerySectionId(builder.selection.len() - 1);
     for child in &node.children {
-        let child_builder = compile_node(child)?;
+        let child_builder = compile_node(child, true)?;
         builder.append(current_index, child_builder);
     }
 
@@ -370,7 +369,7 @@ fn compile_node<'a>(node: &'a QueryNode) -> Result<QueryBuilder<'a>> {
 }
 
 fn expand_query(node: &QueryNode) -> Result<proc_macro2::TokenStream> {
-    let compiled = compile_node(node)
+    let compiled = compile_node(node, false)
         .map(QueryBuilder::build)
         .map_err(|err| syn::Error::new(node.selector.span(), err.to_string()))?;
 
@@ -538,14 +537,18 @@ fn inline_predicate_tokens(predicate: &ElementPredicate<'_>) -> proc_macro2::Tok
     let logical = logical_tokens(&predicate.logical);
     let structural = structural_tokens(&predicate.structural);
     quote! {
-        ::scah::ElementPredicate::new_const(
-            #name,
-            #id,
-            ::scah::ClassSelections::from_static(&[#(#classes),*]),
-            ::scah::AttributeSelections::from_static(&[#(#attrs),*]),
-            #logical,
-            #structural,
-        )
+        const {
+            const __SCAH_CLASSES: &[&'static str] = &[#(#classes),*];
+            const __SCAH_ATTRS: &[::scah::AttributeSelection<'static>] = &[#(#attrs),*];
+            ::scah::ElementPredicate::new_const(
+                #name,
+                #id,
+                ::scah::ClassSelections::from_static(__SCAH_CLASSES),
+                ::scah::AttributeSelections::from_static(__SCAH_ATTRS),
+                #logical,
+                #structural,
+            )
+        }
     }
 }
 

@@ -326,15 +326,28 @@ const fn metadata_matches_attributes(
     let mut attribute_index = 0;
     while attribute_index < attributes.len() {
         let attribute_name = attributes[attribute_index].name;
-        if !is_metadata_attribute(attribute_name)
-            && !has_previous_attribute(attributes, attribute_index, attribute_name)
-        {
-            if *metadata_index >= metadata_names.len()
-                || !const_ascii_case_insensitive_eq(metadata_names[*metadata_index], attribute_name)
+        if !is_metadata_attribute(attribute_name) {
+            if *metadata_index < metadata_names.len()
+                && const_ascii_case_insensitive_eq(metadata_names[*metadata_index], attribute_name)
             {
-                return false;
+                *metadata_index += 1;
+            } else {
+                let mut previous_index = 0;
+                let mut found = false;
+                while previous_index < *metadata_index {
+                    if const_ascii_case_insensitive_eq(
+                        metadata_names[previous_index],
+                        attribute_name,
+                    ) {
+                        found = true;
+                        break;
+                    }
+                    previous_index += 1;
+                }
+                if !found {
+                    return false;
+                }
             }
-            *metadata_index += 1;
         }
         attribute_index += 1;
     }
@@ -413,18 +426,34 @@ impl<'query> Transition<'query> {
     pub fn generate_transition_paths_from_string(
         query: &'query str,
     ) -> Result<Vec<Vec<Self>>, SelectorParseError> {
+        Self::generate_transition_paths(query, false)
+    }
+
+    pub(crate) fn generate_scoped_transition_paths_from_string(
+        query: &'query str,
+    ) -> Result<Vec<Vec<Self>>, SelectorParseError> {
+        Self::generate_transition_paths(query, true)
+    }
+
+    fn generate_transition_paths(
+        query: &'query str,
+        scoped: bool,
+    ) -> Result<Vec<Vec<Self>>, SelectorParseError> {
         if query.bytes().any(|byte| byte == 0x0b) {
             return Err(SelectorParseError::new("illegal selector token", 0));
         }
         let alternatives = split_selector_list(query)?;
         let mut paths = Vec::with_capacity(alternatives.len());
         for alternative in alternatives {
-            paths.push(Self::generate_single_path(alternative)?);
+            paths.push(Self::generate_single_path(alternative, scoped)?);
         }
         Ok(paths)
     }
 
-    fn generate_single_path(query: &'query str) -> Result<Vec<Self>, SelectorParseError> {
+    fn generate_single_path(
+        query: &'query str,
+        scoped: bool,
+    ) -> Result<Vec<Self>, SelectorParseError> {
         if query.bytes().any(|byte| byte == 0x0b) {
             return Err(SelectorParseError::new("illegal selector token", 0));
         }
@@ -462,9 +491,12 @@ impl<'query> Transition<'query> {
         let has_scope = first_structural
             .iter()
             .any(|predicate| matches!(predicate, crate::StructuralPredicate::Scope));
-        if states.len() > 1 && pure_scope_anchor {
+        if states.len() > 1 && pure_scope_anchor && scoped {
             states.remove(0);
         } else if states.len() > 1 && has_scope {
+            if pure_scope_anchor {
+                return Ok(states);
+            }
             return Err(SelectorParseError::new(
                 "compound :scope anchors are not supported",
                 0,
@@ -596,23 +628,6 @@ const fn has_attribute_named(
 
 const fn is_metadata_attribute(name: &str) -> bool {
     const_ascii_case_insensitive_eq(name, "id") || const_ascii_case_insensitive_eq(name, "class")
-}
-
-const fn has_previous_attribute(
-    attributes: &[crate::query::selector::AttributeSelection<'_>],
-    end: usize,
-    name: &str,
-) -> bool {
-    let mut index = 0;
-    while index < end {
-        if !is_metadata_attribute(attributes[index].name)
-            && const_ascii_case_insensitive_eq(attributes[index].name, name)
-        {
-            return true;
-        }
-        index += 1;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -889,14 +904,38 @@ mod tests {
     }
 
     #[test]
-    fn pure_scope_anchor_is_removed_but_compound_scope_is_rejected() {
+    fn top_level_scope_anchor_is_retained() {
         let states = Transition::generate_transitions_from_string(":scope > a").unwrap();
 
-        assert_eq!(states.len(), 1);
-        assert_eq!(states[0].predicate().name, Some("a"));
+        assert_eq!(states.len(), 2);
+        assert!(matches!(
+            states[0].predicate().structural.as_slice(),
+            [crate::StructuralPredicate::Scope]
+        ));
+        assert_eq!(states[1].predicate().name, Some("a"));
+
+        let paths = Transition::generate_scoped_transition_paths_from_string(":scope > a").unwrap();
+        assert_eq!(paths[0].len(), 1);
+        assert_eq!(paths[0][0].predicate().name, Some("a"));
 
         let error = Transition::generate_transitions_from_string(":scope.foo > a").unwrap_err();
         assert_eq!(error.message(), "compound :scope anchors are not supported");
+    }
+
+    #[test]
+    fn repeated_nested_attributes_match_compiled_metadata() {
+        let transition =
+            Transition::generate_transitions_from_string("div:is([data-x=a], [data-x=b])")
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        assert_eq!(transition.metadata().attribute_names(), &["data-x"]);
+        assert!(
+            transition
+                .metadata()
+                .matches_predicate(transition.predicate())
+        );
     }
 
     #[test]
