@@ -217,7 +217,7 @@ test('rawText preserves entities while text decodes them', () => {
   const store = parse(html, [query])
   const p = store.get('p')?.at(0)
   expect(p?.rawText).toBe('A&nbsp;&amp;&#x20;B')
-  expect(p?.text).toBe('A & B')
+  expect(p?.text).toBe('A\u00a0& B')
 })
 
 test('requested empty text is empty string not null', () => {
@@ -255,7 +255,8 @@ test('legacy textContent still requests normalized text', () => {
   const p = store.get('p')?.at(0)
 
   expect(p?.rawText).toBeNull()
-  expect(p?.text).toBe('A & B')
+  expect(p?.text).toBe('A\u00a0& B')
+  expect(p?.textContent).toBe('A\u00a0& B')
 })
 
 test('Save is an options interface, not a runtime helper export', () => {

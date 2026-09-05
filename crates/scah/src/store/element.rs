@@ -190,6 +190,15 @@ impl<'html> Element<'html> {
             .map(|range| dom.text.text.slice(range.clone()))
     }
 
+    /// Get normalized descendant text using the former method name.
+    ///
+    /// This compatibility method has the new [`Element::text`] semantics. It
+    /// does not reproduce the byte output of the former text-content extractor.
+    #[deprecated(since = "0.0.22", note = "use `Element::text()`")]
+    pub fn text_content(&self, dom: &'html Store) -> Option<&'html str> {
+        self.text(dom)
+    }
+
     /// Returns whether this element captured a raw-text range.
     ///
     /// Distinguishes uncaptured content (`false`) from captured empty

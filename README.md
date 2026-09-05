@@ -261,7 +261,29 @@ Node uses plain option objects (no runtime `Save` helpers):
 
 Rust and Python retain `Save::only_raw_text()` / `Save.only_raw_text()` style constructors.
 
-### Migration from `text_content`
+### Breaking migration from `text_content`
+
+`text` replaces `text_content`, but it is not output-compatible. The new
+representation decodes character references, omits `script`, `style`,
+`template`, and `[hidden]` subtrees, inserts structural line and table-cell
+boundaries, and applies different whitespace rules. Code that compares,
+hashes, indexes, or persists extracted text should treat this change as a data
+migration, not a field rename.
+
+For example, extracting the text of `main` from:
+
+```html
+<main><p>A&nbsp;&amp; B</p><div hidden>secret</div><p>C</p></main>
+```
+
+produces different bytes:
+
+```text
+old text_content: "A&nbsp;&amp; B secret C"
+new text:         "A\u{00A0}& B\nC"
+```
+
+The new result contains U+00A0 and a line feed. It also omits the hidden text.
 
 | Before | After |
 | ------ | ----- |
@@ -273,7 +295,12 @@ Rust and Python retain `Save::only_raw_text()` / `Save.only_raw_text()` style co
 | Node `element.textContent` | Node `element.text` |
 | No raw equivalent | `raw_text` / `rawText` |
 
-Old `text_content` output was already a normalized join, so it maps conceptually to the new `text`, not `raw_text`.
+Deprecated compatibility aliases remain for `Save::only_text_content()` and
+`element.text_content(&store)` in Rust, `Save.only_text_content()`,
+`Save(text_content=...)`, and `element.text_content` in Python, and
+`textContent` save options and `Element.textContent` in Node. These aliases return
+the new normalized representation. They do not restore the old byte output.
+Python emits `DeprecationWarning` when its aliases are used.
 
 `Save::all()` now captures both `raw_text` and normalized `text` (plus `inner_html`), which can perform more work than the old two-field `Save::all()`. Prefer `Save::only_text()` or `Save::only_raw_text()` when only one representation is needed.
 

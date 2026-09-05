@@ -286,9 +286,9 @@ impl ParserTextState {
         let mut i = 0;
         while i < decoded.len() {
             let byte = decoded[i];
-            if is_html_whitespace(byte) || is_nbsp_at(decoded, i) {
+            if is_html_whitespace(byte) {
                 self.queue_separator(PendingSeparator::Space);
-                i += if is_nbsp_at(decoded, i) { 2 } else { 1 };
+                i += 1;
                 continue;
             }
 
@@ -296,7 +296,7 @@ impl ParserTextState {
             let run_start = i;
             while i < decoded.len() {
                 let b = decoded[i];
-                if is_html_whitespace(b) || is_nbsp_at(decoded, i) {
+                if is_html_whitespace(b) {
                     break;
                 }
                 i += utf8_char_len(b);
@@ -624,11 +624,6 @@ impl TextElementFlags {
 #[inline]
 fn is_html_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0C)
-}
-
-#[inline]
-fn is_nbsp_at(bytes: &[u8], index: usize) -> bool {
-    bytes.get(index..index + 2) == Some(&[0xC2, 0xA0])
 }
 
 #[inline]

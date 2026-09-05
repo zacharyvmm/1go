@@ -9,6 +9,7 @@ use napi_derive::napi;
 #[derive(Clone, Copy, Debug)]
 pub struct JsSave {
     pub inner_html: Option<bool>,
+    /// Deprecated compatibility alias for `text`.
     pub text_content: Option<bool>,
     pub attributes: Option<bool>,
     pub raw_text: Option<bool>,

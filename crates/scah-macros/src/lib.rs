@@ -337,6 +337,8 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
             ["Save", "name_only"] => Ok(Save::name_only()),
             ["Save", "only_raw_text"] => Ok(Save::only_raw_text()),
             ["Save", "only_text"] => Ok(Save::only_text()),
+            #[allow(deprecated)]
+            ["Save", "only_text_content"] => Ok(Save::only_text_content()),
             _ => Err(syn::Error::new_spanned(
                 expr,
                 "unsupported save expression in query!",
@@ -611,6 +613,16 @@ mod tests {
         assert_eq!(
             parse_save_expr(&expression).unwrap(),
             scah_query_ir::Save::name_only()
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn accepts_legacy_text_content_save_constructor() {
+        let expression = syn::parse_str::<Expr>("Save::only_text_content()").unwrap();
+        assert_eq!(
+            parse_save_expr(&expression).unwrap(),
+            scah_query_ir::Save::only_text()
         );
     }
 

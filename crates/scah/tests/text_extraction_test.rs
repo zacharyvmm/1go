@@ -282,6 +282,30 @@ fn preformatted_text_preserves_literal_and_decoded_nbsp() {
 }
 
 #[test]
+fn collapsed_text_preserves_literal_and_decoded_nbsp() {
+    for (source, expected) in [
+        ("A\u{00A0}B", "A\u{00A0}B"),
+        ("A&nbsp;B", "A\u{00A0}B"),
+        ("A&nbsp;&nbsp;&nbsp;B", "A\u{00A0}\u{00A0}\u{00A0}B"),
+        ("A&nbsp; &nbsp;B", "A\u{00A0} \u{00A0}B"),
+    ] {
+        let html = format!("<p>{source}</p>");
+        assert_eq!(text_of(&html, "p"), expected, "source={source:?}");
+    }
+}
+
+#[test]
+#[allow(deprecated)]
+fn legacy_rust_text_content_aliases_use_new_text_semantics() {
+    let html = "<p>A&nbsp;&amp; B</p>";
+    let queries = [Query::all("p", Save::only_text_content()).unwrap().build()];
+    let store = parse(html, &queries).unwrap();
+    let p = store.get("p").unwrap().next().unwrap();
+
+    assert_eq!(p.text_content(&store), Some("A\u{00A0}& B"));
+}
+
+#[test]
 fn intervening_tag_cancels_pre_initial_newline() {
     let text = text_of("<pre><span>\nX</span></pre>", "pre");
     assert_eq!(text, "\nX");
