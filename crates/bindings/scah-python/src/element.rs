@@ -1,4 +1,5 @@
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyDeprecationWarning, PyValueError};
+use pyo3::ffi::c_str;
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt, prelude::*};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
@@ -81,6 +82,17 @@ impl PyElement {
             .and_then(|e| e.text(&self.store))
     }
 
+    #[getter]
+    pub fn text_content<'a>(&'a self, py: Python<'_>) -> PyResult<Option<&'a str>> {
+        PyErr::warn(
+            py,
+            &py.get_type::<PyDeprecationWarning>(),
+            c_str!("Element.text_content is deprecated; use Element.text"),
+            1,
+        )?;
+        Ok(self.text())
+    }
+
     pub fn get(&self, query: String) -> PyResult<Vec<PyElement>> {
         let element = self
             .store
@@ -110,6 +122,7 @@ impl PyElement {
             "inner_html",
             "raw_text",
             "text",
+            "text_content",
         ]
     }
 
@@ -122,6 +135,7 @@ impl PyElement {
             "inner_html" => self.inner_html().into_bound_py_any(py),
             "raw_text" => self.raw_text().into_bound_py_any(py),
             "text" => self.text().into_bound_py_any(py),
+            "text_content" => self.text_content(py)?.into_bound_py_any(py),
             _ => Err(pyo3::exceptions::PyKeyError::new_err(key.to_string())),
         }
     }

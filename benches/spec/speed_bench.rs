@@ -13,13 +13,19 @@ use tl::ParserOptions;
 
 const QUERY: &str = "a";
 const SPEC_HTML_FILE: &str = "html.spec.whatwg.org.html";
+const COMPARISON_SAVE: Save = Save {
+    inner_html: true,
+    raw_text: false,
+    text: true,
+    attributes: true,
+};
 
 fn consume_scah_results(store: &scah::Store<'_, '_>) {
     if let Some(elements) = store.get(QUERY) {
         for element in elements {
             black_box(&element.attributes(store));
             black_box(&element.inner_html);
-            black_box(&element.text_content(store));
+            black_box(&element.text(store));
         }
     }
 }
@@ -58,7 +64,7 @@ fn bench_spec_links(c: &mut Criterion) {
         })
     });
 
-    let save_text_queries = &[Query::all(QUERY, Save::only_text_content())
+    let save_text_queries = &[Query::all(QUERY, Save::only_text())
         .expect("spec selector should parse")
         .build()];
     group.bench_function("scah_parse_prebuilt_save_text", |b| {
@@ -80,7 +86,7 @@ fn bench_spec_links(c: &mut Criterion) {
 
     group.bench_function("scah", |b| {
         b.iter(|| {
-            let queries = &[Query::all(QUERY, Save::all())
+            let queries = &[Query::all(QUERY, COMPARISON_SAVE)
                 .expect("spec selector should parse")
                 .build()];
             let store = parse(&content, queries).unwrap();
@@ -88,7 +94,7 @@ fn bench_spec_links(c: &mut Criterion) {
             for element in store.get(QUERY).unwrap() {
                 black_box(&element.attributes(&store));
                 black_box(&element.inner_html);
-                black_box(&element.text_content(&store));
+                black_box(&element.text(&store));
             }
         })
     });

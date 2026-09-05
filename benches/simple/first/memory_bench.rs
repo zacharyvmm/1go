@@ -18,6 +18,12 @@ impl Error for StopParsing {}
 
 const MAX_ELEMENT_LEN: usize = 1000;
 const QUERY: &str = black_box("a");
+const COMPARISON_SAVE: Save = Save {
+    inner_html: true,
+    raw_text: false,
+    text: true,
+    attributes: true,
+};
 
 fn setup_html() -> String {
     let mut html = String::new();
@@ -36,7 +42,7 @@ use scah::{Query, Save, parse};
 #[library_benchmark]
 #[bench::scah(setup_html())]
 fn bench_scah(html: String) {
-    let queries = &[Query::first(QUERY, Save::all())
+    let queries = &[Query::first(QUERY, COMPARISON_SAVE)
         .expect("simple bench selector should parse")
         .build()];
 
@@ -46,7 +52,7 @@ fn bench_scah(html: String) {
 
     black_box(&element.attributes(&store));
     black_box(&element.inner_html);
-    black_box(&element.text_content(&store));
+    black_box(&element.text(&store));
 }
 
 use scraper::{Html, Selector};

@@ -111,6 +111,12 @@ impl JsElement {
             .and_then(|e| e.text(&self.store))
     }
 
+    #[napi(getter)]
+    /// Deprecated compatibility alias for `text`.
+    pub fn text_content(&self) -> Option<&str> {
+        self.text()
+    }
+
     #[napi]
     pub fn get(&self, query: String) -> Result<Vec<JsElement>> {
         let element = self

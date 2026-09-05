@@ -10,6 +10,8 @@ export declare class Element {
   get innerHtml(): string | null
   get rawText(): string | null
   get text(): string | null
+  /** Deprecated compatibility alias for `text`. */
+  get textContent(): string | null
   get(query: string): Array<Element>
 }
 export type JsElement = Element
@@ -58,6 +60,7 @@ export declare function parse(html: string, queries: Array<JsQuery>): Store
 
 export interface Save {
   innerHtml?: boolean
+  /** Deprecated compatibility alias for `text`. */
   textContent?: boolean
   attributes?: boolean
   rawText?: boolean

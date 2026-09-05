@@ -118,9 +118,9 @@ def test_raw_text_and_text_properties():
     store = parse("<p>A&nbsp;&amp;&#x20;B</p>", [Query.all("p", Save.all()).build()])
     p = store.get("p")[0]
     assert p.raw_text == "A&nbsp;&amp;&#x20;B"
-    assert p.text == "A & B"
+    assert p.text == "A\u00a0& B"
     assert p["raw_text"] == "A&nbsp;&amp;&#x20;B"
-    assert p["text"] == "A & B"
+    assert p["text"] == "A\u00a0& B"
     assert p.keys() == [
         "name",
         "id",
@@ -129,6 +129,7 @@ def test_raw_text_and_text_properties():
         "inner_html",
         "raw_text",
         "text",
+        "text_content",
     ]
 
 
@@ -162,7 +163,7 @@ def test_save_helpers():
 def test_save_positional_text_compatibility():
     store = parse("<p>A&nbsp;B</p>", [Query.all("p", Save(False, True)).build()])
     p = store.get("p")[0]
-    assert p.text == "A B"
+    assert p.text == "A\u00a0B"
     assert p.raw_text is None
 
 
@@ -174,3 +175,21 @@ def test_raw_text_is_keyword_only():
     p = store.get("p")[0]
     assert p.raw_text == "A&nbsp;B"
     assert p.text is None
+
+
+def test_legacy_text_content_aliases_warn_and_return_normalized_text():
+    with pytest.warns(DeprecationWarning, match=r"Save\(text_content"):
+        save = Save(text_content=True)
+
+    store = parse("<p>A&nbsp;&amp; B</p>", [Query.all("p", save).build()])
+    p = store.get("p")[0]
+
+    with pytest.warns(DeprecationWarning, match="Element.text_content"):
+        assert p.text_content == "A\u00a0& B"
+    with pytest.warns(DeprecationWarning, match="Element.text_content"):
+        assert p["text_content"] == "A\u00a0& B"
+
+    with pytest.warns(DeprecationWarning, match="Save.only_text_content"):
+        legacy_save = Save.only_text_content()
+    legacy = parse("<p>x</p>", [Query.all("p", legacy_save).build()]).get("p")[0]
+    assert legacy.text == "x"

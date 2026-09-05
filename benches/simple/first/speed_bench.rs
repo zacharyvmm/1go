@@ -22,6 +22,12 @@ impl fmt::Display for StopParsing {
 impl Error for StopParsing {}
 
 const QUERY: &str = black_box("a");
+const COMPARISON_SAVE: Save = Save {
+    inner_html: true,
+    raw_text: false,
+    text: true,
+    attributes: true,
+};
 
 fn generate_html(count: usize) -> String {
     let mut html = String::with_capacity(count * 100);
@@ -46,7 +52,7 @@ fn bench_comparison(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("scah", size), &content, |b, html| {
             b.iter(|| {
-                let queries = &[Query::first(black_box(QUERY), Save::all())
+                let queries = &[Query::first(black_box(QUERY), COMPARISON_SAVE)
                     .expect("simple bench selector should parse")
                     .build()];
 
@@ -56,7 +62,7 @@ fn bench_comparison(c: &mut Criterion) {
 
                 black_box(&element.attributes(&store));
                 black_box(&element.inner_html);
-                black_box(&element.text_content(&store));
+                black_box(&element.text(&store));
             })
         });
 
