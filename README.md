@@ -153,9 +153,11 @@ Control what data is captured per selector:
 Filtered `of S` arguments are intentionally limited to local compound selectors
 that can be evaluated at an opening tag. Future-dependent selectors such as
 `:has()`, `:empty`, `:last-child`, and `:nth-last-child()` are rejected.
-Structural pseudo-classes inside `:is()`, `:not()`, `:where()`, and filtered
-`of S` lists are also rejected. A nested scope anchor must be standalone, as in
-`:scope > a`; compound anchors such as `:scope.card > a` are not supported.
+Unsupported alternatives inside `:is()` and `:where()` are discarded using
+forgiving selector-list semantics. `:not()` and filtered `of S` lists remain
+strict and reject unsupported structural pseudo-classes. A nested scope anchor
+must be standalone, as in `:scope > a`; compound anchors such as
+`:scope.card > a` are not supported.
 
 > Full API documentation: [docs.rs/scah](https://docs.rs/scah)
 
