@@ -601,16 +601,16 @@ impl<'query> ScopedCursor {
         &self,
         tree: &Q,
     ) -> SmallVec<[Position; 4]> {
-        let mut positions = SmallVec::new();
         if let Some(next) = self.position.next_transition(tree) {
+            let mut positions = SmallVec::new();
             positions.push(Position {
                 state: next,
                 selection: self.position.selection,
             });
+            positions
         } else {
-            positions.extend(tree.child_positions(&self.position));
+            tree.child_positions(&self.position)
         }
-        positions
     }
 }
 

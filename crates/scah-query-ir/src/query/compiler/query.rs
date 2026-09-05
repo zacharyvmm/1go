@@ -1,3 +1,4 @@
+use smallvec::SmallVec;
 use std::ops::Range;
 
 use super::builder::{QueryBuilder, Save, SelectionKind};
@@ -66,8 +67,8 @@ pub trait QuerySpec<'query> {
             .collect()
     }
 
-    fn child_positions(&self, position: &Position) -> Vec<Position> {
-        let mut positions = Vec::new();
+    fn child_positions(&self, position: &Position) -> SmallVec<[Position; 4]> {
+        let mut positions = SmallVec::new();
         if position.selection.index() + 1 >= self.queries().len() {
             return positions;
         }
