@@ -232,6 +232,41 @@ fn scope_selector_anchors_nested_child_queries() {
 }
 
 #[test]
+fn scope_anchor_is_normalized_once_across_builder_forms() {
+    let selector = ":scope > :scope > a";
+    let chained = Query::all("main", Save::all())
+        .unwrap()
+        .all(selector, Save::all())
+        .unwrap()
+        .build();
+    let factory = Query::all("main", Save::all())
+        .unwrap()
+        .then(|context| Ok([context.all(selector, Save::all())?]))
+        .unwrap()
+        .build();
+
+    for query in [chained, factory] {
+        let queries = [query];
+        let store = parse("<main><a>unexpected</a></main>", &queries).unwrap();
+        let main = store.get("main").unwrap().next().unwrap();
+        assert_eq!(main.get(&store, selector).into_iter().flatten().count(), 0);
+    }
+
+    let static_query = query! {
+        all("main", Save::all()) => {
+            all(":scope > :scope > a", Save::all())
+        }
+    };
+    let store = parse(
+        "<main><a>unexpected</a></main>",
+        std::slice::from_ref(&static_query),
+    )
+    .unwrap();
+    let main = store.get("main").unwrap().next().unwrap();
+    assert_eq!(main.get(&store, selector).into_iter().flatten().count(), 0);
+}
+
+#[test]
 fn test_html_page() {
     let selection_tree = Query::all("main > section#id", Save::all()).unwrap();
 
