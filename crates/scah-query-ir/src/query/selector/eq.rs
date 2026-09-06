@@ -131,11 +131,8 @@ impl<'a> ElementPredicate<'a> {
         self.matches_element_with_context(other, None)
     }
 
-    /// Match the element-local portion of this predicate without structural
-    /// context. Streaming engines may use this for prevalidated local lists.
-    #[doc(hidden)]
     #[inline(always)]
-    pub fn matches_local_element_unchecked<'b, E: IElement<'b>>(&self, other: &E) -> bool {
+    fn matches_local_fields<'b, E: IElement<'b>>(&self, other: &E) -> bool {
         if !self.matches_name(other.name()) {
             return false;
         }
@@ -173,16 +170,25 @@ impl<'a> ElementPredicate<'a> {
                     .iter()
                     .any(|attribute| selector_attribute.matches_attribute(attribute))
             }
-        }) && self.logical.as_slice().iter().all(|logical| match logical {
-            super::builder::LocalLogicalPredicate::Not(list) => !list
-                .as_slice()
-                .iter()
-                .any(|predicate| predicate.matches_local_element_unchecked(other)),
-            super::builder::LocalLogicalPredicate::Any(list) => list
-                .as_slice()
-                .iter()
-                .any(|predicate| predicate.matches_local_element_unchecked(other)),
         })
+    }
+
+    /// Match the element-local portion of this predicate without structural
+    /// context. Streaming engines may use this for prevalidated local lists.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn matches_local_element_unchecked<'b, E: IElement<'b>>(&self, other: &E) -> bool {
+        self.matches_local_fields(other)
+            && self.logical.as_slice().iter().all(|logical| match logical {
+                super::builder::LocalLogicalPredicate::Not(list) => !list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_local_element_unchecked(other)),
+                super::builder::LocalLogicalPredicate::Any(list) => list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_local_element_unchecked(other)),
+            })
     }
 
     #[inline(always)]
@@ -191,7 +197,21 @@ impl<'a> ElementPredicate<'a> {
         other: &E,
         structural: Option<&super::builder::StructuralMatchContext<'_>>,
     ) -> bool {
-        self.matches_local_element_unchecked(other)
+        if structural.is_none() && self.requires_structural() {
+            return false;
+        }
+
+        self.matches_local_fields(other)
+            && self.logical.as_slice().iter().all(|logical| match logical {
+                super::builder::LocalLogicalPredicate::Not(list) => !list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_element_with_context(other, structural)),
+                super::builder::LocalLogicalPredicate::Any(list) => list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_element_with_context(other, structural)),
+            })
             && self.structural.as_slice().iter().all(|predicate| {
                 let Some(context) = structural else {
                     return false;
@@ -437,5 +457,55 @@ mod tests {
         assert!(selector_one.matches_element(&element_two));
         assert!(selector_two.matches_element(&element_one));
         assert!(selector_two.matches_element(&element_two));
+    }
+
+    #[test]
+    fn logical_structural_predicates_require_and_use_context() {
+        let structural = ElementPredicate {
+            name: Some("div"),
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from_static(&[]),
+            logical: crate::LogicalPredicates::from_static(&[]),
+            structural: crate::StructuralPredicates::from(vec![
+                crate::StructuralPredicate::FirstChild,
+            ]),
+        };
+        let predicate = ElementPredicate {
+            name: None,
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from_static(&[]),
+            logical: crate::LogicalPredicates::from(vec![crate::LocalLogicalPredicate::Any(
+                crate::LocalSelectorList::Owned(vec![structural].into_boxed_slice()),
+            )]),
+            structural: crate::StructuralPredicates::from_static(&[]),
+        };
+        let element = FakeElement {
+            name: "div",
+            id: None,
+            class: None,
+            attributes: &[],
+        };
+
+        assert!(!predicate.matches_element(&element));
+        assert!(predicate.matches_element_with_context(
+            &element,
+            Some(&crate::StructuralMatchContext {
+                child_index: 1,
+                type_index: 1,
+                filtered_child_indices: smallvec::SmallVec::new(),
+                is_root: false,
+            })
+        ));
+        assert!(!predicate.matches_element_with_context(
+            &element,
+            Some(&crate::StructuralMatchContext {
+                child_index: 2,
+                type_index: 1,
+                filtered_child_indices: smallvec::SmallVec::new(),
+                is_root: false,
+            })
+        ));
     }
 }

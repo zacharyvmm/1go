@@ -426,6 +426,21 @@ fn test_macro_static_query_with_nested_attributes() {
 }
 
 #[test]
+fn test_top_level_scope_anchors_to_document_root() {
+    let html = r#"<main><a id="child"></a></main><a id="top"></a>"#;
+    let query = Query::all(":scope > a", Save::none()).unwrap().build();
+    let queries = [query];
+    let store = parse(html, &queries).unwrap();
+    let ids = store
+        .get(":scope > a")
+        .unwrap()
+        .filter_map(|element| element.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, ["child"]);
+}
+
+#[test]
 fn test_macro_query_matches_runtime_query_structure() {
     let static_query = query! {
         all("main > section", Save::all()) => {
