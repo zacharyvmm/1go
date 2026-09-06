@@ -1607,3 +1607,17 @@ fn parse_dispatches_correctly_for_all_save_modes() {
     assert_eq!(p.raw_text(&store_both), Some("Hello"));
     assert_eq!(p.text(&store_both), Some("Hello"));
 }
+
+#[test]
+fn prose_runs_collapse_html_whitespace_and_preserve_unicode() {
+    for whitespace in [" ", "  ", "\t", "\r\n", "\u{000C}", " \t \n"] {
+        let html = format!(
+            "<p>{whitespace}one two{whitespace}<span>é 三 🦀</span>{whitespace}four&amp; five\u{00A0}six\u{2003}seven{whitespace}</p>"
+        );
+        assert_eq!(
+            text_of(&html, "p"),
+            "one two é 三 🦀 four& five\u{00A0}six\u{2003}seven",
+            "{whitespace:?}"
+        );
+    }
+}

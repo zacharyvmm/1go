@@ -1,0 +1,250 @@
+{
+  "branch": "perf/text-performance-experiment",
+  "pr_baseline": "ec0ac044b24733ec5627f62126e9e8379133168b",
+  "main_baseline": "7847d18684d647916506d29328fa47414f2a978a",
+  "host": "Acer-Nitro-5",
+  "cpu": "Intel Core i5-10300H",
+  "architecture": "x86_64",
+  "affinity_cpu": 2,
+  "power": "AC, existing powersave governor",
+  "compiler": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "profile": "Repository bench profile: opt-level 3, fat LTO, one codegen unit",
+  "criterion": {
+    "version": "0.8.2",
+    "rounds": 3,
+    "warm_up_seconds": 1,
+    "measurement_seconds": 2,
+    "text_samples": 50,
+    "ordinary_samples": 20
+  },
+  "comparison": "Median of paired round ratios, using Criterion slope point estimates",
+  "source_sha256": {
+    "crates/scah/src/engine/attribute_interest.rs": "19a58a87d2dcc6341856d5a7385a4363f5f0e75ba5875bdb175dc06ec44b4174",
+    "crates/scah/src/html/entities.rs": "fe66c11a90183139ede3af1cfd2c0a8a8be611dbe7353db2b7aedbb182e35d7a",
+    "crates/scah/src/html/parser.rs": "1712a56dab3adcbd1631aa7b24b3a0d986b55ee9c324b93940f6b1f65d77c977",
+    "crates/scah/src/html/text_state.rs": "028168afb236e0a2e6324331d944b8dfbe7bc7c6c1954eba946550caf238b98a"
+  },
+  "text_gate": [
+    {
+      "workload": "inner_html_only",
+      "median_microseconds": {
+        "main-baseline": 242.97,
+        "pr-baseline": 225.19,
+        "active": 244.0
+      },
+      "candidate_vs_main_pct": 0.41,
+      "candidate_vs_pr_pct": 5.71,
+      "limit_pct": 5,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main-baseline": [
+          242714.6669007405,
+          243822.8933122556,
+          242966.92878608868
+        ],
+        "pr-baseline": [
+          224798.44333472004,
+          231595.31733754888,
+          225191.59712788084
+        ],
+        "active": [
+          243999.50719361013,
+          244810.5469073966,
+          221886.1534736667
+        ]
+      }
+    },
+    {
+      "workload": "no_content",
+      "median_microseconds": {
+        "main-baseline": 234.28,
+        "pr-baseline": 224.47,
+        "active": 216.01
+      },
+      "candidate_vs_main_pct": -9.01,
+      "candidate_vs_pr_pct": -1.81,
+      "limit_pct": 5,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main-baseline": [
+          247765.24336134453,
+          234280.27409601465,
+          231923.7282136617
+        ],
+        "pr-baseline": [
+          236702.8045561195,
+          224469.74633164157,
+          214913.1600099842
+        ],
+        "active": [
+          216012.15062900409,
+          223302.85291954406,
+          211020.17235294118
+        ]
+      }
+    },
+    {
+      "workload": "raw_only",
+      "median_microseconds": {
+        "main-baseline": 281.88,
+        "pr-baseline": 301.8,
+        "active": 279.58
+      },
+      "candidate_vs_main_pct": 9.88,
+      "candidate_vs_pr_pct": -7.38,
+      "limit_pct": 20,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main-baseline": [
+          281884.3289147738,
+          254371.38609202096,
+          282898.1885497962
+        ],
+        "pr-baseline": [
+          284169.53845855175,
+          301796.4330203844,
+          309527.4582372355
+        ],
+        "active": [
+          316224.3172277228,
+          279513.39353911864,
+          279575.51222675206
+        ]
+      }
+    },
+    {
+      "workload": "text_only_no_matches",
+      "median_microseconds": {
+        "main-baseline": 198.48,
+        "pr-baseline": 239.01,
+        "active": 209.85
+      },
+      "candidate_vs_main_pct": 6.75,
+      "candidate_vs_pr_pct": -14.37,
+      "limit_pct": 20,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main-baseline": [
+          211047.02823820617,
+          198479.0072510192,
+          193687.94740827024
+        ],
+        "pr-baseline": [
+          237890.29452367086,
+          239006.7523238206,
+          263244.5825237818
+        ],
+        "active": [
+          225297.27581995176,
+          204655.5966353274,
+          209854.19408561444
+        ]
+      }
+    },
+    {
+      "workload": "text_only_prose",
+      "median_microseconds": {
+        "main-baseline": 273.09,
+        "pr-baseline": 579.62,
+        "active": 448.5
+      },
+      "candidate_vs_main_pct": 60.53,
+      "candidate_vs_pr_pct": -22.62,
+      "limit_pct": 130,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main-baseline": [
+          279392.6865657154,
+          262068.2500108162,
+          273086.32983110077
+        ],
+        "pr-baseline": [
+          579618.2902582022,
+          583318.6731819065,
+          525092.3461230829
+        ],
+        "active": [
+          448499.99354106,
+          454205.5942224811,
+          401913.0034653465
+        ]
+      }
+    },
+    {
+      "workload": "text_only_sparse_matches",
+      "median_microseconds": {
+        "main-baseline": 124.41,
+        "pr-baseline": 155.37,
+        "active": 139.61
+      },
+      "candidate_vs_main_pct": 9.92,
+      "candidate_vs_pr_pct": -10.17,
+      "limit_pct": 20,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main-baseline": [
+          130164.54554843719,
+          121331.51262168234,
+          124414.13508250825
+        ],
+        "pr-baseline": [
+          155421.82757452215,
+          139303.3739506892,
+          155374.68051252185
+        ],
+        "active": [
+          139614.28108716753,
+          139607.55362842168,
+          136753.97036109492
+        ]
+      }
+    }
+  ],
+  "ordinary_gate": [
+    {
+      "workload": "no_match",
+      "median_microseconds": {
+        "main": 652.13,
+        "active": 666.99
+      },
+      "candidate_vs_main_pct": 2.22,
+      "limit_pct": 5,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main": [
+          666205.437630662,
+          651939.9642740999,
+          652129.2910801393
+        ],
+        "active": [
+          666993.4532354405,
+          666399.4100241222,
+          688878.901902975
+        ]
+      }
+    },
+    {
+      "workload": "match",
+      "median_microseconds": {
+        "main": 1230.85,
+        "active": 1285.77
+      },
+      "candidate_vs_main_pct": -1.22,
+      "limit_pct": 5,
+      "pass": true,
+      "round_slope_nanoseconds": {
+        "main": [
+          1202099.5829268293,
+          1308582.7952961673,
+          1230854.6848867596
+        ],
+        "active": [
+          1285766.1058797908,
+          1286838.0857578397,
+          1215779.5493902438
+        ]
+      }
+    }
+  ],
+  "all_gate_limits_pass": true
+}

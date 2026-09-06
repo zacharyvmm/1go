@@ -1,0 +1,1073 @@
+{
+  "status": "No production changes retained",
+  "published_source_revision": "f033b8626c1be2071c763b598a92148ad394bbb3",
+  "trials": {
+    "sentinel_and_scratch": {
+      "branch": "perf/text-performance-experiment",
+      "main_baseline": "7847d18684d647916506d29328fa47414f2a978a",
+      "pr68_baseline": "f033b8626c1be2071c763b598a92148ad394bbb3",
+      "variants": {
+        "scoped": "PR #68 baseline",
+        "candidate": "offset sentinel and direct scratch borrowing",
+        "main-baseline": "legacy main",
+        "main": "legacy main"
+      },
+      "host": "Acer-Nitro-5",
+      "cpu": "Intel Core i5-10300H",
+      "architecture": "x86_64",
+      "affinity_cpu": 2,
+      "compiler": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "profile": {
+        "tool": "Callgrind",
+        "workload": "100 parses of gate prose at 1000 paragraphs",
+        "baseline_instructions": 466310711,
+        "candidate_instructions": 462910711,
+        "baseline_flush_instructions": 35398000,
+        "candidate_flush_instructions": 30298000,
+        "interpretation": "Instruction counts, not native elapsed-time shares or predicted speedup."
+      },
+      "criterion": {
+        "version": "0.8.2",
+        "rounds": 3,
+        "warm_up_seconds": 1,
+        "measurement_seconds": 2,
+        "text_samples": 50,
+        "ordinary_samples": 20,
+        "broader_samples": 100
+      },
+      "comparison": "Median of paired round ratios. Gate cases use slope point estimates. All broader cases consistently use mean point estimates, because automatic sampling may omit slopes.",
+      "source_sha256": {
+        "crates/scah/src/html/entities.rs": "f6b3d1ca272bcb135225f497387cc1a5af4fa3bc05da59581b8933442be9cd10",
+        "crates/scah/src/html/parser.rs": "4b0f3095d7ea882a7e1619d10c8590e81feaaa75c1cc8f73bde467d5217a7970",
+        "crates/scah/src/html/text_state.rs": "2074133911587955fe41f3d1a6f03ce30565df5dd5026efee04f1be567637720",
+        "crates/scah/src/engine/attribute_interest.rs": "19a58a87d2dcc6341856d5a7385a4363f5f0e75ba5875bdb175dc06ec44b4174"
+      },
+      "text_gate": [
+        {
+          "workload": "no_content",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              232057.60582411182,
+              214407.82341001747,
+              211633.37369539894
+            ],
+            "scoped": [
+              235343.0028288543,
+              215718.34063399618,
+              216719.46357600467
+            ],
+            "candidate": [
+              227597.7582028455,
+              227120.32338796905,
+              209198.50507363342
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 214.40782341001747,
+            "scoped": 216.71946357600467,
+            "candidate": 227.12032338796905
+          },
+          "candidate_vs_main-baseline_pct": -1.1505125960284524,
+          "candidate_vs_scoped_pct": -3.291045211843968,
+          "limit_pct": 5,
+          "pass": true
+        },
+        {
+          "workload": "inner_html_only",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              242745.2422131625,
+              222812.68312463598,
+              229095.10806556285
+            ],
+            "scoped": [
+              223914.78819868542,
+              223417.02075713454,
+              237020.64292952826
+            ],
+            "candidate": [
+              219050.921144854,
+              241754.67401281305,
+              241481.3028334304
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 229.09510806556284,
+            "scoped": 223.91478819868541,
+            "candidate": 241.48130283343042
+          },
+          "candidate_vs_main-baseline_pct": 5.406573222996469,
+          "candidate_vs_scoped_pct": 1.8819710590475491,
+          "limit_pct": 5,
+          "pass": false
+        },
+        {
+          "workload": "raw_only",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              280967.0600388274,
+              269707.1467326733,
+              278446.2588507086
+            ],
+            "scoped": [
+              292558.0787109299,
+              294426.63096874394,
+              271339.5900330033
+            ],
+            "candidate": [
+              278159.2990797903,
+              273419.02259755385,
+              256608.76346340516
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 278.4462588507086,
+            "scoped": 292.5580787109299,
+            "candidate": 273.41902259755386
+          },
+          "candidate_vs_main-baseline_pct": -0.9993203326571831,
+          "candidate_vs_scoped_pct": -5.428926375176735,
+          "limit_pct": 20,
+          "pass": true
+        },
+        {
+          "workload": "text_only_no_matches",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              213901.26457192778,
+              193861.87976703554,
+              192854.2179528247
+            ],
+            "scoped": [
+              206451.2556086197,
+              206949.91644437972,
+              206733.74435061152
+            ],
+            "candidate": [
+              223257.85293535236,
+              218831.73624927198,
+              224763.74385223395
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 193.86187976703553,
+            "scoped": 206.73374435061152,
+            "candidate": 223.25785293535236
+          },
+          "candidate_vs_main-baseline_pct": 12.880230250652058,
+          "candidate_vs_scoped_pct": 8.140709668820723,
+          "limit_pct": 20,
+          "pass": true
+        },
+        {
+          "workload": "text_only_sparse_matches",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              130996.88227916909,
+              127252.81674348947,
+              118446.22261368218
+            ],
+            "scoped": [
+              140042.02228693457,
+              140629.2692539842,
+              142901.58450203843
+            ],
+            "candidate": [
+              135031.4874373908,
+              136802.34205785283,
+              131022.8296456252
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 127.25281674348948,
+            "scoped": 140.6292692539842,
+            "candidate": 135.0314874373908
+          },
+          "candidate_vs_main-baseline_pct": 7.504372444354512,
+          "candidate_vs_scoped_pct": -3.577879530529482,
+          "limit_pct": 20,
+          "pass": true
+        },
+        {
+          "workload": "text_only_prose",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              280185.77399339934,
+              274757.9341681227,
+              259121.78565327122
+            ],
+            "scoped": [
+              439260.3131566686,
+              443965.1532964473,
+              450871.6834478742
+            ],
+            "candidate": [
+              426515.55352358765,
+              427896.8424694234,
+              435545.86332556786
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 274.7579341681227,
+            "scoped": 443.9651532964473,
+            "candidate": 427.8968424694234
+          },
+          "candidate_vs_main-baseline_pct": 55.73593671278514,
+          "candidate_vs_scoped_pct": -3.399153392181964,
+          "limit_pct": 130,
+          "pass": true
+        }
+      ],
+      "ordinary_gate": [
+        {
+          "workload": "no_match",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main": [
+              652208.8053509209,
+              656183.6517305459,
+              668823.272775842
+            ],
+            "scoped": [
+              657056.632195122,
+              658531.6311265969,
+              661759.2949593496
+            ],
+            "candidate": [
+              732158.6769785964,
+              675553.5056744649,
+              750571.8831144465
+            ]
+          },
+          "median_microseconds": {
+            "main": 656.1836517305459,
+            "scoped": 658.531631126597,
+            "candidate": 732.1586769785964
+          },
+          "candidate_vs_main_pct": 12.222752058151354,
+          "candidate_vs_scoped_pct": 11.430071793441975,
+          "limit_pct": 5,
+          "pass": false
+        },
+        {
+          "workload": "match",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main": [
+              1288982.4821138212,
+              1185032.506402439,
+              1300309.6258275262
+            ],
+            "scoped": [
+              1146911.4115756871,
+              1159391.9625629114,
+              1163416.8918554008
+            ],
+            "candidate": [
+              1244238.6023228804,
+              1149929.8720867208,
+              1290256.0728222996
+            ]
+          },
+          "median_microseconds": {
+            "main": 1288.982482113821,
+            "scoped": 1159.3919625629114,
+            "candidate": 1244.2386023228805
+          },
+          "candidate_vs_main_pct": -2.962166364725638,
+          "candidate_vs_scoped_pct": 8.486025142384811,
+          "limit_pct": 5,
+          "pass": true
+        }
+      ],
+      "broader_workloads": [
+        {
+          "workload": "both",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              495336.5460501769,
+              491345.841661026,
+              490708.1448726686
+            ],
+            "candidate": [
+              482261.1400953257,
+              480715.56448945624,
+              479436.0845440384
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 491.345841661026,
+            "candidate": 480.71556448945626
+          },
+          "candidate_vs_scoped_pct": -2.297100719931011
+        },
+        {
+          "workload": "text_only_whitespace",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              518226.1321321502,
+              509703.76734620973,
+              491858.0729863816
+            ],
+            "candidate": [
+              509251.15041210473,
+              468304.67845359235,
+              499899.49409780913
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 509.7037673462097,
+            "candidate": 499.8994940978091
+          },
+          "candidate_vs_scoped_pct": -1.731865910180841
+        },
+        {
+          "workload": "text_only_sparse_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              278507.6535844947,
+              252835.15458927467,
+              249516.43403318812
+            ],
+            "candidate": [
+              277603.6510321799,
+              282144.6515819794,
+              282486.81181871507
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 252.83515458927465,
+            "candidate": 282.1446515819794
+          },
+          "candidate_vs_scoped_pct": 11.592334555025552
+        },
+        {
+          "workload": "text_only_no_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              217412.6166684034,
+              215165.2010179227,
+              216534.14829049737
+            ],
+            "candidate": [
+              202755.77680362551,
+              205757.32995888175,
+              211426.41223175745
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 216.53414829049737,
+            "candidate": 205.75732995888174
+          },
+          "candidate_vs_scoped_pct": -4.372394334461783
+        },
+        {
+          "workload": "text_only_dense_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              371425.13625661953,
+              330924.7391836915,
+              336799.50228297594
+            ],
+            "candidate": [
+              351008.1397943198,
+              335254.62031390035,
+              366910.0372503084
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 336.79950228297594,
+            "candidate": 351.0081397943198
+          },
+          "candidate_vs_scoped_pct": 1.3084186878531856
+        },
+        {
+          "workload": "text_only_invalid_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              864559.8591304343,
+              806392.1991666667,
+              790417.5257681996
+            ],
+            "candidate": [
+              777210.9315827404,
+              785024.728568184,
+              830287.0536000005
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 806.3921991666667,
+            "candidate": 785.024728568184
+          },
+          "candidate_vs_scoped_pct": -2.64976157018435
+        },
+        {
+          "workload": "hidden_heavy",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              316155.90335470985,
+              313631.36318632425,
+              283024.1203449264
+            ],
+            "candidate": [
+              285487.5516074442,
+              297033.7057821945,
+              285092.85133061535
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 313.6313631863242,
+            "candidate": 285.4875516074442
+          },
+          "candidate_vs_scoped_pct": -5.292091082826211
+        },
+        {
+          "workload": "preformatted_heavy",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              243604.33458765116,
+              233060.65042432188,
+              232978.2933306383
+            ],
+            "candidate": [
+              209239.98391668312,
+              229770.84659181966,
+              217309.47326461104
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 233.0606504243219,
+            "candidate": 217.30947326461103
+          },
+          "candidate_vs_scoped_pct": -6.725442032400142
+        }
+      ],
+      "all_gate_limits_pass": false,
+      "confirmation": {
+        "reason": "Confirm two failed limits from the full three-round run without changing source, binaries, affinity, or budgets.",
+        "rounds": 5,
+        "warm_up_seconds": 2,
+        "measurement_seconds": 5,
+        "rows": [
+          {
+            "workload": "inner_html_only",
+            "round_nanoseconds": {
+              "main-baseline": [
+                241789.49386284218,
+                238745.13943700254,
+                219460.34982721801,
+                220640.17629845339,
+                240488.31530508067
+              ],
+              "scoped": [
+                242154.29039295626,
+                238668.23563808284,
+                242808.67098701565,
+                224348.74677995135,
+                248129.2050058241
+              ],
+              "candidate": [
+                236412.1103100483,
+                229576.2784610641,
+                229843.9294583576,
+                225020.28979615608,
+                233834.34498201378
+              ]
+            },
+            "estimator": "slope",
+            "limit_pct": 5,
+            "candidate_vs_main-baseline_pct": -2.2239938828129024,
+            "candidate_vs_scoped_pct": -3.8094542211330573,
+            "pass": true
+          },
+          {
+            "workload": "no_match",
+            "round_nanoseconds": {
+              "main-baseline": [
+                728624.8201800232,
+                662149.8453155246,
+                701328.1046049534,
+                665795.2440089043,
+                674454.8115830115
+              ],
+              "scoped": [
+                719521.7667349867,
+                675171.7043817971,
+                665567.7072106078,
+                663473.600985565,
+                667011.5328621204
+              ],
+              "candidate": [
+                733421.8629817337,
+                696492.2321234999,
+                736874.5851813896,
+                677940.5963517114,
+                684412.7171858988
+              ]
+            },
+            "estimator": "slope",
+            "limit_pct": 5,
+            "candidate_vs_main-baseline_pct": 1.8241873086502158,
+            "candidate_vs_scoped_pct": 2.608828103632721,
+            "pass": true
+          }
+        ]
+      },
+      "candidate_patch_from_pr68_baseline": "diff --git a/crates/scah/src/html/parser.rs b/crates/scah/src/html/parser.rs\nindex 1d190c4..000861f 100644\n--- a/crates/scah/src/html/parser.rs\n+++ b/crates/scah/src/html/parser.rs\n@@ -4,7 +4,8 @@ use super::open_elements::{OpenElement, OpenElementStack, SavedElement};\n use super::tag::{ClassifiedTag, TagFlags, TextTagFlags};\n use super::text_edge::TextEdgePolicy;\n use super::text_state::{\n-    ParserTextState, PendingSeparator, TextCaptureMode, TextElementBehavior, TextElementFlags,\n+    NO_SOURCE_START, ParserTextState, PendingSeparator, TextCaptureMode, TextElementBehavior,\n+    TextElementFlags,\n };\n use crate::Attribute;\n use crate::ParseError;\n@@ -69,7 +70,7 @@ pub struct XHtmlParser<'html, 'query, Q> {\n     /// Hot-path capture mode (mirrors `text_state.mode` for cheaper checks).\n     capture_mode: TextCaptureMode,\n     text_state: ParserTextState,\n-    raw_source_start: Option<usize>,\n+    raw_source_start: usize,\n     raw_active_count: usize,\n     text_active_count: usize,\n     persist_attributes: bool,\n@@ -176,7 +177,7 @@ where\n             },\n             capture_mode: text_state.mode,\n             text_state,\n-            raw_source_start: None,\n+            raw_source_start: NO_SOURCE_START,\n             raw_active_count: 0,\n             text_active_count: 0,\n             persist_attributes,\n@@ -202,23 +203,23 @@ where\n     }\n \n     fn flush_source_text(&mut self, reader: &Reader<'html>, end: usize) {\n-        let raw_start = self.raw_source_start.take();\n-        let text_start = self.text_state.source_start.take();\n-        if raw_start.is_none() && text_start.is_none() {\n-            return;\n-        }\n+        let raw_start = std::mem::replace(&mut self.raw_source_start, NO_SOURCE_START);\n+        let text_start = std::mem::replace(&mut self.text_state.source_start, NO_SOURCE_START);\n         #[cfg(feature = \"bench-internals\")]\n-        {\n+        if raw_start != NO_SOURCE_START || text_start != NO_SOURCE_START {\n             self.text_state.path_stats.flush_calls += 1;\n         }\n-        if let Some(start) = raw_start.filter(|start| *start < end) {\n-            self.store.text.raw_text.push_str(reader.slice(start..end));\n+        if raw_start < end {\n+            self.store\n+                .text\n+                .raw_text\n+                .push_str(reader.slice(raw_start..end));\n         }\n-        if let Some(start) = text_start.filter(|start| *start < end) {\n+        if text_start < end {\n             let depth = self.position.element_depth;\n             self.text_state.write_normalized_fragment(\n                 &mut self.store.text.text,\n-                reader.slice(start..end),\n+                reader.slice(text_start..end),\n                 depth,\n             );\n         }\n@@ -227,7 +228,7 @@ where\n     #[inline]\n     fn mark_active_source_start(&mut self, position: usize) {\n         if self.raw_active_count > 0 {\n-            self.raw_source_start = Some(position);\n+            self.raw_source_start = position;\n         }\n         if self.text_active_count > 0 {\n             self.text_state.mark_source_start(position);\ndiff --git a/crates/scah/src/html/text_state.rs b/crates/scah/src/html/text_state.rs\nindex f6d9a64..29b21e6 100644\n--- a/crates/scah/src/html/text_state.rs\n+++ b/crates/scah/src/html/text_state.rs\n@@ -97,11 +97,15 @@ impl TextElementBehavior {\n     }\n }\n \n+// Source offsets are bounded by Rust allocation lengths. This sentinel\n+// represents an absent offset without a separate Option discriminant.\n+pub(crate) const NO_SOURCE_START: usize = usize::MAX;\n+\n /// Parser-only state for streaming text capture into shared tapes.\n #[derive(Debug)]\n pub(crate) struct ParserTextState {\n     pub mode: TextCaptureMode,\n-    pub source_start: Option<usize>,\n+    pub source_start: usize,\n     pending: PendingSeparator,\n     suppressed_depth: u16,\n     preformatted_depth: u16,\n@@ -130,7 +134,7 @@ impl ParserTextState {\n     pub fn new(requirements: TextRequirements) -> Self {\n         Self {\n             mode: TextCaptureMode::from_requirements(requirements),\n-            source_start: None,\n+            source_start: NO_SOURCE_START,\n             pending: PendingSeparator::None,\n             suppressed_depth: 0,\n             preformatted_depth: 0,\n@@ -195,7 +199,7 @@ impl ParserTextState {\n         {\n             self.path_stats.mark_start_calls += 1;\n         }\n-        self.source_start = Some(position);\n+        self.source_start = position;\n     }\n \n     /// Cancel pending initial-newline stripping (comment/declaration/child tag).\n@@ -266,7 +270,7 @@ impl ParserTextState {\n \n     fn write_collapsed_source(&mut self, tape: &mut TextTape, source: &str) {\n         if !contains_ampersand(source) {\n-            self.write_collapsed_decoded(tape, source.as_bytes());\n+            Self::write_collapsed_decoded(&mut self.pending, tape, source.as_bytes());\n             return;\n         }\n \n@@ -276,17 +280,20 @@ impl ParserTextState {\n         }\n         self.decode_scratch.clear();\n         decode_character_references(source, &mut self.decode_scratch);\n-        // Split decode_scratch away so write helpers can borrow `&mut self`.\n-        let decoded = std::mem::take(&mut self.decode_scratch);\n-        self.write_collapsed_decoded(tape, &decoded);\n-        self.decode_scratch = decoded;\n+        Self::write_collapsed_decoded(&mut self.pending, tape, &self.decode_scratch);\n     }\n \n-    fn write_collapsed_decoded(&mut self, tape: &mut TextTape, decoded: &[u8]) {\n+    // The caller has already excluded suppressed and preformatted content.\n+    // Borrow only the pending separator so decoded bytes can stay in scratch.\n+    fn write_collapsed_decoded(\n+        pending: &mut PendingSeparator,\n+        tape: &mut TextTape,\n+        decoded: &[u8],\n+    ) {\n         let mut i = 0;\n         while i < decoded.len() {\n             if is_html_whitespace(decoded[i]) {\n-                self.queue_separator(PendingSeparator::Space);\n+                *pending = (*pending).max(PendingSeparator::Space);\n                 while i < decoded.len() && is_html_whitespace(decoded[i]) {\n                     i += 1;\n                 }\n@@ -311,7 +318,7 @@ impl ParserTextState {\n                 i += 1;\n             }\n \n-            self.flush_pending(tape);\n+            apply_separator(tape, std::mem::take(pending));\n             tape.push_bytes(&decoded[run_start..i]);\n         }\n     }\n",
+      "executable_size": {
+        "tool": "GNU size",
+        "baseline": {
+          "text": 2658036,
+          "data": 46168,
+          "bss": 1544
+        },
+        "candidate": {
+          "text": 2657692,
+          "data": 46168,
+          "bss": 1880
+        },
+        "note": "Complete text-gate executable including Criterion; not parser-only code size."
+      },
+      "validation": [
+        "cargo fmt --all -- --check",
+        "cargo test --release -p scah --quiet",
+        "cargo test --release -p scah --features bench-internals --quiet",
+        "cargo clippy --workspace --all-targets --exclude scah-benches --exclude scah-cursor-benches -- -D warnings",
+        "cargo bench -p scah-benches --bench memory_bench_text_extraction",
+        "cargo bench -p scah-benches --bench speed_bench_text_extraction -- --test"
+      ],
+      "disposition": "Not retained. The initial run missed two limits, while longer confirmation passed both. Isolated scratch borrowing was evaluated separately to avoid changing parser layout."
+    },
+    "scratch_only": {
+      "branch": "perf/text-performance-experiment",
+      "main_baseline": "7847d18684d647916506d29328fa47414f2a978a",
+      "pr68_baseline": "f033b8626c1be2071c763b598a92148ad394bbb3",
+      "variants": {
+        "scoped": "PR #68 baseline",
+        "scratch-final": "direct scratch borrowing only",
+        "main-baseline": "legacy main",
+        "main": "legacy main"
+      },
+      "host": "Acer-Nitro-5",
+      "cpu": "Intel Core i5-10300H",
+      "architecture": "x86_64",
+      "affinity_cpu": 2,
+      "compiler": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+      "profile": "Repository bench profile: opt-level 3, fat LTO, one codegen unit",
+      "criterion": {
+        "version": "0.8.2",
+        "rounds": 3,
+        "warm_up_seconds": 1,
+        "measurement_seconds": 2,
+        "text_samples": 50,
+        "ordinary_samples": 20,
+        "broader_samples": 100
+      },
+      "comparison": "Median of paired round ratios. Gate cases use slope point estimates. All broader cases consistently use mean point estimates, because automatic sampling may omit slopes.",
+      "source_sha256": {
+        "crates/scah/src/html/entities.rs": "f6b3d1ca272bcb135225f497387cc1a5af4fa3bc05da59581b8933442be9cd10",
+        "crates/scah/src/html/parser.rs": "b1cba0caf7b649bbcadfe07ea99feed411f47bf2b8eb133f81df5c158fabf488",
+        "crates/scah/src/html/text_state.rs": "6a1577f404771eaad21d9b80e5e76f9fd4009a139370b27df2ff40c4c8e7a159",
+        "crates/scah/src/engine/attribute_interest.rs": "19a58a87d2dcc6341856d5a7385a4363f5f0e75ba5875bdb175dc06ec44b4174"
+      },
+      "text_gate": [
+        {
+          "workload": "no_content",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              215697.96743156668,
+              234658.1565687661,
+              222552.9206464764
+            ],
+            "scoped": [
+              234985.12433605126,
+              235375.9344171728,
+              237253.59727431566
+            ],
+            "scratch-final": [
+              223718.45874032783,
+              231513.29182461102,
+              216950.19908561444
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 222.55292064647642,
+            "scoped": 235.3759344171728,
+            "scratch-final": 223.71845874032783
+          },
+          "candidate_vs_main-baseline_pct": -1.3401898276796054,
+          "candidate_vs_scoped_pct": -4.794629288793195,
+          "limit_pct": 5,
+          "pass": true
+        },
+        {
+          "workload": "inner_html_only",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              218934.58693651718,
+              242178.84468591397,
+              227052.59592644978
+            ],
+            "scoped": [
+              247389.60773774856,
+              248742.04269573177,
+              244024.48874282386
+            ],
+            "scratch-final": [
+              222344.44335136036,
+              221950.55938846825,
+              228203.12664614362
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 227.05259592644978,
+            "scoped": 247.38960773774858,
+            "scratch-final": 222.34444335136035
+          },
+          "candidate_vs_main-baseline_pct": 0.5067243186537063,
+          "candidate_vs_scoped_pct": -10.123773838122553,
+          "limit_pct": 5,
+          "pass": true
+        },
+        {
+          "workload": "raw_only",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              261808.63123387969,
+              282836.5097534459,
+              282777.00271791883
+            ],
+            "scoped": [
+              277814.1302077267,
+              298532.1770607649,
+              270925.17121723935
+            ],
+            "scratch-final": [
+              269103.81417977094,
+              277736.33326732676,
+              261007.26030285383
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 282.77700271791883,
+            "scoped": 277.8141302077267,
+            "scratch-final": 269.10381417977095
+          },
+          "candidate_vs_main-baseline_pct": -1.8032242338745785,
+          "candidate_vs_scoped_pct": -3.660756536509824,
+          "limit_pct": 20,
+          "pass": true
+        },
+        {
+          "workload": "text_only_no_matches",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              192804.43264349963,
+              202449.83255096097,
+              211321.64421665695
+            ],
+            "scoped": [
+              216948.6841933605,
+              226209.88127464848,
+              228013.9249737915
+            ],
+            "scratch-final": [
+              219370.782813046,
+              225662.34271986023,
+              215591.43456610368
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 202.44983255096096,
+            "scoped": 226.20988127464847,
+            "scratch-final": 219.37078281304602
+          },
+          "candidate_vs_main-baseline_pct": 11.465808529654463,
+          "candidate_vs_scoped_pct": -0.24204891126018424,
+          "limit_pct": 20,
+          "pass": true
+        },
+        {
+          "workload": "text_only_sparse_matches",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              129746.18406343802,
+              126963.336406075,
+              124449.312656243
+            ],
+            "scoped": [
+              138076.98360318385,
+              141046.11686662785,
+              129008.20557322701
+            ],
+            "scratch-final": [
+              138103.84648806058,
+              139015.0234867016,
+              125384.31161686304
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 126.963336406075,
+            "scoped": 138.07698360318386,
+            "scratch-final": 138.10384648806058
+          },
+          "candidate_vs_main-baseline_pct": 6.441547768785383,
+          "candidate_vs_scoped_pct": -1.440020771253736,
+          "limit_pct": 20,
+          "pass": true
+        },
+        {
+          "workload": "text_only_prose",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main-baseline": [
+              254141.75706464765,
+              265923.751773026,
+              282082.0430052417
+            ],
+            "scoped": [
+              454990.74401863717,
+              438324.24855562026,
+              435809.3826324986
+            ],
+            "scratch-final": [
+              441039.7081304601,
+              444109.5315841584,
+              407448.8826092021
+            ]
+          },
+          "median_microseconds": {
+            "main-baseline": 265.923751773026,
+            "scoped": 438.3242485556203,
+            "scratch-final": 441.0397081304601
+          },
+          "candidate_vs_main-baseline_pct": 67.00634246587323,
+          "candidate_vs_scoped_pct": -3.0662241092987097,
+          "limit_pct": 130,
+          "pass": true
+        }
+      ],
+      "ordinary_gate": [
+        {
+          "workload": "no_match",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main": [
+              653783.474796748,
+              652279.4767247387,
+              654904.2268292683
+            ],
+            "scoped": [
+              657483.6069918699,
+              657257.8791687407,
+              656337.2790708479
+            ],
+            "scratch-final": [
+              697646.4134280353,
+              734553.7609756098,
+              663724.6258768874
+            ]
+          },
+          "median_microseconds": {
+            "main": 653.783474796748,
+            "scoped": 657.2578791687407,
+            "scratch-final": 697.6464134280353
+          },
+          "candidate_vs_main_pct": 6.709092585266663,
+          "candidate_vs_scoped_pct": 6.108563926014665,
+          "limit_pct": 5,
+          "pass": false
+        },
+        {
+          "workload": "match",
+          "estimator": "slope",
+          "round_nanoseconds": {
+            "main": [
+              1315783.48728223,
+              1185862.2683701122,
+              1217763.5766114984
+            ],
+            "scoped": [
+              1260504.1977787456,
+              1199552.6082752612,
+              1147316.2207897792
+            ],
+            "scratch-final": [
+              1218264.5554394114,
+              1238314.8734320558,
+              1149752.3262485482
+            ]
+          },
+          "median_microseconds": {
+            "main": 1217.7635766114984,
+            "scoped": 1199.5526082752613,
+            "scratch-final": 1218.2645554394114
+          },
+          "candidate_vs_main_pct": -5.584930578412894,
+          "candidate_vs_scoped_pct": 0.21233077809115208,
+          "limit_pct": 5,
+          "pass": true
+        }
+      ],
+      "broader_workloads": [
+        {
+          "workload": "both",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              497017.82815337385,
+              494561.19194886176,
+              494161.1395157943
+            ],
+            "scratch-final": [
+              485483.89298546495,
+              485629.1048549576,
+              496715.2377952608
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 494.56119194886173,
+            "scratch-final": 485.62910485495763
+          },
+          "candidate_vs_scoped_pct": -1.8060630796174038
+        },
+        {
+          "workload": "text_only_whitespace",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              507862.9899693253,
+              470930.2557960454,
+              521616.14740282507
+            ],
+            "scratch-final": [
+              514715.9075103452,
+              458431.4127325773,
+              509509.32961943164
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 507.8629899693253,
+            "scratch-final": 509.50932961943164
+          },
+          "candidate_vs_scoped_pct": -2.3210205135854034
+        },
+        {
+          "workload": "text_only_sparse_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              276476.25059154234,
+              248838.97171187494,
+              278238.51772632054
+            ],
+            "scratch-final": [
+              268320.6031004633,
+              278688.2003781626,
+              276300.78819993994
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 276.47625059154234,
+            "scratch-final": 276.3007881999399
+          },
+          "candidate_vs_scoped_pct": -0.6964274904190604
+        },
+        {
+          "workload": "text_only_no_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              215197.34082952206,
+              191909.9987180999,
+              203507.68751098213
+            ],
+            "scratch-final": [
+              197480.1083367996,
+              204782.14571169775,
+              206363.91584628884
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 203.50768751098212,
+            "scratch-final": 204.78214571169775
+          },
+          "candidate_vs_scoped_pct": 1.4034989882888649
+        },
+        {
+          "workload": "text_only_dense_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              374239.9310780821,
+              335816.9058584089,
+              369736.71756965166
+            ],
+            "scratch-final": [
+              330151.83228815923,
+              339429.693879465,
+              323807.3685141473
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 369.73671756965166,
+            "scratch-final": 330.15183228815926
+          },
+          "candidate_vs_scoped_pct": -11.780704069423386
+        },
+        {
+          "workload": "text_only_invalid_entities",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              863312.0854166666,
+              820525.4173665349,
+              850077.166
+            ],
+            "scratch-final": [
+              831306.9379166663,
+              850416.2483333338,
+              801493.7688000001
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 850.0771659999999,
+            "scratch-final": 831.3069379166662
+          },
+          "candidate_vs_scoped_pct": -3.7072511830473776
+        },
+        {
+          "workload": "hidden_heavy",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              309673.38211039116,
+              310899.67079549376,
+              283780.06552778283
+            ],
+            "scratch-final": [
+              287961.5629112655,
+              282614.31727119413,
+              289845.2395755569
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 309.6733821103912,
+            "scratch-final": 287.96156291126545
+          },
+          "candidate_vs_scoped_pct": -7.011199687606973
+        },
+        {
+          "workload": "preformatted_heavy",
+          "estimator": "mean",
+          "round_nanoseconds": {
+            "scoped": [
+              245136.42577888886,
+              241843.70034962494,
+              245807.95048269315
+            ],
+            "scratch-final": [
+              236059.80367248692,
+              238780.38274166378,
+              240152.1495390803
+            ]
+          },
+          "median_microseconds": {
+            "scoped": 245.13642577888888,
+            "scratch-final": 238.78038274166377
+          },
+          "candidate_vs_scoped_pct": -2.3009023640230275
+        }
+      ],
+      "all_gate_limits_pass": false,
+      "screen": {
+        "rounds": 3,
+        "warm_up_seconds": 1,
+        "measurement_seconds": 3,
+        "rows": [
+          {
+            "workload": "text_only_prose",
+            "estimator": "slope",
+            "round_nanoseconds": {
+              "scoped": [
+                489316.85552941175,
+                483902.41364239954,
+                480770.24720792077
+              ],
+              "scratch": [
+                475543.2256532712,
+                475733.94766064844,
+                477086.85818986606
+              ]
+            },
+            "candidate_vs_baseline_pct": -1.6880399335613805
+          },
+          {
+            "workload": "no_match",
+            "estimator": "slope",
+            "round_nanoseconds": {
+              "scoped": [
+                678613.9603104213,
+                680831.5904181185,
+                671491.4024390244
+              ],
+              "scratch": [
+                663493.5458188154,
+                662570.4929996833,
+                665091.4573344948
+              ]
+            },
+            "candidate_vs_baseline_pct": -2.228131953649959
+          }
+        ],
+        "source_sha256": {
+          "crates/scah/src/html/parser.rs": "b1cba0caf7b649bbcadfe07ea99feed411f47bf2b8eb133f81df5c158fabf488",
+          "crates/scah/src/html/text_state.rs": "6a1577f404771eaad21d9b80e5e76f9fd4009a139370b27df2ff40c4c8e7a159"
+        }
+      },
+      "candidate_patch_from_pr68_baseline": "diff --git a/crates/scah/src/html/text_state.rs b/crates/scah/src/html/text_state.rs\nindex f6d9a64..1ce1fcb 100644\n--- a/crates/scah/src/html/text_state.rs\n+++ b/crates/scah/src/html/text_state.rs\n@@ -266,7 +266,7 @@ impl ParserTextState {\n \n     fn write_collapsed_source(&mut self, tape: &mut TextTape, source: &str) {\n         if !contains_ampersand(source) {\n-            self.write_collapsed_decoded(tape, source.as_bytes());\n+            Self::write_collapsed_decoded(&mut self.pending, tape, source.as_bytes());\n             return;\n         }\n \n@@ -276,17 +276,20 @@ impl ParserTextState {\n         }\n         self.decode_scratch.clear();\n         decode_character_references(source, &mut self.decode_scratch);\n-        // Split decode_scratch away so write helpers can borrow `&mut self`.\n-        let decoded = std::mem::take(&mut self.decode_scratch);\n-        self.write_collapsed_decoded(tape, &decoded);\n-        self.decode_scratch = decoded;\n+        Self::write_collapsed_decoded(&mut self.pending, tape, &self.decode_scratch);\n     }\n \n-    fn write_collapsed_decoded(&mut self, tape: &mut TextTape, decoded: &[u8]) {\n+    // The caller has already excluded suppressed and preformatted content.\n+    // Borrow only the pending separator so decoded bytes can stay in scratch.\n+    fn write_collapsed_decoded(\n+        pending: &mut PendingSeparator,\n+        tape: &mut TextTape,\n+        decoded: &[u8],\n+    ) {\n         let mut i = 0;\n         while i < decoded.len() {\n             if is_html_whitespace(decoded[i]) {\n-                self.queue_separator(PendingSeparator::Space);\n+                *pending = (*pending).max(PendingSeparator::Space);\n                 while i < decoded.len() && is_html_whitespace(decoded[i]) {\n                     i += 1;\n                 }\n@@ -311,7 +314,7 @@ impl ParserTextState {\n                 i += 1;\n             }\n \n-            self.flush_pending(tape);\n+            apply_separator(tape, std::mem::take(pending));\n             tape.push_bytes(&decoded[run_start..i]);\n         }\n     }\n",
+      "disposition": "Not retained. Full comparison missed the ordinary no-match limit despite an improving focused screen.",
+      "validation": [
+        "cargo fmt --all -- --check",
+        "cargo test --release -p scah --quiet",
+        "cargo test --release -p scah --features bench-internals --quiet",
+        "cargo clippy --workspace --all-targets --exclude scah-benches --exclude scah-cursor-benches -- -D warnings",
+        "cargo bench -p scah-benches --bench memory_bench_text_extraction",
+        "cargo bench -p scah-benches --bench speed_bench_text_extraction -- --test"
+      ],
+      "executable_size": {
+        "tool": "GNU size",
+        "baseline": {
+          "text": 2658036,
+          "data": 46168,
+          "bss": 1544
+        },
+        "candidate": {
+          "text": 2658092,
+          "data": 46168,
+          "bss": 1480
+        },
+        "note": "Complete text-gate executable including Criterion; not parser-only code size."
+      }
+    }
+  }
+}

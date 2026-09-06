@@ -8,6 +8,37 @@ use entities_table::{
     NAMED_ENTITY_COUNT,
 };
 
+// Derive a small search index from the generated, sorted names. Searching
+// only names with the same initial byte avoids unrelated table comparisons.
+const SEARCH_INDEX: ([u16; 129], usize) = build_search_index();
+
+const fn build_search_index() -> ([u16; 129], usize) {
+    let mut starts = [0; 129];
+    let mut index = 0;
+    let mut initial = 0;
+    let mut longest_legacy_name = 0;
+    while initial < starts.len() {
+        while index < NAMED_ENTITY_COUNT {
+            let start = if index == 0 {
+                0
+            } else {
+                ENTITY_NAME_ENDS[index - 1] as usize
+            };
+            if ENTITY_NAMES[start] as usize >= initial {
+                break;
+            }
+            let end = ENTITY_NAME_ENDS[index] as usize;
+            if ENTITY_NAMES[end - 1] != b';' && end - start > longest_legacy_name {
+                longest_legacy_name = end - start;
+            }
+            index += 1;
+        }
+        starts[initial] = index as u16;
+        initial += 1;
+    }
+    (starts, longest_legacy_name)
+}
+
 #[inline]
 fn entity_name(index: usize) -> &'static [u8] {
     let start = if index == 0 {
@@ -162,6 +193,22 @@ fn digit_value(byte: u8, radix: u32) -> Option<u32> {
 }
 
 fn decode_named(source: &[u8], out: &mut Vec<u8>) -> Option<usize> {
+    // Escaped HTML most often uses these five complete spellings. Resolve
+    // them before the full-table search. Requiring the semicolon leaves
+    // longest-prefix and legacy semicolon-less matching to the general path.
+    let common: Option<(&[u8], usize)> = match source {
+        [b'a', b'm', b'p', b';', ..] => Some((b"&", 4)),
+        [b'l', b't', b';', ..] => Some((b"<", 3)),
+        [b'g', b't', b';', ..] => Some((b">", 3)),
+        [b'q', b'u', b'o', b't', b';', ..] => Some((b"\"", 5)),
+        [b'n', b'b', b's', b'p', b';', ..] => Some(("\u{00A0}".as_bytes(), 5)),
+        _ => None,
+    };
+    if let Some((value, consumed)) = common {
+        out.extend_from_slice(value);
+        return Some(consumed);
+    }
+
     let mut name_end = 0;
     while name_end < source.len()
         && name_end < MAX_NAME_LEN
@@ -174,12 +221,20 @@ fn decode_named(source: &[u8], out: &mut Vec<u8>) -> Option<usize> {
         return None;
     }
 
-    let mut candidate_end = if name_end < MAX_NAME_LEN && source.get(name_end) == Some(&b';') {
+    let candidate_end = if name_end < MAX_NAME_LEN && source.get(name_end) == Some(&b';') {
         name_end + 1
     } else {
         name_end
     };
 
+    if let Ok(index) = binary_search_entity_name(&source[..candidate_end]) {
+        out.extend_from_slice(entity_value(index));
+        return Some(candidate_end);
+    }
+
+    // A shorter match cannot include the terminal semicolon. Only legacy
+    // semicolon-less spellings can succeed, and none exceed this length.
+    let mut candidate_end = (candidate_end - 1).min(SEARCH_INDEX.1);
     while candidate_end > 0 {
         let candidate = &source[..candidate_end];
         if let Ok(index) = binary_search_entity_name(candidate) {
@@ -194,8 +249,9 @@ fn decode_named(source: &[u8], out: &mut Vec<u8>) -> Option<usize> {
 
 #[inline]
 fn binary_search_entity_name(candidate: &[u8]) -> Result<usize, usize> {
-    let mut left = 0usize;
-    let mut right = NAMED_ENTITY_COUNT;
+    let initial = candidate[0] as usize;
+    let mut left = SEARCH_INDEX.0[initial] as usize;
+    let mut right = SEARCH_INDEX.0[initial + 1] as usize;
     while left < right {
         let mid = left + (right - left) / 2;
         match entity_name(mid).cmp(candidate) {
@@ -355,6 +411,54 @@ mod tests {
             decode("&unknown; & &#; &#x; &#X; end"),
             "&unknown; & &#; &#x; &#X; end"
         );
+    }
+
+    #[test]
+    fn every_named_reference_matches_the_generated_value() {
+        for index in 0..super::NAMED_ENTITY_COUNT {
+            let name = std::str::from_utf8(super::entity_name(index)).unwrap();
+            let value = std::str::from_utf8(super::entity_value(index)).unwrap();
+            assert_eq!(decode(&format!("&{name}")), value, "{name}");
+            assert_eq!(
+                decode(&format!("&{name}!é")),
+                format!("{value}!é"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            decode("&amp;&amper;&AMP;&Amp;&notin;&notit;"),
+            "&&er;&&Amp;∉¬it;"
+        );
+    }
+
+    #[test]
+    fn named_lookup_preserves_longest_prefix_for_extended_and_truncated_names() {
+        for index in 0..super::NAMED_ENTITY_COUNT {
+            let name = std::str::from_utf8(super::entity_name(index)).unwrap();
+            for source in [
+                format!("{name}letters;"),
+                format!("{}invalid;", name.trim_end_matches(';')),
+                name[..name.len() - 1].to_owned(),
+            ] {
+                let expected = (0..super::NAMED_ENTITY_COUNT)
+                    .filter(|&candidate| {
+                        source.as_bytes().starts_with(super::entity_name(candidate))
+                    })
+                    .max_by_key(|&candidate| super::entity_name(candidate).len());
+                let mut output = Vec::new();
+                let consumed = super::decode_named(source.as_bytes(), &mut output);
+                assert_eq!(
+                    consumed,
+                    expected.map(|candidate| super::entity_name(candidate).len()),
+                    "{source}"
+                );
+                assert_eq!(
+                    output.as_slice(),
+                    expected.map(super::entity_value).unwrap_or_default(),
+                    "{source}"
+                );
+            }
+        }
     }
 
     #[test]
