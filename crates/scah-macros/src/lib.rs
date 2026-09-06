@@ -349,19 +349,17 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
     }
 }
 
-fn compile_node<'a>(node: &'a QueryNode, scoped: bool) -> Result<QueryBuilder<'a>> {
+fn compile_node<'a>(node: &'a QueryNode) -> Result<QueryBuilder<'a>> {
     let selector = Box::leak(node.selector.value().into_boxed_str());
-    let mut builder = match (node.kind, scoped) {
-        (SelectionKind::All, false) => Query::all(selector, node.save),
-        (SelectionKind::First, false) => Query::first(selector, node.save),
-        (SelectionKind::All, true) => Query::all_scoped(selector, node.save),
-        (SelectionKind::First, true) => Query::first_scoped(selector, node.save),
+    let mut builder = match node.kind {
+        SelectionKind::All => Query::all(selector, node.save),
+        SelectionKind::First => Query::first(selector, node.save),
     }
     .map_err(|err| syn::Error::new(node.selector.span(), err.to_string()))?;
 
     let current_index = scah_query_ir::QuerySectionId(builder.selection.len() - 1);
     for child in &node.children {
-        let child_builder = compile_node(child, true)?;
+        let child_builder = compile_node(child)?;
         builder.append(current_index, child_builder);
     }
 
@@ -369,7 +367,7 @@ fn compile_node<'a>(node: &'a QueryNode, scoped: bool) -> Result<QueryBuilder<'a
 }
 
 fn expand_query(node: &QueryNode) -> Result<proc_macro2::TokenStream> {
-    let compiled = compile_node(node, false)
+    let compiled = compile_node(node)
         .map(QueryBuilder::build)
         .map_err(|err| syn::Error::new(node.selector.span(), err.to_string()))?;
 

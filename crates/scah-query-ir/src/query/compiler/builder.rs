@@ -458,7 +458,7 @@ impl<'query> QueryFactory {
         query: &'query str,
         save: Save,
     ) -> Result<QueryBuilder<'query>, SelectorParseError> {
-        Query::all_scoped(query, save)
+        Query::all(query, save)
     }
 
     /// Create a child query that matches only the **first** occurrence.
@@ -467,7 +467,7 @@ impl<'query> QueryFactory {
         query: &'query str,
         save: Save,
     ) -> Result<QueryBuilder<'query>, SelectorParseError> {
-        Query::first_scoped(query, save)
+        Query::first(query, save)
     }
 }
 
