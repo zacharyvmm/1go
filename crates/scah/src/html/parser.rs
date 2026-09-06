@@ -453,7 +453,11 @@ where
                             .attribute_interest
                             .require_hidden();
                     }
-                    let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
+                    // A tag ending immediately after its name cannot carry
+                    // selector attributes or hidden-text suppression.
+                    let end = if CAPTURE && source.get(open.attributes_start) == Some(&b'>') {
+                        open.attributes_start + 1
+                    } else if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {
                             self.attribute_parse_count += 1;
@@ -600,24 +604,20 @@ where
                             .truncate(self.temp_state.attribute_start);
                     }
                 }
-                let (text_was_active, new_raw_count, new_text_count) =
-                    if CAPTURE && !is_self_closing {
-                        (
-                            self.text_active_count > 0,
-                            self.temp_state
-                                .save_hits
-                                .iter()
-                                .filter(|hit| hit.save_raw_text)
-                                .count(),
-                            self.temp_state
-                                .save_hits
-                                .iter()
-                                .filter(|hit| hit.save_text)
-                                .count(),
-                        )
-                    } else {
-                        (CAPTURE && self.text_active_count > 0, 0, 0)
-                    };
+                let text_was_active = CAPTURE && self.text_active_count > 0;
+                let (new_raw_count, new_text_count) = if CAPTURE && !is_self_closing {
+                    self.temp_state
+                        .save_hits
+                        .iter()
+                        .fold((0, 0), |(raw, text), hit| {
+                            (
+                                raw + usize::from(hit.save_raw_text),
+                                text + usize::from(hit.save_text),
+                            )
+                        })
+                } else {
+                    (0, 0)
+                };
                 if let Some(behavior) = text_behavior
                     && (text_was_active || new_text_count > 0)
                 {
@@ -784,21 +784,8 @@ where
     ) -> bool {
         let saved_range = OpenElementStack::saved_range(&open_element);
         debug_assert_eq!(saved_range.end, self.temp_state.saved_elements.len());
-        let (closing_raw_count, closing_text_count) = if CAPTURE {
-            (
-                self.temp_state.saved_elements[saved_range.clone()]
-                    .iter()
-                    .filter(|saved| saved.raw_text_start().is_some())
-                    .count(),
-                self.temp_state.saved_elements[saved_range.clone()]
-                    .iter()
-                    .filter(|saved| saved.text_start().is_some())
-                    .count(),
-            )
-        } else {
-            (0, 0)
-        };
-        self.finalize_open_element::<CAPTURE>(&open_element, reader);
+        let (closing_raw_count, closing_text_count) =
+            self.finalize_open_element::<CAPTURE>(&open_element, reader);
         self.temp_state.saved_elements.truncate(saved_range.start);
         if CAPTURE {
             debug_assert!(closing_raw_count <= self.raw_active_count);
@@ -994,7 +981,9 @@ where
         &mut self,
         open_element: &OpenElement<'html>,
         reader: &Reader<'html>,
-    ) {
+    ) -> (usize, usize) {
+        let mut raw_count = 0;
+        let mut text_count = 0;
         for saved_index in OpenElementStack::saved_range(open_element) {
             let saved = &self.temp_state.saved_elements[saved_index];
             let inner_html = saved
@@ -1017,9 +1006,12 @@ where
                     TextEdgePolicy::Preserve => range,
                 }
             });
+            raw_count += usize::from(raw_text.is_some());
+            text_count += usize::from(text.is_some());
             self.store
                 .set_content(saved.element_id, inner_html, raw_text, text);
         }
+        (raw_count, text_count)
     }
 
     fn drain_open_elements<const CAPTURE: bool, const SIBLINGS: bool, const RETIREMENT: bool>(

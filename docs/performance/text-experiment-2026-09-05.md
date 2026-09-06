@@ -1,5 +1,7 @@
 # Text-performance experiment, 5 September 2026
 
+The [follow-up experiment](text-experiment-2026-09-06.md) records subsequent optimizations and updated comparisons.
+
 The experiment passes all six text-extraction limits and both ordinary-parser limits in three-round comparisons on the Acer's x86-64 CPU. No architectural refactor or gate-budget change was needed.
 
 Branch: `perf/text-performance-experiment`.

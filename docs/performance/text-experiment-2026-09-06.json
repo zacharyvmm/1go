@@ -1,0 +1,487 @@
+{
+  "branch": "perf/text-performance-experiment",
+  "main_baseline": "7847d18684d647916506d29328fa47414f2a978a",
+  "pr68_baseline": "c4fff2a82549401a0fce7686d6f99f9aff5fb9cb",
+  "variants": {
+    "active": "PR #68 baseline",
+    "scoped": "second optimization candidate",
+    "main-baseline": "legacy main",
+    "main": "legacy main"
+  },
+  "host": "Acer-Nitro-5",
+  "cpu": "Intel Core i5-10300H",
+  "architecture": "x86_64",
+  "affinity_cpu": 2,
+  "compiler": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "profile": "Repository bench profile: opt-level 3, fat LTO, one codegen unit",
+  "criterion": {
+    "version": "0.8.2",
+    "rounds": 3,
+    "warm_up_seconds": 1,
+    "measurement_seconds": 2,
+    "text_samples": 50,
+    "ordinary_samples": 20,
+    "broader_samples": 100
+  },
+  "comparison": "Median of paired round ratios. Gate cases use slope point estimates. All broader cases consistently use mean point estimates, because automatic sampling may omit slopes.",
+  "source_sha256": {
+    "crates/scah/src/html/entities.rs": "f6b3d1ca272bcb135225f497387cc1a5af4fa3bc05da59581b8933442be9cd10",
+    "crates/scah/src/html/parser.rs": "b1cba0caf7b649bbcadfe07ea99feed411f47bf2b8eb133f81df5c158fabf488",
+    "crates/scah/src/html/text_state.rs": "028168afb236e0a2e6324331d944b8dfbe7bc7c6c1954eba946550caf238b98a",
+    "crates/scah/src/engine/attribute_interest.rs": "19a58a87d2dcc6341856d5a7385a4363f5f0e75ba5875bdb175dc06ec44b4174"
+  },
+  "text_gate": [
+    {
+      "workload": "no_content",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main-baseline": [
+          225002.21622306347,
+          211780.81096097844,
+          215822.94106872453
+        ],
+        "active": [
+          225908.02194525333,
+          210716.38196189367,
+          213334.94246651136
+        ],
+        "scoped": [
+          219834.23565812464,
+          213257.2147757717,
+          215821.432291788
+        ]
+      },
+      "median_microseconds": {
+        "main-baseline": 215.82294106872453,
+        "active": 213.33494246651136,
+        "scoped": 215.821432291788
+      },
+      "candidate_vs_main-baseline_pct": -0.0006990808896656375,
+      "candidate_vs_active_pct": 1.165533314200018,
+      "limit_pct": 5,
+      "pass": true
+    },
+    {
+      "workload": "inner_html_only",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main-baseline": [
+          243311.10998585573,
+          219661.00210250437,
+          221994.46499708795
+        ],
+        "active": [
+          219087.1745457193,
+          219168.48041933606,
+          224172.65635119393
+        ],
+        "scoped": [
+          223837.26684083533,
+          239627.73336550462,
+          226435.41765870704
+        ]
+      },
+      "median_microseconds": {
+        "main-baseline": 221.99446499708796,
+        "active": 219.16848041933605,
+        "scoped": 226.43541765870705
+      },
+      "candidate_vs_main-baseline_pct": 2.0004790036892706,
+      "candidate_vs_active_pct": 2.1681288760811546,
+      "limit_pct": 5,
+      "pass": true
+    },
+    {
+      "workload": "raw_only",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main-baseline": [
+          254628.94399866878,
+          256622.3565421416,
+          257497.36317830102
+        ],
+        "active": [
+          298490.6373170258,
+          284256.7374102116,
+          282320.86104834016
+        ],
+        "scoped": [
+          265910.48667054944,
+          266030.5754377791,
+          268414.1783071248
+        ]
+      },
+      "median_microseconds": {
+        "main-baseline": 256.62235654214163,
+        "active": 284.2567374102116,
+        "scoped": 266.0305754377791
+      },
+      "candidate_vs_main-baseline_pct": 4.239583269543834,
+      "candidate_vs_active_pct": -6.411866307369274,
+      "limit_pct": 20,
+      "pass": true
+    },
+    {
+      "workload": "text_only_no_matches",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main-baseline": [
+          193463.77688701224,
+          195239.07711124053,
+          199222.18523878857
+        ],
+        "active": [
+          202284.23660454282,
+          202508.85385264998,
+          204919.9877868375
+        ],
+        "scoped": [
+          207079.91698602214,
+          206941.26653174142,
+          214364.9295369831
+        ]
+      },
+      "median_microseconds": {
+        "main-baseline": 195.23907711124053,
+        "active": 202.50885385264996,
+        "scoped": 207.07991698602214
+      },
+      "candidate_vs_main-baseline_pct": 7.038082434916015,
+      "candidate_vs_active_pct": 2.3707632695347813,
+      "limit_pct": 20,
+      "pass": true
+    },
+    {
+      "workload": "text_only_sparse_matches",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main-baseline": [
+          121008.3919377652,
+          119502.3382394542,
+          119550.14430318662
+        ],
+        "active": [
+          128349.66766542717,
+          126374.44532951033,
+          125599.84564849245
+        ],
+        "scoped": [
+          126888.66948255006,
+          126907.1749688634,
+          130656.99423307036
+        ]
+      },
+      "median_microseconds": {
+        "main-baseline": 119.55014430318663,
+        "active": 126.37444532951034,
+        "scoped": 126.9071749688634
+      },
+      "candidate_vs_main-baseline_pct": 6.196394847581699,
+      "candidate_vs_active_pct": 0.4215485480185688,
+      "limit_pct": 20,
+      "pass": true
+    },
+    {
+      "workload": "text_only_prose",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main-baseline": [
+          254647.35137254902,
+          255337.52805391463,
+          255840.68814710042
+        ],
+        "active": [
+          402024.58988934185,
+          404875.070262085,
+          417392.38239370997
+        ],
+        "scoped": [
+          397895.6165521258,
+          396747.89370413515,
+          420972.46930693067
+        ]
+      },
+      "median_microseconds": {
+        "main-baseline": 255.33752805391464,
+        "active": 404.875070262085,
+        "scoped": 397.8956165521258
+      },
+      "candidate_vs_main-baseline_pct": 56.25358536323615,
+      "candidate_vs_active_pct": -1.0270449721377917,
+      "limit_pct": 130,
+      "pass": true
+    }
+  ],
+  "ordinary_gate": [
+    {
+      "workload": "no_match",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main": [
+          663900.7146109175,
+          667624.9192334495,
+          668001.2737049942
+        ],
+        "active": [
+          674100.8852497096,
+          675456.471242741,
+          712818.6929566949
+        ],
+        "scoped": [
+          668457.6272523644,
+          670995.9285465406,
+          684371.8462950058
+        ]
+      },
+      "median_microseconds": {
+        "main": 667.6249192334495,
+        "active": 675.456471242741,
+        "scoped": 670.9959285465405
+      },
+      "candidate_vs_main_pct": 0.6863846567957799,
+      "candidate_vs_active_pct": -0.8371533283559995,
+      "limit_pct": 5,
+      "pass": true
+    },
+    {
+      "workload": "match",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main": [
+          1198496.5783101046,
+          1217428.3554006969,
+          1198542.5427264809
+        ],
+        "active": [
+          1179587.3509872241,
+          1180404.012078978,
+          1178282.4844947734
+        ],
+        "scoped": [
+          1159858.5741773131,
+          1162964.3264808361,
+          1158980.1731271776
+        ]
+      },
+      "median_microseconds": {
+        "main": 1198.5425427264809,
+        "active": 1179.5873509872242,
+        "scoped": 1159.8585741773131
+      },
+      "candidate_vs_main_pct": -3.30087320132213,
+      "candidate_vs_active_pct": -1.6381734958805128,
+      "limit_pct": 5,
+      "pass": true
+    }
+  ],
+  "broader_workloads": [
+    {
+      "workload": "both",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          458676.68919621815,
+          478390.854137419,
+          447521.0589523327
+        ],
+        "scoped": [
+          445071.88108838105,
+          479628.7375863719,
+          438500.87359146535
+        ]
+      },
+      "median_microseconds": {
+        "active": 458.67668919621815,
+        "scoped": 445.0718810883811
+      },
+      "candidate_vs_active_pct": -2.0155890276949306
+    },
+    {
+      "workload": "text_only_whitespace",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          490914.9574925601,
+          489148.984567556,
+          497120.7848225468
+        ],
+        "scoped": [
+          462068.43016985094,
+          460572.1499878073,
+          472356.78992694675
+        ]
+      },
+      "median_microseconds": {
+        "active": 490.91495749256006,
+        "scoped": 462.06843016985096
+      },
+      "candidate_vs_active_pct": -5.842153511779791
+    },
+    {
+      "workload": "text_only_sparse_entities",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          268262.6537524078,
+          288057.1331466652,
+          272901.2562272445
+        ],
+        "scoped": [
+          251031.898545475,
+          249771.06481187113,
+          251424.43375832346
+        ]
+      },
+      "median_microseconds": {
+        "active": 272.9012562272445,
+        "scoped": 251.031898545475
+      },
+      "candidate_vs_active_pct": -7.869814439783052
+    },
+    {
+      "workload": "text_only_no_entities",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          206795.22228870488,
+          208036.72273441407,
+          204053.1442901029
+        ],
+        "scoped": [
+          198236.65963721462,
+          198564.9482595434,
+          192841.23739380832
+        ]
+      },
+      "median_microseconds": {
+        "active": 206.79522228870488,
+        "scoped": 198.23665963721461
+      },
+      "candidate_vs_active_pct": -4.552933900503053
+    },
+    {
+      "workload": "text_only_dense_entities",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          370991.2217358255,
+          366629.3335073777,
+          358807.204859876
+        ],
+        "scoped": [
+          334895.53053710685,
+          330095.9212866881,
+          339300.80710598937
+        ]
+      },
+      "median_microseconds": {
+        "active": 366.62933350737774,
+        "scoped": 334.8955305371069
+      },
+      "candidate_vs_active_pct": -9.72952703027069
+    },
+    {
+      "workload": "text_only_invalid_entities",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          2835033.1500000004,
+          2642979.86125,
+          2693545.85375
+        ],
+        "scoped": [
+          788066.1560000001,
+          787299.2889817895,
+          825734.3508
+        ]
+      },
+      "median_microseconds": {
+        "active": 2693.54585375,
+        "scoped": 788.0661560000001
+      },
+      "candidate_vs_active_pct": -70.21168036409344
+    },
+    {
+      "workload": "hidden_heavy",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          502363.7122487977,
+          500225.8699118317,
+          507948.2493725246
+        ],
+        "scoped": [
+          286796.742679619,
+          305957.46676509565,
+          285521.52020402363
+        ]
+      },
+      "median_microseconds": {
+        "active": 502.3637122487977,
+        "scoped": 286.796742679619
+      },
+      "candidate_vs_active_pct": -42.910537587240825
+    },
+    {
+      "workload": "preformatted_heavy",
+      "estimator": "mean",
+      "round_nanoseconds": {
+        "active": [
+          231273.76391462304,
+          234882.60833268895,
+          230422.91023471326
+        ],
+        "scoped": [
+          219460.2670321478,
+          218674.51543681737,
+          219510.46170547258
+        ]
+      },
+      "median_microseconds": {
+        "active": 231.27376391462303,
+        "scoped": 219.46026703214778
+      },
+      "candidate_vs_active_pct": -5.108014278193829
+    }
+  ],
+  "all_gate_limits_pass": true,
+  "rejected_checkpoint": {
+    "reason": "The unrestricted tag shortcut missed the inner-HTML gate. The retained shortcut is restricted to CAPTURE=true.",
+    "inner_html_only": {
+      "workload": "inner_html_only",
+      "estimator": "slope",
+      "round_nanoseconds": {
+        "main-baseline": [
+          229067.95826940678,
+          223075.65703843915,
+          243673.10649138864
+        ],
+        "active": [
+          232191.0238755304,
+          240604.96741492636,
+          238741.2757134537
+        ],
+        "slim": [
+          242749.35159996673,
+          239939.36393418754,
+          241193.74292037607
+        ]
+      },
+      "median_microseconds": {
+        "main-baseline": 229.06795826940677,
+        "active": 238.74127571345372,
+        "slim": 241.19374292037608
+      },
+      "candidate_vs_main-baseline_pct": 5.972635122747838,
+      "candidate_vs_active_pct": 1.0272489328011725,
+      "limit_pct": 5,
+      "pass": false
+    },
+    "source_sha256": {
+      "crates/scah/src/html/entities.rs": "f6b3d1ca272bcb135225f497387cc1a5af4fa3bc05da59581b8933442be9cd10",
+      "crates/scah/src/html/parser.rs": "f4c831a67dbef30ae1b4c19132225fbf4485f940c9a1d8fe45e1a7db3022ca1a",
+      "crates/scah/src/html/text_state.rs": "028168afb236e0a2e6324331d944b8dfbe7bc7c6c1954eba946550caf238b98a",
+      "crates/scah/src/engine/attribute_interest.rs": "19a58a87d2dcc6341856d5a7385a4363f5f0e75ba5875bdb175dc06ec44b4174"
+    }
+  }
+}
