@@ -58,7 +58,10 @@ run_round() {
     --save-baseline "$baseline_name"
 }
 
-for round in 1 2 3; do
+# Use an even number of alternating rounds so each binary runs first equally
+# often. This prevents thermal or frequency drift from systematically favoring
+# either the base or the candidate.
+for round in 1 2 3 4; do
   if ((round % 2 == 0)); then
     run_round "$gate_root/candidate-benchmark" "sibling-candidate-$round"
     run_round "$gate_root/base-benchmark" "sibling-main-$round"
@@ -89,7 +92,7 @@ for workload in ("no_match", "match"):
     ratios = [
         estimate("sibling-candidate", round_number)
         / estimate("sibling-main", round_number)
-        for round_number in (1, 2, 3)
+        for round_number in (1, 2, 3, 4)
     ]
     ratio = statistics.median(ratios)
     delta = (ratio - 1.0) * 100.0

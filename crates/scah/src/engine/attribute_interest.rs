@@ -1,5 +1,4 @@
 use crate::__private::PredicateMetadata;
-#[cfg(test)]
 use crate::ElementPredicate;
 use smallvec::SmallVec;
 
@@ -33,32 +32,8 @@ impl<'query> AttributeInterest<'query> {
         self.keys.clear();
     }
 
-    #[cfg(test)]
     pub fn add_predicate(&mut self, predicate: &ElementPredicate<'query>) {
-        if self.all {
-            return;
-        }
-
-        self.id |= predicate.id.is_some();
-        self.class |= !predicate.classes.as_slice().is_empty();
-
-        for attribute in predicate.attributes.as_slice() {
-            if attribute.name.eq_ignore_ascii_case("id") {
-                self.id = true;
-            } else if attribute.name.eq_ignore_ascii_case("class") {
-                self.class = true;
-            } else if !self
-                .keys
-                .iter()
-                .any(|key| key.eq_ignore_ascii_case(attribute.name))
-            {
-                if self.keys.len() == INLINE_ATTRIBUTE_KEYS {
-                    self.require_all();
-                    return;
-                }
-                self.keys.push(attribute.name);
-            }
-        }
+        self.add_metadata(&PredicateMetadata::compile(predicate));
     }
 
     pub fn add_metadata(&mut self, metadata: &PredicateMetadata<'query>) {
@@ -83,7 +58,6 @@ impl<'query> AttributeInterest<'query> {
         }
     }
 
-    #[cfg(test)]
     pub fn merge(&mut self, other: &Self) {
         if self.all || other.is_empty() {
             return;

@@ -1,10 +1,11 @@
 use super::attribute_interest::AttributeInterest;
 use super::executor::QueryExecutor;
 use crate::__private::ascii_case_insensitive_hash;
-use crate::Position;
+use crate::StructuralMatchContext;
 use crate::XHtmlElement;
 use crate::store::ElementId;
 use crate::store::Store;
+use crate::{LocalSelectorList, Position, QuerySectionId, StructuralPredicate};
 use crate::{QuerySpec, Reader};
 use smallvec::SmallVec;
 
@@ -68,6 +69,11 @@ type Runners<'query, Q> = Vec<QueryExecutor<'query, 'query, Q>>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MultiplexerFeatures {
     pub(crate) has_sibling_queries: bool,
+    pub(crate) has_selector_lists: bool,
+    pub(crate) has_structural_queries: bool,
+    pub(crate) needs_child_ordinals: bool,
+    pub(crate) needs_type_ordinals: bool,
+    pub(crate) needs_filtered_ordinals: bool,
     pub(crate) has_retiring_runners: bool,
 }
 
@@ -114,9 +120,48 @@ where
             .iter()
             .fold(MultiplexerFeatures::default(), |mut aggregate, query| {
                 aggregate.has_sibling_queries |= query.has_sibling_combinator();
+                aggregate.has_selector_lists |= query
+                    .queries()
+                    .iter()
+                    .enumerate()
+                    .any(|(index, _)| query.selection_ranges(QuerySectionId(index)).len() > 1);
+                aggregate.has_structural_queries |= query.has_structural_queries();
+                for transition in query.states() {
+                    for predicate in transition.predicate().structural.as_slice() {
+                        match predicate {
+                            StructuralPredicate::FirstChild | StructuralPredicate::NthChild(_) => {
+                                aggregate.needs_child_ordinals = true;
+                            }
+                            StructuralPredicate::FirstOfType
+                            | StructuralPredicate::NthOfType(_) => {
+                                aggregate.needs_type_ordinals = true;
+                            }
+                            StructuralPredicate::NthChildOf(_, _) => {
+                                aggregate.needs_filtered_ordinals = true;
+                            }
+                            StructuralPredicate::Root | StructuralPredicate::Scope => {}
+                        }
+                    }
+                }
                 aggregate.has_retiring_runners |= query.exit_at_section_end().is_some();
                 aggregate
             })
+    }
+
+    pub(crate) fn structural_attribute_interest(&self) -> Option<AttributeInterest<'query>> {
+        let mut interest = AttributeInterest::default();
+        for runner in &self.runners {
+            for transition in runner.query().states() {
+                for structural in transition.predicate().structural.as_slice() {
+                    if let StructuralPredicate::NthChildOf(_, filter) = structural {
+                        for predicate in filter.as_slice() {
+                            interest.add_predicate(predicate);
+                        }
+                    }
+                }
+            }
+        }
+        (!interest.is_empty()).then_some(interest)
     }
 
     #[inline]
@@ -248,13 +293,75 @@ where
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn prepare_element_with_structural_interest<
+        const SIBLINGS: bool,
+        const RETIREMENT: bool,
+    >(
+        &self,
+        name: &str,
+        preflight: &mut ElementPreflight<'query>,
+        structural_interest: &AttributeInterest<'query>,
+    ) {
+        self.prepare_element::<SIBLINGS, RETIREMENT>(name, preflight);
+        preflight.attribute_interest.merge(structural_interest);
+    }
+
     #[inline]
     pub(crate) fn features(&self) -> MultiplexerFeatures {
         self.features
     }
 
+    pub(crate) fn structural_filters(&self) -> Vec<&'query LocalSelectorList<'query>> {
+        let mut filters: Vec<&'query LocalSelectorList<'query>> = Vec::new();
+        for runner in &self.runners {
+            for filter in runner.query.structural_filters() {
+                if !filters
+                    .iter()
+                    .any(|existing| std::ptr::eq(*existing, filter))
+                {
+                    filters.push(filter);
+                }
+            }
+        }
+        filters
+    }
+
+    pub(crate) fn type_ordinal_names(&self) -> Option<SmallVec<[&'query str; 4]>> {
+        let mut names: SmallVec<[&'query str; 4]> = SmallVec::new();
+        for runner in &self.runners {
+            for transition in runner.query.states() {
+                let needs_type_ordinal =
+                    transition
+                        .predicate()
+                        .structural
+                        .as_slice()
+                        .iter()
+                        .any(|predicate| {
+                            matches!(
+                                predicate,
+                                StructuralPredicate::FirstOfType
+                                    | StructuralPredicate::NthOfType(_)
+                            )
+                        });
+                if !needs_type_ordinal {
+                    continue;
+                }
+                let name = transition.predicate().name?;
+                if !names
+                    .iter()
+                    .any(|existing| name.eq_ignore_ascii_case(existing))
+                {
+                    names.push(name);
+                }
+            }
+        }
+        Some(names)
+    }
+
     // Preserve the ordinary executor's inlining across this thin dispatch
     // layer; otherwise x86-64 keeps the wrapper in the parser hot loop.
+    #[allow(dead_code)]
     #[inline(always)]
     pub(crate) fn next_plain_into(
         &mut self,
@@ -281,7 +388,36 @@ where
         self.track_cursor_stats();
     }
 
+    #[inline(always)]
+    pub(crate) fn next_plain_into_with_context(
+        &mut self,
+        xhtml_element: &XHtmlElement<'html>,
+        position: &DocumentPosition,
+        store: &mut Store<'html, 'query>,
+        save_hits: &mut Vec<SaveHit>,
+        preflight: &ElementPreflight<'query>,
+        structural: Option<&StructuralMatchContext<'query>>,
+    ) {
+        debug_assert_eq!(self.runners.len(), preflight.runner_len);
+        save_hits.clear();
+        for &runner_index in &preflight.runner_indices {
+            self.runners[runner_index].next_plain_with_context(
+                RunnerId(runner_index),
+                xhtml_element,
+                position,
+                store,
+                save_hits,
+                structural,
+            );
+        }
+        #[cfg(any(debug_assertions, test))]
+        self.trace_preflight_rejections(xhtml_element, position, store, preflight);
+        #[cfg(feature = "bench-internals")]
+        self.track_cursor_stats();
+    }
+
     #[inline(never)]
+    #[allow(dead_code)]
     pub(crate) fn next_with_siblings_into(
         &mut self,
         xhtml_element: &XHtmlElement<'html>,
@@ -290,6 +426,28 @@ where
         save_hits: &mut Vec<SaveHit>,
         preflight: &ElementPreflight<'query>,
         sibling_callbacks: &mut Vec<SiblingCallback>,
+    ) {
+        self.next_with_siblings_into_with_context(
+            xhtml_element,
+            position,
+            store,
+            save_hits,
+            preflight,
+            sibling_callbacks,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn next_with_siblings_into_with_context(
+        &mut self,
+        xhtml_element: &XHtmlElement<'html>,
+        position: &DocumentPosition,
+        store: &mut Store<'html, 'query>,
+        save_hits: &mut Vec<SaveHit>,
+        preflight: &ElementPreflight<'query>,
+        sibling_callbacks: &mut Vec<SiblingCallback>,
+        structural: Option<&StructuralMatchContext<'query>>,
     ) {
         debug_assert_eq!(self.runners.len(), preflight.runner_len);
         save_hits.clear();
@@ -302,6 +460,7 @@ where
                 store,
                 save_hits,
                 sibling_callbacks,
+                structural,
             );
         }
         #[cfg(any(debug_assertions, test))]
@@ -557,6 +716,63 @@ mod tests {
     }
 
     #[test]
+    fn multiplexer_features_specialize_structural_bookkeeping() {
+        let root = [Query::all(":root", Save::none()).unwrap().build()];
+        let child = [Query::all("li:first-child", Save::none()).unwrap().build()];
+        let type_ordinal = [Query::all("li:nth-of-type(2)", Save::none())
+            .unwrap()
+            .build()];
+        let filtered = [Query::all("li:nth-child(2 of .hit)", Save::none())
+            .unwrap()
+            .build()];
+
+        let root_features = QueryMultiplexer::new(&root).features();
+        assert!(!root_features.needs_child_ordinals);
+        assert!(!root_features.needs_type_ordinals);
+        assert!(!root_features.needs_filtered_ordinals);
+
+        let child_features = QueryMultiplexer::new(&child).features();
+        assert!(child_features.needs_child_ordinals);
+        assert!(!child_features.needs_type_ordinals);
+        assert!(!child_features.needs_filtered_ordinals);
+
+        let type_features = QueryMultiplexer::new(&type_ordinal).features();
+        assert!(!type_features.needs_child_ordinals);
+        assert!(type_features.needs_type_ordinals);
+        assert!(!type_features.needs_filtered_ordinals);
+
+        let filtered_features = QueryMultiplexer::new(&filtered).features();
+        assert!(!filtered_features.needs_child_ordinals);
+        assert!(!filtered_features.needs_type_ordinals);
+        assert!(filtered_features.needs_filtered_ordinals);
+    }
+
+    #[test]
+    fn type_ordinal_interest_tracks_named_types_and_falls_back_for_universal_queries() {
+        let named = [
+            Query::all("li:nth-of-type(2)", Save::none())
+                .unwrap()
+                .build(),
+            Query::all("SPAN:first-of-type", Save::none())
+                .unwrap()
+                .build(),
+        ];
+        let names = QueryMultiplexer::new(&named)
+            .type_ordinal_names()
+            .expect("named selectors have finite type interest");
+        assert_eq!(names.as_slice(), &["li", "SPAN"]);
+
+        let universal = [Query::all("*:nth-of-type(2)", Save::none())
+            .unwrap()
+            .build()];
+        assert!(
+            QueryMultiplexer::new(&universal)
+                .type_ordinal_names()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn retiring_earlier_runner_does_not_shift_later_slots() {
         let queries = [
             Query::first("h1", Save::none()).unwrap().build(),
@@ -738,6 +954,29 @@ mod tests {
         assert_eq!(preflight.runner_indices.as_slice(), &[1, 2]);
         assert!(preflight.attribute_interest.includes_class());
         assert!(preflight.attribute_interest.includes_attribute("data-x"));
+        assert!(!preflight.attribute_interest.includes_attribute("href"));
+    }
+
+    #[test]
+    fn filtered_ordinal_preflight_collects_only_filter_attributes() {
+        let queries = [
+            Query::all("li:nth-child(2 of .hit, [data-card])", Save::none())
+                .unwrap()
+                .build(),
+        ];
+        let selectors = QueryMultiplexer::new(&queries);
+        let mut preflight = ElementPreflight::default();
+
+        let structural_interest = selectors.structural_attribute_interest().unwrap();
+        selectors.prepare_element_with_structural_interest::<false, false>(
+            "div",
+            &mut preflight,
+            &structural_interest,
+        );
+
+        assert!(preflight.runner_indices.is_empty());
+        assert!(preflight.attribute_interest.includes_class());
+        assert!(preflight.attribute_interest.includes_attribute("data-card"));
         assert!(!preflight.attribute_interest.includes_attribute("href"));
     }
 

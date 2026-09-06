@@ -131,11 +131,8 @@ impl<'a> ElementPredicate<'a> {
         self.matches_element_with_context(other, None)
     }
 
-    pub fn matches_element_with_context<'b, E: IElement<'b>>(
-        &self,
-        other: &E,
-        structural: Option<super::builder::StructuralMatchContext>,
-    ) -> bool {
+    #[inline(always)]
+    fn matches_local_fields<'b, E: IElement<'b>>(&self, other: &E) -> bool {
         if !self.matches_name(other.name()) {
             return false;
         }
@@ -155,11 +152,6 @@ impl<'a> ElementPredicate<'a> {
         }
 
         self.attributes.as_slice().iter().all(|selector_attribute| {
-            // `id` and `class` live in dedicated element fields, not the
-            // generic attribute list, so route `[id]`/`[class]` selectors
-            // there. Attribute names are case-insensitive in HTML. A rare
-            // valueless `id`/`class` that landed in the attribute list is
-            // still matched via the fallback scan.
             if selector_attribute.name.eq_ignore_ascii_case("id") {
                 selector_attribute.matches_field(other.id())
                     || other
@@ -176,41 +168,73 @@ impl<'a> ElementPredicate<'a> {
                 other
                     .attributes()
                     .iter()
-                    .any(|xhtml_attribute| selector_attribute.matches_attribute(xhtml_attribute))
-            }
-        }) && self.logical.as_slice().iter().all(|logical| match logical {
-            super::builder::LocalLogicalPredicate::Not(list) => !list
-                .as_slice()
-                .iter()
-                .any(|predicate| predicate.matches_element(other)),
-            super::builder::LocalLogicalPredicate::Any(list) => list
-                .as_slice()
-                .iter()
-                .any(|predicate| predicate.matches_element(other)),
-        }) && self.structural.as_slice().iter().all(|predicate| {
-            let Some(context) = structural else {
-                return false;
-            };
-            match predicate {
-                super::builder::StructuralPredicate::Root => context.is_root,
-                super::builder::StructuralPredicate::Scope => context.is_root,
-                super::builder::StructuralPredicate::FirstChild => context.child_index == 1,
-                super::builder::StructuralPredicate::NthChild(formula) => {
-                    formula.matches(context.child_index)
-                }
-                super::builder::StructuralPredicate::FirstOfType => context.type_index == 1,
-                super::builder::StructuralPredicate::NthOfType(formula) => {
-                    formula.matches(context.type_index)
-                }
-                super::builder::StructuralPredicate::NthChildOf(formula, filter) => {
-                    let key = filter as *const _ as usize;
-                    let matched_slot =
-                        (0..8).find(|&slot| context.filtered_child_keys[slot] == key);
-                    matched_slot
-                        .is_some_and(|slot| formula.matches(context.filtered_child_indices[slot]))
-                }
+                    .any(|attribute| selector_attribute.matches_attribute(attribute))
             }
         })
+    }
+
+    /// Match the element-local portion of this predicate without structural
+    /// context. Streaming engines may use this for prevalidated local lists.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn matches_local_element_unchecked<'b, E: IElement<'b>>(&self, other: &E) -> bool {
+        self.matches_local_fields(other)
+            && self.logical.as_slice().iter().all(|logical| match logical {
+                super::builder::LocalLogicalPredicate::Not(list) => !list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_local_element_unchecked(other)),
+                super::builder::LocalLogicalPredicate::Any(list) => list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_local_element_unchecked(other)),
+            })
+    }
+
+    #[inline(always)]
+    pub fn matches_element_with_context<'b, E: IElement<'b>>(
+        &self,
+        other: &E,
+        structural: Option<&super::builder::StructuralMatchContext<'_>>,
+    ) -> bool {
+        if structural.is_none() && self.requires_structural() {
+            return false;
+        }
+
+        self.matches_local_fields(other)
+            && self.logical.as_slice().iter().all(|logical| match logical {
+                super::builder::LocalLogicalPredicate::Not(list) => !list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_element_with_context(other, structural)),
+                super::builder::LocalLogicalPredicate::Any(list) => list
+                    .as_slice()
+                    .iter()
+                    .any(|predicate| predicate.matches_element_with_context(other, structural)),
+            })
+            && self.structural.as_slice().iter().all(|predicate| {
+                let Some(context) = structural else {
+                    return false;
+                };
+                match predicate {
+                    super::builder::StructuralPredicate::Root => context.is_root,
+                    super::builder::StructuralPredicate::Scope => context.is_root,
+                    super::builder::StructuralPredicate::FirstChild => context.child_index == 1,
+                    super::builder::StructuralPredicate::NthChild(formula) => {
+                        formula.matches(context.child_index)
+                    }
+                    super::builder::StructuralPredicate::FirstOfType => context.type_index == 1,
+                    super::builder::StructuralPredicate::NthOfType(formula) => {
+                        formula.matches(context.type_index)
+                    }
+                    super::builder::StructuralPredicate::NthChildOf(formula, filter) => context
+                        .filtered_child_indices
+                        .iter()
+                        .any(|&(context_filter, index)| {
+                            std::ptr::eq(context_filter, filter) && formula.matches(index)
+                        }),
+                }
+            })
     }
 }
 
@@ -433,5 +457,55 @@ mod tests {
         assert!(selector_one.matches_element(&element_two));
         assert!(selector_two.matches_element(&element_one));
         assert!(selector_two.matches_element(&element_two));
+    }
+
+    #[test]
+    fn logical_structural_predicates_require_and_use_context() {
+        let structural = ElementPredicate {
+            name: Some("div"),
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from_static(&[]),
+            logical: crate::LogicalPredicates::from_static(&[]),
+            structural: crate::StructuralPredicates::from(vec![
+                crate::StructuralPredicate::FirstChild,
+            ]),
+        };
+        let predicate = ElementPredicate {
+            name: None,
+            id: None,
+            classes: ClassSelections::from_static(&[]),
+            attributes: AttributeSelections::from_static(&[]),
+            logical: crate::LogicalPredicates::from(vec![crate::LocalLogicalPredicate::Any(
+                crate::LocalSelectorList::Owned(vec![structural].into_boxed_slice()),
+            )]),
+            structural: crate::StructuralPredicates::from_static(&[]),
+        };
+        let element = FakeElement {
+            name: "div",
+            id: None,
+            class: None,
+            attributes: &[],
+        };
+
+        assert!(!predicate.matches_element(&element));
+        assert!(predicate.matches_element_with_context(
+            &element,
+            Some(&crate::StructuralMatchContext {
+                child_index: 1,
+                type_index: 1,
+                filtered_child_indices: smallvec::SmallVec::new(),
+                is_root: false,
+            })
+        ));
+        assert!(!predicate.matches_element_with_context(
+            &element,
+            Some(&crate::StructuralMatchContext {
+                child_index: 2,
+                type_index: 1,
+                filtered_child_indices: smallvec::SmallVec::new(),
+                is_root: false,
+            })
+        ));
     }
 }

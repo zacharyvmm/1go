@@ -538,6 +538,7 @@ impl ScopedCursor {
 }
 
 impl<'query> ScopedCursor {
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn next<'html, Q: QuerySpec<'query>>(
         &self,
@@ -549,7 +550,36 @@ impl<'query> ScopedCursor {
             return false;
         }
         let fsm = tree.get_transition(self.position.state);
-        fsm.next(element, depth, self.match_base_depth())
+        fsm.next_local_unchecked(element, depth, self.match_base_depth())
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_with_name_prechecked<'html, Q: QuerySpec<'query>>(
+        &self,
+        tree: &Q,
+        depth: super::DepthSize,
+        element: &XHtmlElement<'html>,
+    ) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        let fsm = tree.get_transition(self.position.state);
+        fsm.next_local_with_name_prechecked(element, depth, self.match_base_depth())
+    }
+
+    #[inline(always)]
+    pub fn next_with_context<'html, Q: QuerySpec<'query>>(
+        &self,
+        tree: &Q,
+        depth: super::DepthSize,
+        element: &XHtmlElement<'html>,
+        structural: Option<&crate::StructuralMatchContext<'query>>,
+    ) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        let fsm = tree.get_transition(self.position.state);
+        fsm.next_with_context(element, depth, self.match_base_depth(), structural)
     }
 
     pub fn get_position(&self) -> &Position {
@@ -571,20 +601,16 @@ impl<'query> ScopedCursor {
         &self,
         tree: &Q,
     ) -> SmallVec<[Position; 4]> {
-        let mut positions = SmallVec::new();
         if let Some(next) = self.position.next_transition(tree) {
+            let mut positions = SmallVec::new();
             positions.push(Position {
                 state: next,
                 selection: self.position.selection,
             });
+            positions
         } else {
-            let mut child = self.position.next_child(tree);
-            while let Some(c) = child {
-                positions.push(c);
-                child = c.next_sibling(tree);
-            }
+            tree.child_positions(&self.position)
         }
-        positions
     }
 }
 

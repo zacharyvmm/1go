@@ -188,7 +188,6 @@ impl<S: AsRef<str>> LazyQueryBuilder<S> {
             } else {
                 Transition::generate_transition_paths_from_string(source)?
             };
-            Query::require_legacy_engine_compatible_paths(&paths)?;
             let mut section_alternatives = Vec::new();
             for mut path in paths {
                 let start = states.len();
@@ -470,17 +469,17 @@ mod tests {
     }
 
     #[test]
-    fn lazy_query_rejects_selector_lists_until_engine_support() {
+    fn lazy_query_accepts_selector_lists_with_engine_support() {
         let result = unsafe { LazyQuery::all("div, span", Save::none()).try_to_query() };
 
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn lazy_query_rejects_structural_selectors_until_engine_support() {
+    fn lazy_query_accepts_structural_selectors_with_engine_support() {
         let result = unsafe { LazyQuery::all("li:nth-child(2)", Save::none()).try_to_query() };
 
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]

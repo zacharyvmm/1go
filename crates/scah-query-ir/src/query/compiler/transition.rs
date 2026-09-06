@@ -47,6 +47,7 @@ pub struct PredicateMetadata<'query> {
     name_hash: u64,
     needs_id: bool,
     needs_class: bool,
+    local_name_only: bool,
     attribute_names: AttributeNames<'query>,
 }
 
@@ -70,6 +71,11 @@ impl<'query> PredicateMetadata<'query> {
             name_hash: name.map_or(0, ascii_case_insensitive_hash),
             needs_id,
             needs_class,
+            local_name_only: predicate.id.is_none()
+                && predicate.classes.as_slice().is_empty()
+                && predicate.attributes.as_slice().is_empty()
+                && predicate.logical.as_slice().is_empty()
+                && predicate.structural.as_slice().is_empty(),
             attribute_names: AttributeNames::Owned(attribute_names.into_boxed_slice()),
         }
     }
@@ -79,6 +85,7 @@ impl<'query> PredicateMetadata<'query> {
         name: Option<&'query str>,
         needs_id: bool,
         needs_class: bool,
+        local_name_only: bool,
         attribute_names: AttributeNames<'query>,
     ) -> Self {
         Self {
@@ -89,6 +96,7 @@ impl<'query> PredicateMetadata<'query> {
             },
             needs_id,
             needs_class,
+            local_name_only,
             attribute_names,
         }
     }
@@ -112,6 +120,14 @@ impl<'query> PredicateMetadata<'query> {
         let needs_id = predicate_needs_id(predicate);
         let needs_class = predicate_needs_class(predicate);
         if self.needs_id != needs_id || self.needs_class != needs_class {
+            return false;
+        }
+        let local_name_only = predicate.id.is_none()
+            && predicate.classes.as_slice().is_empty()
+            && predicate.attributes.as_slice().is_empty()
+            && predicate.logical.as_slice().is_empty()
+            && predicate.structural.as_slice().is_empty();
+        if self.local_name_only != local_name_only {
             return false;
         }
 
@@ -138,6 +154,11 @@ impl<'query> PredicateMetadata<'query> {
     #[inline]
     pub fn needs_class(&self) -> bool {
         self.needs_class
+    }
+
+    #[inline]
+    pub fn local_name_only(&self) -> bool {
+        self.local_name_only
     }
 
     #[inline]
@@ -517,15 +538,57 @@ impl<'query> Transition<'query> {
             "Current depth is smaller than last depth: {current_depth} >= {last_depth}"
         );
 
-        self.next_with_context(element, current_depth, last_depth, None)
+        self.guard.evaluate(last_depth, current_depth) && self.predicate.matches_element(element)
     }
 
+    /// Evaluate a transition whose predicate has already been proven not to
+    /// require structural context.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn next_local_unchecked<'html, E: IElement<'html>>(
+        &self,
+        element: &E,
+        current_depth: u16,
+        last_depth: u16,
+    ) -> bool {
+        assert!(
+            current_depth >= last_depth,
+            "Current depth is smaller than last depth: {current_depth} >= {last_depth}"
+        );
+        self.guard.evaluate(last_depth, current_depth)
+            && if self.metadata.local_name_only() {
+                self.predicate.matches_name(element.name())
+            } else {
+                self.predicate.matches_local_element_unchecked(element)
+            }
+    }
+
+    /// Evaluate a local transition after the caller has already matched the
+    /// only active cursor's element name during parser preflight.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn next_local_with_name_prechecked<'html, E: IElement<'html>>(
+        &self,
+        element: &E,
+        current_depth: u16,
+        last_depth: u16,
+    ) -> bool {
+        assert!(
+            current_depth >= last_depth,
+            "Current depth is smaller than last depth: {current_depth} >= {last_depth}"
+        );
+        self.guard.evaluate(last_depth, current_depth)
+            && (self.metadata.local_name_only()
+                || self.predicate.matches_local_element_unchecked(element))
+    }
+
+    #[inline(always)]
     pub fn next_with_context<'html, E: IElement<'html>>(
         &self,
         element: &E,
         current_depth: u16,
         last_depth: u16,
-        structural: Option<StructuralMatchContext>,
+        structural: Option<&StructuralMatchContext<'_>>,
     ) -> bool {
         assert!(
             current_depth >= last_depth,
@@ -761,8 +824,13 @@ mod tests {
             logical: crate::LogicalPredicates::from_static(&[]),
             structural: crate::StructuralPredicates::from_static(&[]),
         };
-        let metadata =
-            PredicateMetadata::new_const(Some("a"), false, false, AttributeNames::from_static(&[]));
+        let metadata = PredicateMetadata::new_const(
+            Some("a"),
+            false,
+            false,
+            true,
+            AttributeNames::from_static(&[]),
+        );
 
         let _ = Transition::new_const(Combinator::Descendant, predicate, metadata);
     }
@@ -950,5 +1018,35 @@ mod tests {
         assert!(transition.metadata().needs_id());
         assert!(transition.metadata().needs_class());
         assert_eq!(transition.metadata().attribute_names(), &["data-card"]);
+    }
+
+    #[test]
+    fn public_next_requires_context_for_structural_predicates() {
+        let transition = Transition::generate_transitions_from_string("li:first-child")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let element = FakeElement {
+            name: "li",
+            id: None,
+            class: None,
+            attributes: &[],
+        };
+
+        assert!(
+            transition
+                .predicate()
+                .matches_local_element_unchecked(&element)
+        );
+        assert!(!transition.predicate().matches_element(&element));
+        assert!(!transition.next(&element, 1, 0));
+
+        let context = StructuralMatchContext {
+            child_index: 1,
+            type_index: 1,
+            filtered_child_indices: Default::default(),
+            is_root: false,
+        };
+        assert!(transition.next_with_context(&element, 1, 0, Some(&context)));
     }
 }

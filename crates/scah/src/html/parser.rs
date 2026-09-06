@@ -4,17 +4,20 @@ use super::open_elements::{OpenElement, OpenElementStack, SavedElement};
 use super::tag::TagFlags;
 use crate::Attribute;
 use crate::ParseError;
-use crate::QuerySpec;
 use crate::Reader;
+use crate::StructuralMatchContext;
 use crate::XHtmlElement;
 use crate::debug::ImpliedCloseReason;
 #[cfg(any(debug_assertions, test))]
 use crate::debug::TraceEvent;
 use crate::engine::MAX_ELEMENT_DEPTH;
+use crate::engine::attribute_interest::AttributeInterest;
 use crate::engine::multiplexer::{
     DocumentPosition, ElementPreflight, QueryMultiplexer, SaveHit, SiblingCallback,
 };
 use crate::store::Store;
+use crate::{LocalSelectorList, QuerySpec};
+use smallvec::SmallVec;
 
 #[derive(Default)]
 struct ParserTempState<'html, 'query> {
@@ -27,6 +30,103 @@ struct ParserTempState<'html, 'query> {
     preflight: ElementPreflight<'query>,
 
     sibling: Option<Box<SiblingParserState>>,
+    structural: Option<Box<StructuralParserState<'html, 'query>>>,
+}
+
+type TypeCounts<'html> = SmallVec<[(&'html str, u32); 4]>;
+
+struct StructuralParserState<'html, 'query> {
+    child_counts: Option<Vec<u32>>,
+    type_counts: Option<Vec<TypeCounts<'html>>>,
+    tracked_type_names: Option<SmallVec<[&'query str; 4]>>,
+    filters: Vec<(&'query LocalSelectorList<'query>, Vec<u32>)>,
+    attribute_interest: AttributeInterest<'query>,
+    root_seen: bool,
+}
+
+impl<'html, 'query> StructuralParserState<'html, 'query> {
+    fn open(
+        &mut self,
+        name: &'html str,
+        persistent: bool,
+        element: &XHtmlElement<'html>,
+    ) -> StructuralMatchContext<'query> {
+        let is_root = !self.root_seen;
+        self.root_seen = true;
+        let child_index = self.child_counts.as_mut().map_or(0, |counts| {
+            if let Some(count) = counts.last_mut() {
+                *count = count.saturating_add(1);
+                *count
+            } else {
+                1
+            }
+        });
+        let tracks_type = self.tracked_type_names.as_ref().is_none_or(|names| {
+            names
+                .iter()
+                .any(|tracked| tracked.eq_ignore_ascii_case(name))
+        });
+        let type_index = self.type_counts.as_mut().map_or(0, |levels| {
+            if !tracks_type {
+                return 0;
+            }
+            if let Some(counts) = levels.last_mut() {
+                if let Some((_, count)) = counts
+                    .iter_mut()
+                    .find(|(child_name, _)| child_name.eq_ignore_ascii_case(name))
+                {
+                    *count = count.saturating_add(1);
+                    *count
+                } else {
+                    counts.push((name, 1));
+                    1
+                }
+            } else {
+                1
+            }
+        });
+        let mut filtered_child_indices = SmallVec::new();
+        for (filter, counts) in &mut self.filters {
+            if filter
+                .as_slice()
+                .iter()
+                .any(|predicate| predicate.matches_local_element_unchecked(element))
+            {
+                let parent_count = counts.last_mut().expect("filter parent count");
+                *parent_count = parent_count.saturating_add(1);
+                filtered_child_indices.push((*filter, *parent_count));
+            }
+        }
+        if persistent {
+            if let Some(counts) = &mut self.child_counts {
+                counts.push(0);
+            }
+            if let Some(counts) = &mut self.type_counts {
+                counts.push(SmallVec::new());
+            }
+            for (_, counts) in &mut self.filters {
+                counts.push(0);
+            }
+        }
+        StructuralMatchContext {
+            child_index,
+            type_index,
+            filtered_child_indices,
+            is_root,
+        }
+    }
+
+    fn close(&mut self) {
+        if let Some(counts) = &mut self.child_counts {
+            counts.pop();
+        }
+        if let Some(counts) = &mut self.type_counts {
+            counts.pop();
+        }
+        for (_, counts) in &mut self.filters {
+            counts.pop();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -93,7 +193,14 @@ where
         let capture_text_content = selectors.requires_text_content();
         let persist_attributes = selectors.requires_attribute_storage();
         let parse_attributes = selectors.requires_attribute_parsing();
-        let has_sibling_queries = selectors.features().has_sibling_queries;
+        let features = selectors.features();
+        let has_sibling_queries = features.has_sibling_queries;
+        let structural_filters = selectors.structural_filters();
+        let tracked_type_names = features
+            .needs_type_ordinals
+            .then(|| selectors.type_ordinal_names())
+            .flatten();
+        let structural_attribute_interest = selectors.structural_attribute_interest();
         let store = capacity.map_or_else(Store::default, |capacity| {
             Store::with_capacity_requirements(
                 capacity,
@@ -117,6 +224,21 @@ where
             open_elements: OpenElementStack::default(),
             temp_state: ParserTempState {
                 sibling: has_sibling_queries.then(Box::default),
+                structural: features.has_structural_queries.then(|| {
+                    Box::new(StructuralParserState {
+                        // Keep a virtual document parent so fragment roots
+                        // participate in ordinal selectors consistently.
+                        child_counts: features.needs_child_ordinals.then(|| vec![0]),
+                        type_counts: features.needs_type_ordinals.then(|| vec![SmallVec::new()]),
+                        tracked_type_names,
+                        filters: structural_filters
+                            .into_iter()
+                            .map(|filter| (filter, vec![0]))
+                            .collect(),
+                        attribute_interest: structural_attribute_interest.unwrap_or_default(),
+                        root_seen: false,
+                    })
+                }),
                 ..ParserTempState::default()
             },
             capture_text_content,
@@ -146,11 +268,20 @@ where
         }
         self.indexer.prepare(reader.source());
         let features = self.selectors.features();
-        match (features.has_sibling_queries, features.has_retiring_runners) {
-            (false, false) => self.next_mode::<false, false>(reader),
-            (false, true) => self.next_retiring(reader),
-            (true, false) => self.next_with_siblings(reader),
-            (true, true) => self.next_with_siblings_retiring(reader),
+        let extended = features.has_structural_queries || features.has_selector_lists;
+        match (
+            features.has_sibling_queries,
+            features.has_retiring_runners,
+            extended,
+        ) {
+            (false, false, false) => self.next_mode::<false, false, false>(reader),
+            (false, false, true) => self.next_mode::<false, false, true>(reader),
+            (false, true, false) => self.next_mode::<false, true, false>(reader),
+            (false, true, true) => self.next_mode::<false, true, true>(reader),
+            (true, false, false) => self.next_mode::<true, false, false>(reader),
+            (true, false, true) => self.next_mode::<true, false, true>(reader),
+            (true, true, false) => self.next_mode::<true, true, false>(reader),
+            (true, true, true) => self.next_mode::<true, true, true>(reader),
         }
     }
 
@@ -163,50 +294,25 @@ where
         // the Reader and may step a different source between calls.
         self.indexer.prepare(reader.source());
         let features = self.selectors.features();
-        match (features.has_sibling_queries, features.has_retiring_runners) {
-            (false, false) => while self.next_mode::<false, false>(reader) {},
-            (false, true) => self.run_retiring(reader),
-            (true, false) => self.run_with_siblings(reader),
-            (true, true) => self.run_with_siblings_retiring(reader),
+        let extended = features.has_structural_queries || features.has_selector_lists;
+        match (
+            features.has_sibling_queries,
+            features.has_retiring_runners,
+            extended,
+        ) {
+            (false, false, false) => while self.next_mode::<false, false, false>(reader) {},
+            (false, false, true) => while self.next_mode::<false, false, true>(reader) {},
+            (false, true, false) => while self.next_mode::<false, true, false>(reader) {},
+            (false, true, true) => while self.next_mode::<false, true, true>(reader) {},
+            (true, false, false) => while self.next_mode::<true, false, false>(reader) {},
+            (true, false, true) => while self.next_mode::<true, false, true>(reader) {},
+            (true, true, false) => while self.next_mode::<true, true, false>(reader) {},
+            (true, true, true) => while self.next_mode::<true, true, true>(reader) {},
         }
     }
 
-    #[inline(never)]
-    fn next_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
-        self.next_mode::<false, true>(reader)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn next_with_siblings(&mut self, reader: &mut Reader<'html>) -> bool {
-        self.next_mode::<true, false>(reader)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn next_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) -> bool {
-        self.next_mode::<true, true>(reader)
-    }
-
-    #[inline(never)]
-    fn run_retiring(&mut self, reader: &mut Reader<'html>) {
-        while self.next_mode::<false, true>(reader) {}
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn run_with_siblings(&mut self, reader: &mut Reader<'html>) {
-        while self.next_mode::<true, false>(reader) {}
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn run_with_siblings_retiring(&mut self, reader: &mut Reader<'html>) {
-        while self.next_mode::<true, true>(reader) {}
-    }
-
     #[inline(always)]
-    fn next_mode<const SIBLINGS: bool, const RETIREMENT: bool>(
+    fn next_mode<const SIBLINGS: bool, const RETIREMENT: bool, const EXTENDED: bool>(
         &mut self,
         reader: &mut Reader<'html>,
     ) -> bool {
@@ -301,10 +407,19 @@ where
                         }
                     }
 
-                    self.selectors.prepare_element::<SIBLINGS, RETIREMENT>(
-                        name,
-                        &mut self.temp_state.preflight,
-                    );
+                    if EXTENDED && let Some(structural) = self.temp_state.structural.as_ref() {
+                        self.selectors
+                            .prepare_element_with_structural_interest::<SIBLINGS, RETIREMENT>(
+                                name,
+                                &mut self.temp_state.preflight,
+                                &structural.attribute_interest,
+                            );
+                    } else {
+                        self.selectors.prepare_element::<SIBLINGS, RETIREMENT>(
+                            name,
+                            &mut self.temp_state.preflight,
+                        );
+                    }
                     let end = if !self.temp_state.preflight.attribute_interest.is_empty() {
                         #[cfg(test)]
                         {
@@ -394,6 +509,14 @@ where
                     }
                     self.position.element_depth = self.open_elements.depth();
                 }
+                let structural = if EXTENDED {
+                    self.temp_state
+                        .structural
+                        .as_deref_mut()
+                        .map(|state| state.open(self.element.name, !is_self_closing, &self.element))
+                } else {
+                    None
+                };
 
                 crate::scah_trace!(
                     self.store,
@@ -415,22 +538,45 @@ where
                     let sibling = sibling
                         .as_deref_mut()
                         .expect("sibling parser state requires sibling queries");
-                    self.selectors.next_with_siblings_into(
-                        &self.element,
-                        &self.position,
-                        &mut self.store,
-                        save_hits,
-                        preflight,
-                        &mut sibling.pending,
-                    );
+                    if EXTENDED {
+                        self.selectors.next_with_siblings_into_with_context(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            save_hits,
+                            preflight,
+                            &mut sibling.pending,
+                            structural.as_ref(),
+                        );
+                    } else {
+                        self.selectors.next_with_siblings_into(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            save_hits,
+                            preflight,
+                            &mut sibling.pending,
+                        );
+                    }
                 } else {
-                    self.selectors.next_plain_into(
-                        &self.element,
-                        &self.position,
-                        &mut self.store,
-                        &mut self.temp_state.save_hits,
-                        &self.temp_state.preflight,
-                    );
+                    if EXTENDED {
+                        self.selectors.next_plain_into_with_context(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            &mut self.temp_state.save_hits,
+                            &self.temp_state.preflight,
+                            structural.as_ref(),
+                        );
+                    } else {
+                        self.selectors.next_plain_into(
+                            &self.element,
+                            &self.position,
+                            &mut self.store,
+                            &mut self.temp_state.save_hits,
+                            &self.temp_state.preflight,
+                        );
+                    }
                 }
                 if self.persist_attributes {
                     let attributes_saved = match self.temp_state.save_hits.as_slice() {
@@ -548,6 +694,9 @@ where
         let saved_range = OpenElementStack::saved_range(&open_element);
         debug_assert_eq!(saved_range.end, self.temp_state.saved_elements.len());
         self.finalize_open_element(&open_element, reader);
+        if let Some(structural) = self.temp_state.structural.as_deref_mut() {
+            structural.close();
+        }
         self.temp_state.saved_elements.truncate(saved_range.start);
         self.position.element_depth = close_depth;
         let early_exit = self.selectors.back::<RETIREMENT>(
@@ -838,7 +987,7 @@ mod tests {
         let mut forced_sibling = XHtmlParser::new(QueryMultiplexer::new(&queries));
         forced_sibling.temp_state.sibling = Some(Box::default());
         let mut sibling_reader = Reader::new(html);
-        while forced_sibling.next_mode::<true, false>(&mut sibling_reader) {}
+        while forced_sibling.next_mode::<true, false, false>(&mut sibling_reader) {}
 
         assert_eq!(forced_sibling.finish(), plain.finish());
     }
@@ -2050,6 +2199,28 @@ mod tests {
         let anchor = store.get("main a").unwrap().next().unwrap();
         assert_eq!(anchor.attribute(&store, "href"), Some("/kept"));
         assert_eq!(anchor.attribute(&store, "rel"), Some("next"));
+    }
+
+    #[test]
+    fn structural_queries_preserve_selective_attribute_parsing() {
+        let html = concat!(
+            "<main data-unused='root'>",
+            "<ul data-unused='list'><li data-unused='item'></li></ul>",
+            "<a href='/kept' data-unused='link'></a>",
+            "</main>"
+        );
+        let queries = [
+            Query::all("li:first-child", Save::none()).unwrap().build(),
+            Query::all("a[href]", Save::none()).unwrap().build(),
+        ];
+        let mut reader = Reader::new(html);
+        let mut parser = XHtmlParser::new(QueryMultiplexer::new(&queries));
+
+        while parser.next(&mut reader) {}
+
+        // The structural candidate and the href candidate need attributes.
+        // Unrelated ancestors remain on the name-only path.
+        assert_eq!(parser.attribute_parse_count, 2);
     }
 
     #[test]
