@@ -169,6 +169,8 @@ mod tests {
                 id: Some("main"),
                 classes: ClassSelections::from_static(&["hero"]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             }
         );
     }
@@ -187,7 +189,9 @@ mod tests {
                 name: Some("element"),
                 id: Some("id"),
                 classes: ClassSelections::from_static(&["class"]),
-                attributes: AttributeSelections::from_static(&[])
+                attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             }
         );
 
@@ -200,6 +204,8 @@ mod tests {
                 id: Some("other_id"),
                 classes: ClassSelections::from_static(&["other_class"]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             }
         );
     }
@@ -228,6 +234,8 @@ mod tests {
                 id: None,
                 classes: ClassSelections::from_static(&["highlight"]),
                 attributes: AttributeSelections::from_static(&[]),
+                logical: crate::LogicalPredicates::from_static(&[]),
+                structural: crate::StructuralPredicates::from_static(&[]),
             }
         );
     }

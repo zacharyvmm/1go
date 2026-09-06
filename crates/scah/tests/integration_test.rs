@@ -310,6 +310,23 @@ fn test_macro_static_query() {
 }
 
 #[test]
+fn test_macro_static_query_with_nested_attributes() {
+    let not_query = query! {
+        all("div:not([hidden])", Save::none())
+    };
+    let alternatives_query = query! {
+        all("div:is([data-x=a], [data-x=b])", Save::none())
+    };
+
+    assert_eq!(not_query.states().len(), 1);
+    assert_eq!(alternatives_query.states().len(), 1);
+    assert_eq!(
+        alternatives_query.states()[0].metadata().attribute_names(),
+        &["data-x"]
+    );
+}
+
+#[test]
 fn test_macro_query_matches_runtime_query_structure() {
     let static_query = query! {
         all("main > section", Save::all()) => {

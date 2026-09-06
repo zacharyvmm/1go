@@ -2,8 +2,9 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use scah_query_ir::{
-    AttributeSelectionKind, Combinator, ElementPredicate, Query, QueryBuilder, QuerySection, Save,
-    SelectionKind, Transition,
+    AttributeCaseSensitivity, AttributeSelectionKind, Combinator, ElementPredicate,
+    LocalLogicalPredicate, Query, QueryBuilder, QuerySection, Save, SelectionKind,
+    StructuralPredicate, Transition,
 };
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, LitByte, LitStr, Result, Token, braced, bracketed, parenthesized};
@@ -349,13 +350,10 @@ fn parse_save_expr(expr: &Expr) -> Result<Save> {
 }
 
 fn compile_node<'a>(node: &'a QueryNode) -> Result<QueryBuilder<'a>> {
+    let selector = Box::leak(node.selector.value().into_boxed_str());
     let mut builder = match node.kind {
-        SelectionKind::All => {
-            Query::all(Box::leak(node.selector.value().into_boxed_str()), node.save)
-        }
-        SelectionKind::First => {
-            Query::first(Box::leak(node.selector.value().into_boxed_str()), node.save)
-        }
+        SelectionKind::All => Query::all(selector, node.save),
+        SelectionKind::First => Query::first(selector, node.save),
     }
     .map_err(|err| syn::Error::new(node.selector.span(), err.to_string()))?;
 
@@ -397,6 +395,14 @@ fn expand_query(node: &QueryNode) -> Result<proc_macro2::TokenStream> {
         .enumerate()
         .map(|(index, transition)| transition_tokens(index, transition));
     let sections = compiled.queries.iter().map(query_section_tokens);
+    let alternatives = compiled.alternatives.iter().map(|ranges| {
+        let ranges = ranges.iter().map(|range| {
+            let start = range.start.index();
+            let end = range.end.index();
+            quote! { ::std::ops::Range { start: ::scah::TransitionId(#start), end: ::scah::TransitionId(#end) } }
+        });
+        quote! { const { &[#(#ranges),*] } }
+    });
     let num_states = compiled.states.len();
     let num_sections = compiled.queries.len();
     let exit = option_query_section_id_tokens(compiled.exit_at_section_end);
@@ -410,6 +416,7 @@ fn expand_query(node: &QueryNode) -> Result<proc_macro2::TokenStream> {
                 [#(#states),*],
                 [#(#sections),*],
                 #exit,
+                const { &[#(#alternatives),*] },
             )
         }
     })
@@ -485,14 +492,100 @@ fn predicate_tokens(index: usize, predicate: &ElementPredicate<'_>) -> proc_macr
     let id = option_str_tokens(predicate.id);
     let classes_ident = syn::Ident::new(&format!("__SCAH_CLASSES_{index}"), Span::call_site());
     let attrs_ident = syn::Ident::new(&format!("__SCAH_ATTRS_{index}"), Span::call_site());
+    let logical = logical_tokens(&predicate.logical);
+    let structural = structural_tokens(&predicate.structural);
     quote! {
         ::scah::ElementPredicate::new_const(
             #name,
             #id,
             ::scah::ClassSelections::from_static(#classes_ident),
             ::scah::AttributeSelections::from_static(#attrs_ident),
+            #logical,
+            #structural,
         )
     }
+}
+
+fn logical_tokens(logical: &scah_query_ir::LogicalPredicates<'_>) -> proc_macro2::TokenStream {
+    let predicates = logical.as_slice().iter().map(|predicate| {
+        let (variant, selectors) = match predicate {
+            LocalLogicalPredicate::Not(selectors) => ("Not", selectors),
+            LocalLogicalPredicate::Any(selectors) => ("Any", selectors),
+        };
+        let selector_tokens = selectors.as_slice().iter().map(inline_predicate_tokens);
+        let variant_ident = syn::Ident::new(variant, Span::call_site());
+        quote! {
+            ::scah::LocalLogicalPredicate::#variant_ident(
+                ::scah::LocalSelectorList::from_static(const { &[#(#selector_tokens),*] })
+            )
+        }
+    });
+    quote! { ::scah::LogicalPredicates::from_static(const { &[#(#predicates),*] }) }
+}
+
+fn inline_predicate_tokens(predicate: &ElementPredicate<'_>) -> proc_macro2::TokenStream {
+    let name = option_str_tokens(predicate.name);
+    let id = option_str_tokens(predicate.id);
+    let classes = predicate.classes.as_slice().iter();
+    let attrs = predicate
+        .attributes
+        .as_slice()
+        .iter()
+        .map(attribute_selection_tokens);
+    let logical = logical_tokens(&predicate.logical);
+    let structural = structural_tokens(&predicate.structural);
+    quote! {
+        const {
+            const __SCAH_CLASSES: &[&'static str] = &[#(#classes),*];
+            const __SCAH_ATTRS: &[::scah::AttributeSelection<'static>] = &[#(#attrs),*];
+            ::scah::ElementPredicate::new_const(
+                #name,
+                #id,
+                ::scah::ClassSelections::from_static(__SCAH_CLASSES),
+                ::scah::AttributeSelections::from_static(__SCAH_ATTRS),
+                #logical,
+                #structural,
+            )
+        }
+    }
+}
+
+fn structural_tokens(structural: &scah_query_ir::StructuralPredicates) -> proc_macro2::TokenStream {
+    let predicates = structural
+        .as_slice()
+        .iter()
+        .map(|predicate| match predicate {
+            StructuralPredicate::Root => quote! { ::scah::StructuralPredicate::Root },
+            StructuralPredicate::Scope => quote! { ::scah::StructuralPredicate::Scope },
+            StructuralPredicate::FirstChild => quote! { ::scah::StructuralPredicate::FirstChild },
+            StructuralPredicate::FirstOfType => quote! { ::scah::StructuralPredicate::FirstOfType },
+            StructuralPredicate::NthChild(formula) => {
+                let a = formula.a;
+                let b = formula.b;
+                quote! { ::scah::StructuralPredicate::NthChild(::scah::AnPlusB { a: #a, b: #b }) }
+            }
+            StructuralPredicate::NthOfType(formula) => {
+                let a = formula.a;
+                let b = formula.b;
+                quote! { ::scah::StructuralPredicate::NthOfType(::scah::AnPlusB { a: #a, b: #b }) }
+            }
+            StructuralPredicate::NthChildOf(formula, filter) => {
+                let a = formula.a;
+                let b = formula.b;
+                let filter = filter
+                    .as_slice()
+                    .iter()
+                    .map(inline_predicate_tokens)
+                    .collect::<Vec<_>>();
+                quote! {
+                    ::scah::StructuralPredicate::NthChildOf(
+                        ::scah::AnPlusB { a: #a, b: #b },
+                        ::scah::LocalSelectorList::from_static(const { &[#(#filter),*] }),
+                    )
+                }
+            }
+        });
+    quote! { ::scah::StructuralPredicates::from_static(const { &[#(#predicates),*] }) }
 }
 
 fn attribute_selection_tokens(
@@ -501,8 +594,17 @@ fn attribute_selection_tokens(
     let name = attribute.name;
     let value = option_str_tokens(attribute.value);
     let kind = attribute_selection_kind_tokens(&attribute.kind);
+    let case_sensitivity = match attribute.case_sensitivity {
+        AttributeCaseSensitivity::Default => quote! { ::scah::AttributeCaseSensitivity::Default },
+        AttributeCaseSensitivity::AsciiInsensitive => {
+            quote! { ::scah::AttributeCaseSensitivity::AsciiInsensitive }
+        }
+        AttributeCaseSensitivity::Sensitive => {
+            quote! { ::scah::AttributeCaseSensitivity::Sensitive }
+        }
+    };
     quote! {
-        ::scah::AttributeSelection::new_const(#name, #value, #kind)
+        ::scah::AttributeSelection::new_const(#name, #value, #kind, #case_sensitivity)
     }
 }
 

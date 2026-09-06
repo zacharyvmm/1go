@@ -115,10 +115,12 @@ pub use html::parser::XHtmlParser;
 pub use scah_macros::query;
 pub use scah_query_ir::lazy;
 pub use scah_query_ir::{
-    Attribute, AttributeSelection, AttributeSelectionKind, AttributeSelections, ClassSelections,
-    Combinator, ElementPredicate, IElement, Position, Query, QueryBuilder, QueryFactory,
-    QuerySection, QuerySectionId, QuerySpec, Save, SelectionKind, SelectorParseError, StaticQuery,
-    Transition, TransitionId,
+    AnPlusB, Attribute, AttributeCaseSensitivity, AttributeSelection, AttributeSelectionKind,
+    AttributeSelections, ClassSelections, Combinator, ElementPredicate, IElement,
+    LocalLogicalPredicate, LocalSelectorList, LogicalPredicates, Position, Query, QueryBuilder,
+    QueryFactory, QuerySection, QuerySectionId, QuerySpec, Save, SelectionKind, SelectorParseError,
+    StaticQuery, StructuralMatchContext, StructuralPredicate, StructuralPredicates, Transition,
+    TransitionId,
 };
 pub use scah_reader::Reader;
 pub use store::{CapacityOptions, Element, ElementId, Store};
