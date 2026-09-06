@@ -4,6 +4,8 @@ This follow-up passes all eight unchanged performance limits in the native x86 c
 
 Branch: `perf/text-performance-experiment`. The comparison baseline is [PR #68 at c4fff2a](https://github.com/zacharyvmm/scah/commit/c4fff2a82549401a0fce7686d6f99f9aff5fb9cb). The fixed main baseline remains [7847d18](https://github.com/zacharyvmm/scah/commit/7847d18684d647916506d29328fa47414f2a978a). The [measurement record](text-experiment-2026-09-06.json) contains individual rounds and measured source hashes. The [first experiment](text-experiment-2026-09-05.md) records the earlier optimizations separately.
 
+The [subsequent trials](text-experiment-2026-09-06-trials.md) were not retained; the implementation measured here remains the published baseline.
+
 ## Changes
 
 - Derive a small entity-search index at compile time and search only names with the same initial byte.
