@@ -150,6 +150,50 @@ pub struct QueryBuilder<'query> {
 }
 
 impl<'query> QueryBuilder<'query> {
+    fn scope_root(&mut self) {
+        let removed = self.alternatives[0]
+            .iter()
+            .filter_map(|range| {
+                if range.end.index() - range.start.index() <= 1 {
+                    return None;
+                }
+                let predicate = self.states[range.start.index()].predicate();
+                let structural = predicate.structural.as_slice();
+                (structural.len() == 1
+                    && matches!(structural[0], crate::StructuralPredicate::Scope)
+                    && predicate.name.is_none()
+                    && predicate.id.is_none()
+                    && predicate.classes.as_slice().is_empty()
+                    && predicate.attributes.as_slice().is_empty()
+                    && predicate.logical.as_slice().is_empty())
+                .then_some(range.start.index())
+            })
+            .collect::<Vec<_>>();
+        if removed.is_empty() {
+            return;
+        }
+
+        let shift = |index: usize| removed.partition_point(|removed| *removed < index);
+        self.states = self
+            .states
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, state)| (!removed.contains(&index)).then_some(state))
+            .collect();
+        for ranges in &mut self.alternatives {
+            for range in ranges {
+                range.start = TransitionId(range.start.index() - shift(range.start.index()));
+                range.end = TransitionId(range.end.index() - shift(range.end.index()));
+            }
+        }
+        for section in &mut self.selection {
+            section.range.start =
+                TransitionId(section.range.start.index() - shift(section.range.start.index()));
+            section.range.end =
+                TransitionId(section.range.end.index() - shift(section.range.end.index()));
+        }
+    }
+
     pub fn all(mut self, query: &'query str, save: Save) -> Result<Self, SelectorParseError> {
         assert!(!self.selection.is_empty());
 
@@ -220,6 +264,7 @@ impl<'query> QueryBuilder<'query> {
     /// Enables early-exit optimisation for this branch of the query tree.
     ///
     pub fn append(&mut self, parent: QuerySectionId, mut other: Self) {
+        other.scope_root();
         let state_length = self.states.len();
         let selection_length = self.selection.len();
 
